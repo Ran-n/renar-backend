@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import notifier
 from .config import settings
 from .routers import (
-    auth, comments, images, media, notifications, social, stats, tmdb,
+    auth, comments, images, media, notifications, social, stats, tmdb, upcoming,
 )
 
 # Schema is managed by Alembic — run `alembic upgrade head` before starting.
@@ -38,6 +38,7 @@ app.include_router(social.router)
 app.include_router(comments.router)
 app.include_router(notifications.router)
 app.include_router(images.router)
+app.include_router(upcoming.router)
 
 
 @app.get("/health")

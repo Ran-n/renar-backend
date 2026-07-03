@@ -216,6 +216,34 @@ def image_proxy(size: str, filename: str):
                     headers={"Cache-Control": "public, max-age=86400"})
 
 
+@router.get("/credits")
+def credits_tmdb(
+    media_type: str = Query(pattern="^(film|tv_show)$"),
+    tmdb_id: int = Query(ge=1),
+    user: User = Depends(get_current_user),
+):
+    kind = TMDB_KIND[media_type]
+    data = _tmdb_get(f"/{kind}/{tmdb_id}/credits")
+    cast = [
+        {
+            "name": c["name"],
+            "character": c.get("character") or "",
+            "profile_url": f"{IMAGE_BASE}/w185{c['profile_path']}"
+            if c.get("profile_path") else None,
+        }
+        for c in data.get("cast", [])[:12]
+    ]
+    if media_type == "film":
+        directors = [c["name"] for c in data.get("crew", [])
+                     if c.get("job") == "Director"]
+        role = "Directed by"
+    else:
+        details = _tmdb_get(f"/tv/{tmdb_id}")
+        directors = [p["name"] for p in details.get("created_by", [])]
+        role = "Created by"
+    return {"cast": cast, "directors": directors[:4], "director_role": role}
+
+
 @router.get("/season")
 def season_tmdb(
     tmdb_id: int = Query(ge=1),
