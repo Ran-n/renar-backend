@@ -7,6 +7,7 @@ import time
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 
 from ..auth import get_current_user
 from ..config import settings
@@ -15,13 +16,20 @@ from ..models import User
 router = APIRouter(prefix="/tmdb", tags=["tmdb"])
 
 TMDB_BASE = "https://api.themoviedb.org/3"
-POSTER_BASE = "https://image.tmdb.org/t/p/w342"
+IMAGE_BASE = "https://image.tmdb.org/t/p"
+POSTER_BASE = f"{IMAGE_BASE}/w342"
 
 # our media_type -> TMDB path segment
 TMDB_KIND = {"film": "movie", "tv_show": "tv"}
 
 CACHE_TTL_SECONDS = 30 * 60
 _cache: dict[tuple, tuple[float, dict]] = {}
+
+# one pooled client: reusing connections to TMDB saves a TLS handshake per call
+_http = httpx.Client(
+    timeout=15,
+    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+)
 
 
 def _tmdb_get(path: str, params: dict | None = None, cache: bool = True) -> dict:
@@ -46,8 +54,7 @@ def _tmdb_get(path: str, params: dict | None = None, cache: bool = True) -> dict
         params["api_key"] = settings.tmdb_api_key
 
     try:
-        with httpx.Client(timeout=10) as client:
-            resp = client.get(f"{TMDB_BASE}{path}", params=params, headers=headers)
+        resp = _http.get(f"{TMDB_BASE}{path}", params=params, headers=headers)
     except httpx.HTTPError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB"
@@ -161,6 +168,49 @@ def details_tmdb(
         "genres": ", ".join(g["name"] for g in data.get("genres", []))[:300] or None,
         "seasons": seasons,
     }
+
+
+ALLOWED_IMAGE_SIZES = {"w92", "w154", "w185", "w342", "w500", "w780", "original"}
+IMAGE_TTL_SECONDS = 24 * 3600
+_image_cache: dict[str, tuple[float, bytes, str]] = {}
+
+
+@router.get("/image/{size}/{filename}")
+def image_proxy(size: str, filename: str):
+    """Serve TMDB posters from our origin.
+
+    Browsers sometimes cannot load image.tmdb.org directly (ISP blocks,
+    filtering extensions), and <img> tags cannot send auth headers — so this
+    endpoint is public but restricted to TMDB poster files only.
+    """
+    if (
+        size not in ALLOWED_IMAGE_SIZES
+        or "/" in filename or "\\" in filename or ".." in filename
+        or not filename.endswith((".jpg", ".jpeg", ".png", ".webp"))
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    key = f"{size}/{filename}"
+    now = time.time()
+    hit = _image_cache.get(key)
+    if hit and hit[0] > now:
+        return Response(hit[1], media_type=hit[2],
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+    try:
+        resp = _http.get(f"{IMAGE_BASE}/{size}/{filename}")
+    except httpx.HTTPError:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail="Could not reach TMDB images")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    ctype = resp.headers.get("content-type", "image/jpeg")
+    if len(_image_cache) > 1000:  # crude but sufficient eviction
+        _image_cache.clear()
+    _image_cache[key] = (now + IMAGE_TTL_SECONDS, resp.content, ctype)
+    return Response(resp.content, media_type=ctype,
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.get("/season")
