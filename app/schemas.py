@@ -45,6 +45,7 @@ class MediaItemBase(BaseModel):
     current_season: int | None = Field(default=None, ge=0)
     current_episode: int | None = Field(default=None, ge=0)
     episodes_watched: int = Field(default=0, ge=0)
+    is_favorite: bool = False
 
 
 class MediaItemCreate(MediaItemBase):
@@ -66,6 +67,7 @@ class MediaItemUpdate(BaseModel):
     current_season: int | None = Field(default=None, ge=0)
     current_episode: int | None = Field(default=None, ge=0)
     episodes_watched: int | None = Field(default=None, ge=0)
+    is_favorite: bool | None = None
 
 
 class MediaItemOut(MediaItemBase):
@@ -74,3 +76,25 @@ class MediaItemOut(MediaItemBase):
     id: int
     created_at: datetime
     updated_at: datetime
+
+
+# ---------- episodes ----------
+
+class EpisodeSet(BaseModel):
+    watched: bool = True
+    rating: int | None = Field(default=None, ge=1, le=10)
+
+
+class EpisodeBulk(BaseModel):
+    season: int = Field(ge=0)
+    episodes: list[int] = Field(min_length=1, max_length=500)
+    watched: bool = True
+
+
+# ---------- comments ----------
+
+class CommentCreate(BaseModel):
+    media_type: MediaType
+    tmdb_id: int | None = None
+    title: str | None = Field(default=None, max_length=300)
+    text: str = Field(min_length=1, max_length=2000)

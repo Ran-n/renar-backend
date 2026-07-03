@@ -1,4 +1,10 @@
-"""Proxy against TMDB so the API key never reaches clients."""
+"""Proxy against TMDB so the API key never reaches clients.
+
+Read-only TMDB responses are cached in memory (30 min TTL) to keep the
+Explore feeds and season lists fast and to stay well inside rate limits.
+"""
+import time
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -14,14 +20,24 @@ POSTER_BASE = "https://image.tmdb.org/t/p/w342"
 # our media_type -> TMDB path segment
 TMDB_KIND = {"film": "movie", "tv_show": "tv"}
 
+CACHE_TTL_SECONDS = 30 * 60
+_cache: dict[tuple, tuple[float, dict]] = {}
 
-def _tmdb_get(path: str, params: dict | None = None) -> dict:
+
+def _tmdb_get(path: str, params: dict | None = None, cache: bool = True) -> dict:
     if not settings.tmdb_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="TMDB is not configured — set TMDB_API_KEY in the backend .env",
         )
     params = dict(params or {})
+
+    cache_key = (path, tuple(sorted(params.items())))
+    if cache:
+        hit = _cache.get(cache_key)
+        if hit and hit[0] > time.time():
+            return hit[1]
+
     headers = {}
     # v4 read access tokens are JWTs sent as Bearer; v3 keys go in the query string
     if settings.tmdb_api_key.startswith("eyJ"):
@@ -47,7 +63,11 @@ def _tmdb_get(path: str, params: dict | None = None) -> dict:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"TMDB error {resp.status_code}",
         )
-    return resp.json()
+
+    data = resp.json()
+    if cache:
+        _cache[cache_key] = (time.time() + CACHE_TTL_SECONDS, data)
+    return data
 
 
 def _map_results(raw: list[dict], limit: int = 20) -> list[dict]:
@@ -98,8 +118,7 @@ def popular_tmdb(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     user: User = Depends(get_current_user),
 ):
-    kind = TMDB_KIND[media_type]
-    data = _tmdb_get(f"/{kind}/popular")
+    data = _tmdb_get(f"/{TMDB_KIND[media_type]}/popular")
     return _map_results(data.get("results", []))
 
 
@@ -109,9 +128,9 @@ def details_tmdb(
     tmdb_id: int = Query(ge=1),
     user: User = Depends(get_current_user),
 ):
-    kind = TMDB_KIND[media_type]
-    data = _tmdb_get(f"/{kind}/{tmdb_id}")
+    data = _tmdb_get(f"/{TMDB_KIND[media_type]}/{tmdb_id}")
 
+    seasons = None
     if media_type == "film":
         runtime = data.get("runtime") or None
         total_episodes = None
@@ -124,6 +143,15 @@ def details_tmdb(
             runtime = last_ep.get("runtime") or None
         total_episodes = data.get("number_of_episodes")
         total_seasons = data.get("number_of_seasons")
+        seasons = [
+            {
+                "season": s["season_number"],
+                "name": s.get("name") or f"Season {s['season_number']}",
+                "episode_count": s.get("episode_count") or 0,
+            }
+            for s in data.get("seasons", [])
+            if s.get("season_number", 0) > 0  # skip "Specials"
+        ]
 
     return {
         "tmdb_id": tmdb_id,
@@ -131,4 +159,24 @@ def details_tmdb(
         "total_episodes": total_episodes,
         "total_seasons": total_seasons,
         "genres": ", ".join(g["name"] for g in data.get("genres", []))[:300] or None,
+        "seasons": seasons,
     }
+
+
+@router.get("/season")
+def season_tmdb(
+    tmdb_id: int = Query(ge=1),
+    season_number: int = Query(ge=0),
+    user: User = Depends(get_current_user),
+):
+    data = _tmdb_get(f"/tv/{tmdb_id}/season/{season_number}")
+    return [
+        {
+            "season": season_number,
+            "episode": e["episode_number"],
+            "name": e.get("name") or f"Episode {e['episode_number']}",
+            "air_date": e.get("air_date"),
+            "runtime": e.get("runtime"),
+        }
+        for e in data.get("episodes", [])
+    ]

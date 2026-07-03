@@ -26,10 +26,13 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
     shows_completed = 0
     shows_watching = 0
     youtube_watched = 0
+    favorites = 0
     genre_counter: Counter[str] = Counter()
     ratings: list[int] = []
 
     for item in items:
+        if item.is_favorite:
+            favorites += 1
         if item.rating:
             ratings.append(item.rating)
         if item.genres:
@@ -65,6 +68,7 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         "shows_watching": shows_watching,
         "youtube_watched": youtube_watched,
         "total_items": len(items),
+        "favorites": favorites,
         "avg_rating": round(sum(ratings) / len(ratings), 1) if ratings else None,
         "by_status": dict(by_status),
         "by_type": dict(by_type),

@@ -32,7 +32,17 @@ API docs: http://127.0.0.1:8000/docs
   https://www.themoviedb.org/settings/api — v3 key or v4 read token both work)
 - `GET /tmdb/trending?media_type=...` / `GET /tmdb/popular?media_type=...` — Explore feeds
 - `GET /tmdb/details?media_type=...&tmdb_id=...` — runtime, episode count, genres
-- `GET /stats` — watch time, films/episodes watched, shows completed, top genres
+- `GET /tmdb/season?tmdb_id=...&season_number=...` — episode list for a season
+- `GET /stats` — watch time, films/episodes watched, shows completed, favorites, top genres
+- `GET/PUT/POST /media/{id}/episodes...` — per-episode watched/rating tracking
+  (`PUT .../episodes/{season}/{episode}`, `POST .../episodes/bulk`); responses include
+  overall grade, episode average and combined score
+- `GET /users/search`, `GET /users/{id}[/followers|/following|/media]`,
+  `POST/DELETE /users/{id}/follow`, `GET /feed` — social graph and activity feed
+- `GET/POST /comments`, `DELETE /comments/{id}`, `POST/DELETE /comments/{id}/like` —
+  comments (global per title via TMDB id) with likes
+
+TMDB responses are cached in memory for 30 minutes.
 
 ## Notes
 
