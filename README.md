@@ -14,7 +14,18 @@ copy .env.example .env   # then edit SECRET_KEY
 ## Run
 
 ```powershell
+alembic upgrade head       # apply database migrations (first run and after every pull)
 uvicorn app.main:app --reload
+```
+
+## Changing the schema
+
+Edit `app/models.py`, then:
+
+```powershell
+alembic revision --autogenerate -m "describe the change"
+# review the generated file in alembic/versions/ before applying!
+alembic upgrade head
 ```
 
 API docs: http://127.0.0.1:8000/docs
@@ -47,4 +58,5 @@ TMDB responses are cached in memory for 30 minutes.
 ## Notes
 
 - SQLite by default (`xoutaim.db`); set `DATABASE_URL` in `.env` for Postgres.
-- Tables are auto-created on startup. Introduce Alembic before changing models in production.
+- Schema is owned by Alembic (`alembic/versions/`); the app no longer creates tables itself.
+  Migrations run in batch mode so ALTERs work on SQLite too.

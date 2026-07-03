@@ -2,10 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .database import Base, engine
 from .routers import auth, comments, media, social, stats, tmdb
 
-Base.metadata.create_all(bind=engine)
+# Schema is managed by Alembic — run `alembic upgrade head` before starting.
 
 app = FastAPI(title="Xoutaim API", version="0.1.0")
 
