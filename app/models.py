@@ -128,6 +128,31 @@ class Comment(Base):
     )
 
 
+class Notification(Base):
+    """In-app notification, e.g. a new episode of a tracked show aired."""
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "media_item_id", "season", "episode", "kind",
+            name="uq_notification_event",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    media_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("media_items.id"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(30), default="new_episode")
+    title: Mapped[str] = mapped_column(String(300))
+    body: Mapped[str] = mapped_column(String(500))
+    season: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class CommentLike(Base):
     __tablename__ = "comment_likes"
     __table_args__ = (

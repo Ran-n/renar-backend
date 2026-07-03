@@ -53,7 +53,14 @@ API docs: http://127.0.0.1:8000/docs
 - `GET/POST /comments`, `DELETE /comments/{id}`, `POST/DELETE /comments/{id}/like` —
   comments (global per title via TMDB id) with likes
 
+- `GET /notifications` (+ `/unread_count`, `POST /{id}/read`, `POST /read_all`,
+  `DELETE /{id}`, `POST /check_now`) — new-episode notifications for tracked shows
+
 TMDB responses are cached in memory for 30 minutes.
+
+A background task checks every `EPISODE_CHECK_MINUTES` (default 360) whether any
+tracked show aired a new episode in the last 7 days, and creates a notification
+per user — skipping episodes the user already marked watched.
 
 ## Notes
 
