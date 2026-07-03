@@ -26,6 +26,21 @@ class WatchStatus(str, enum.Enum):
     dropped = "dropped"
 
 
+class Image(Base):
+    """Content-addressed stored file: one row per unique blake3 hash.
+
+    The actual bytes live on disk as <images_dir>/<hash>.jpg; multiple users
+    with the same picture share one row and one file.
+    """
+
+    __tablename__ = "images"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -33,12 +48,20 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
-    avatar: Mapped[str | None] = mapped_column(Text, nullable=True)  # base64 jpeg, 256px
+    avatar_id: Mapped[int | None] = mapped_column(
+        ForeignKey("images.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+    avatar_image: Mapped[Image | None] = relationship()
     media_items: Mapped[list["MediaItem"]] = relationship(
         back_populates="owner", cascade="all, delete-orphan"
     )
+
+    @property
+    def avatar(self) -> str | None:
+        """URL path the frontend can fetch, e.g. /images/<hash>."""
+        return f"/images/{self.avatar_image.hash}" if self.avatar_image else None
 
 
 class MediaItem(Base):
