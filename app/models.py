@@ -33,6 +33,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    avatar: Mapped[str | None] = mapped_column(Text, nullable=True)  # base64 jpeg, 256px
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     media_items: Mapped[list["MediaItem"]] = relationship(

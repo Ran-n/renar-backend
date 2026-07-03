@@ -19,6 +19,7 @@ class UserOut(BaseModel):
     id: int
     username: str
     email: EmailStr
+    avatar: str | None = None
     created_at: datetime
 
 
@@ -30,6 +31,12 @@ class Token(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class ProfileUpdate(BaseModel):
+    username: str | None = Field(default=None, min_length=3, max_length=50)
+    email: EmailStr | None = None
+    avatar_b64: str | None = Field(default=None, max_length=8_000_000)  # raw upload, re-encoded server-side
 
 
 # ---------- media ----------

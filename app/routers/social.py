@@ -30,6 +30,7 @@ def _public_user(target: User, me: User, db: Session) -> dict:
     return {
         "id": target.id,
         "username": target.username,
+        "avatar": target.avatar,
         "created_at": target.created_at,
         "followers": db.query(Follow).filter(Follow.followed_id == target.id).count(),
         "following": db.query(Follow).filter(Follow.follower_id == target.id).count(),

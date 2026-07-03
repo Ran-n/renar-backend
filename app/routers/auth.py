@@ -1,12 +1,34 @@
+import base64
+import io
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
+from PIL import Image
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..auth import create_access_token, get_current_user, hash_password, verify_password
 from ..database import get_db
 from ..models import Comment, CommentLike, Follow, Notification, User
-from ..schemas import PasswordChange, Token, UserCreate, UserOut
+from ..schemas import PasswordChange, ProfileUpdate, Token, UserCreate, UserOut
+
+AVATAR_SIZE = 256
+
+
+def _process_avatar(avatar_b64: str) -> str:
+    """Decode, downscale to 256px JPEG, and re-encode as base64."""
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(avatar_b64)))
+        img = img.convert("RGB")
+        img.thumbnail((AVATAR_SIZE, AVATAR_SIZE))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        return base64.b64encode(out.getvalue()).decode()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Could not read that image file",
+        )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -49,6 +71,29 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 @router.get("/me", response_model=UserOut)
 def me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.patch("/profile", response_model=UserOut)
+def update_profile(
+    data: ProfileUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if data.username and data.username != user.username:
+        if db.query(User).filter(User.username == data.username).first():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="Username already taken")
+        user.username = data.username
+    if data.email and data.email != user.email:
+        if db.query(User).filter(User.email == data.email).first():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="Email already taken")
+        user.email = data.email
+    if data.avatar_b64 is not None:
+        user.avatar = _process_avatar(data.avatar_b64) if data.avatar_b64 else None
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 @router.post("/change_password", status_code=status.HTTP_204_NO_CONTENT)

@@ -166,6 +166,7 @@ def details_tmdb(
         "total_episodes": total_episodes,
         "total_seasons": total_seasons,
         "genres": ", ".join(g["name"] for g in data.get("genres", []))[:300] or None,
+        "poster_url": f"{POSTER_BASE}{data['poster_path']}" if data.get("poster_path") else None,
         "seasons": seasons,
     }
 
