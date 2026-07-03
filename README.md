@@ -47,7 +47,7 @@ API docs: http://127.0.0.1:8000/docs
 - `GET /auth/me` — current user; `DELETE /auth/me` — delete account (cleans up all data)
 - `POST /auth/change_password` — change password
 - `GET /media` — list your items (filters: `media_type`, `status_filter`, `search`)
-- `POST /media` — save a film / tv_show / youtube item
+- `POST /media` — save a film / tv_show / book / youtube item
 - `GET /media/{id}` / `PATCH /media/{id}` / `DELETE /media/{id}`
 - `GET /tmdb/search?query=...&media_type=film|tv_show` — TMDB proxy for auto-filling
   titles, years and posters (requires `TMDB_API_KEY` in `.env`; free key from
