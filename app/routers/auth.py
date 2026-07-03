@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session
 
 from ..auth import create_access_token, get_current_user, hash_password, verify_password
 from ..database import get_db
-from ..models import User
-from ..schemas import Token, UserCreate, UserOut
+from ..models import Comment, CommentLike, Follow, Notification, User
+from ..schemas import PasswordChange, Token, UserCreate, UserOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -49,3 +49,43 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 @router.get("/me", response_model=UserOut)
 def me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.post("/change_password", status_code=status.HTTP_204_NO_CONTENT)
+def change_password(
+    data: PasswordChange,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not verify_password(data.current_password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect",
+        )
+    user.password_hash = hash_password(data.new_password)
+    db.commit()
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+def delete_account(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    # social artifacts don't cascade from User — clean them up explicitly
+    my_comment_ids = [c.id for c in db.query(Comment.id).filter(Comment.user_id == user.id)]
+    likes = db.query(CommentLike).filter(CommentLike.user_id == user.id)
+    if my_comment_ids:
+        likes = db.query(CommentLike).filter(
+            or_(CommentLike.user_id == user.id,
+                CommentLike.comment_id.in_(my_comment_ids))
+        )
+    likes.delete(synchronize_session=False)
+    db.query(Comment).filter(Comment.user_id == user.id).delete(synchronize_session=False)
+    db.query(Follow).filter(
+        or_(Follow.follower_id == user.id, Follow.followed_id == user.id)
+    ).delete(synchronize_session=False)
+    db.query(Notification).filter(Notification.user_id == user.id).delete(
+        synchronize_session=False
+    )
+    db.delete(user)  # media items + episode watches cascade via the ORM relationship
+    db.commit()

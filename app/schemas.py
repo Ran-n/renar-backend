@@ -27,6 +27,11 @@ class Token(BaseModel):
     token_type: str = "bearer"
 
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 # ---------- media ----------
 
 class MediaItemBase(BaseModel):

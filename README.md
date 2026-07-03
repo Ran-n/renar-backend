@@ -34,7 +34,8 @@ API docs: http://127.0.0.1:8000/docs
 
 - `POST /auth/register` — create account
 - `POST /auth/login` — get JWT token (form fields: username, password; username also accepts email)
-- `GET /auth/me` — current user
+- `GET /auth/me` — current user; `DELETE /auth/me` — delete account (cleans up all data)
+- `POST /auth/change_password` — change password
 - `GET /media` — list your items (filters: `media_type`, `status_filter`, `search`)
 - `POST /media` — save a film / tv_show / youtube item
 - `GET /media/{id}` / `PATCH /media/{id}` / `DELETE /media/{id}`
