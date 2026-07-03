@@ -2,20 +2,19 @@
 
 FastAPI backend for Xoutaim — save and track films, TV shows and YouTube videos.
 
-## Setup
+## Setup (uses [uv](https://docs.astral.sh/uv/))
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+uv venv .venv
+uv pip install -r requirements.txt
 copy .env.example .env   # then edit SECRET_KEY
 ```
 
 ## Run
 
 ```powershell
-alembic upgrade head       # apply database migrations (first run and after every pull)
-uvicorn app.main:app --reload
+uv run alembic upgrade head   # apply database migrations (first run and after every pull)
+uv run uvicorn app.main:app --reload
 ```
 
 ## Changing the schema
@@ -23,9 +22,9 @@ uvicorn app.main:app --reload
 Edit `app/models.py`, then:
 
 ```powershell
-alembic revision --autogenerate -m "describe the change"
+uv run alembic revision --autogenerate -m "describe the change"
 # review the generated file in alembic/versions/ before applying!
-alembic upgrade head
+uv run alembic upgrade head
 ```
 
 API docs: http://127.0.0.1:8000/docs
