@@ -1,0 +1,22 @@
+# Local HTTPS for Xoutaim via Caddy's built-in CA.
+#
+# Run:  caddy run --config deploy/Caddyfile
+#
+#   https://localhost:8443  -> Flet frontend (the app; websockets proxied too)
+#   https://localhost:8444  -> FastAPI backend (API docs at /docs)
+#
+# On first run Caddy creates a local root certificate and asks Windows to
+# trust it (accept the security dialog once; after that no browser warnings).
+
+{
+	local_certs
+	skip_install_trust false
+}
+
+https://localhost:8443 {
+	reverse_proxy 127.0.0.1:8550
+}
+
+https://localhost:8444 {
+	reverse_proxy 127.0.0.1:8000
+}

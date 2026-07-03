@@ -17,6 +17,22 @@ uv run alembic upgrade head   # apply database migrations (first run and after e
 uv run uvicorn app.main:app --reload
 ```
 
+## HTTPS (local)
+
+A Caddy reverse proxy provides local TLS with an auto-generated CA:
+
+```powershell
+caddy run --config deploy/Caddyfile
+```
+
+- App: https://localhost:8443 (proxies the Flet frontend, websockets included)
+- API: https://localhost:8444 (docs at /docs)
+
+First time only: accept the Windows dialog that asks to trust the
+"Caddy Local Authority" root certificate — after that, no browser warnings.
+The frontend keeps talking to the backend over loopback HTTP internally;
+the browser only ever sees the TLS endpoints.
+
 ## Changing the schema
 
 Edit `app/models.py`, then:
