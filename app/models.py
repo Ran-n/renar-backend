@@ -56,9 +56,15 @@ class MediaItem(Base):
     )
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1-10
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # TMDB metadata (used for stats)
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    runtime_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)  # film total / tv per-episode
+    total_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    genres: Mapped[str | None] = mapped_column(String(300), nullable=True)  # comma-separated
     # TV-show progress
     current_season: Mapped[int | None] = mapped_column(Integer, nullable=True)
     current_episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episodes_watched: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

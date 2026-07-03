@@ -38,8 +38,13 @@ class MediaItemBase(BaseModel):
     status: WatchStatus = WatchStatus.want_to_watch
     rating: int | None = Field(default=None, ge=1, le=10)
     notes: str | None = None
+    tmdb_id: int | None = None
+    runtime_minutes: int | None = Field(default=None, ge=0)
+    total_episodes: int | None = Field(default=None, ge=0)
+    genres: str | None = Field(default=None, max_length=300)
     current_season: int | None = Field(default=None, ge=0)
     current_episode: int | None = Field(default=None, ge=0)
+    episodes_watched: int = Field(default=0, ge=0)
 
 
 class MediaItemCreate(MediaItemBase):
@@ -54,8 +59,13 @@ class MediaItemUpdate(BaseModel):
     status: WatchStatus | None = None
     rating: int | None = Field(default=None, ge=1, le=10)
     notes: str | None = None
+    tmdb_id: int | None = None
+    runtime_minutes: int | None = Field(default=None, ge=0)
+    total_episodes: int | None = Field(default=None, ge=0)
+    genres: str | None = Field(default=None, max_length=300)
     current_season: int | None = Field(default=None, ge=0)
     current_episode: int | None = Field(default=None, ge=0)
+    episodes_watched: int | None = Field(default=None, ge=0)
 
 
 class MediaItemOut(MediaItemBase):

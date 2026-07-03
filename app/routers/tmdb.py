@@ -1,4 +1,4 @@
-"""Proxy search against TMDB so the API key never reaches clients."""
+"""Proxy against TMDB so the API key never reaches clients."""
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -11,22 +11,17 @@ router = APIRouter(prefix="/tmdb", tags=["tmdb"])
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER_BASE = "https://image.tmdb.org/t/p/w342"
 
-SEARCH_PATHS = {"film": "/search/movie", "tv_show": "/search/tv"}
+# our media_type -> TMDB path segment
+TMDB_KIND = {"film": "movie", "tv_show": "tv"}
 
 
-@router.get("/search")
-def search_tmdb(
-    query: str = Query(min_length=1, max_length=200),
-    media_type: str = Query(pattern="^(film|tv_show)$"),
-    user: User = Depends(get_current_user),
-):
+def _tmdb_get(path: str, params: dict | None = None) -> dict:
     if not settings.tmdb_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="TMDB is not configured — set TMDB_API_KEY in the backend .env",
         )
-
-    params: dict = {"query": query, "include_adult": "false"}
+    params = dict(params or {})
     headers = {}
     # v4 read access tokens are JWTs sent as Bearer; v3 keys go in the query string
     if settings.tmdb_api_key.startswith("eyJ"):
@@ -36,9 +31,7 @@ def search_tmdb(
 
     try:
         with httpx.Client(timeout=10) as client:
-            resp = client.get(
-                f"{TMDB_BASE}{SEARCH_PATHS[media_type]}", params=params, headers=headers
-            )
+            resp = client.get(f"{TMDB_BASE}{path}", params=params, headers=headers)
     except httpx.HTTPError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB"
@@ -47,14 +40,19 @@ def search_tmdb(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="TMDB rejected the API key"
         )
+    if resp.status_code == 404:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found on TMDB")
     if resp.status_code != 200:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"TMDB error {resp.status_code}",
         )
+    return resp.json()
 
+
+def _map_results(raw: list[dict], limit: int = 20) -> list[dict]:
     results = []
-    for r in resp.json().get("results", [])[:10]:
+    for r in raw[:limit]:
         # movies use title/release_date, tv uses name/first_air_date
         title = r.get("title") or r.get("name")
         date = r.get("release_date") or r.get("first_air_date") or ""
@@ -67,6 +65,70 @@ def search_tmdb(
                 "year": int(date[:4]) if len(date) >= 4 and date[:4].isdigit() else None,
                 "poster_url": f"{POSTER_BASE}{r['poster_path']}" if r.get("poster_path") else None,
                 "overview": (r.get("overview") or "")[:300],
+                "vote_average": round(r.get("vote_average") or 0, 1),
             }
         )
     return results
+
+
+@router.get("/search")
+def search_tmdb(
+    query: str = Query(min_length=1, max_length=200),
+    media_type: str = Query(pattern="^(film|tv_show)$"),
+    user: User = Depends(get_current_user),
+):
+    data = _tmdb_get(
+        f"/search/{TMDB_KIND[media_type]}",
+        {"query": query, "include_adult": "false"},
+    )
+    return _map_results(data.get("results", []), limit=10)
+
+
+@router.get("/trending")
+def trending_tmdb(
+    media_type: str = Query(pattern="^(film|tv_show)$"),
+    user: User = Depends(get_current_user),
+):
+    data = _tmdb_get(f"/trending/{TMDB_KIND[media_type]}/week")
+    return _map_results(data.get("results", []))
+
+
+@router.get("/popular")
+def popular_tmdb(
+    media_type: str = Query(pattern="^(film|tv_show)$"),
+    user: User = Depends(get_current_user),
+):
+    kind = TMDB_KIND[media_type]
+    data = _tmdb_get(f"/{kind}/popular")
+    return _map_results(data.get("results", []))
+
+
+@router.get("/details")
+def details_tmdb(
+    media_type: str = Query(pattern="^(film|tv_show)$"),
+    tmdb_id: int = Query(ge=1),
+    user: User = Depends(get_current_user),
+):
+    kind = TMDB_KIND[media_type]
+    data = _tmdb_get(f"/{kind}/{tmdb_id}")
+
+    if media_type == "film":
+        runtime = data.get("runtime") or None
+        total_episodes = None
+        total_seasons = None
+    else:
+        run_times = data.get("episode_run_time") or []
+        runtime = round(sum(run_times) / len(run_times)) if run_times else None
+        if runtime is None:
+            last_ep = data.get("last_episode_to_air") or {}
+            runtime = last_ep.get("runtime") or None
+        total_episodes = data.get("number_of_episodes")
+        total_seasons = data.get("number_of_seasons")
+
+    return {
+        "tmdb_id": tmdb_id,
+        "runtime_minutes": runtime,
+        "total_episodes": total_episodes,
+        "total_seasons": total_seasons,
+        "genres": ", ".join(g["name"] for g in data.get("genres", []))[:300] or None,
+    }

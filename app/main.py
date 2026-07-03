@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import Base, engine
-from .routers import auth, media, tmdb
+from .routers import auth, media, stats, tmdb
 
 Base.metadata.create_all(bind=engine)
 
@@ -20,6 +20,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(media.router)
 app.include_router(tmdb.router)
+app.include_router(stats.router)
 
 
 @app.get("/health")

@@ -30,6 +30,9 @@ API docs: http://127.0.0.1:8000/docs
 - `GET /tmdb/search?query=...&media_type=film|tv_show` — TMDB proxy for auto-filling
   titles, years and posters (requires `TMDB_API_KEY` in `.env`; free key from
   https://www.themoviedb.org/settings/api — v3 key or v4 read token both work)
+- `GET /tmdb/trending?media_type=...` / `GET /tmdb/popular?media_type=...` — Explore feeds
+- `GET /tmdb/details?media_type=...&tmdb_id=...` — runtime, episode count, genres
+- `GET /stats` — watch time, films/episodes watched, shows completed, top genres
 
 ## Notes
 
