@@ -58,6 +58,8 @@ class MediaItemBase(BaseModel):
     current_episode: int | None = Field(default=None, ge=0)
     episodes_watched: int = Field(default=0, ge=0)
     is_favorite: bool = False
+    author: str | None = Field(default=None, max_length=300)
+    page_count: int | None = Field(default=None, ge=0)
 
 
 class MediaItemCreate(MediaItemBase):
@@ -80,6 +82,8 @@ class MediaItemUpdate(BaseModel):
     current_episode: int | None = Field(default=None, ge=0)
     episodes_watched: int | None = Field(default=None, ge=0)
     is_favorite: bool | None = None
+    author: str | None = Field(default=None, max_length=300)
+    page_count: int | None = Field(default=None, ge=0)
 
 
 class MediaItemOut(MediaItemBase):

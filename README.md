@@ -17,21 +17,16 @@ uv run alembic upgrade head   # apply database migrations (first run and after e
 uv run uvicorn app.main:app --reload
 ```
 
-## HTTPS (local)
+## HTTPS
 
-A Caddy reverse proxy provides local TLS with an auto-generated CA:
+Local development runs over plain HTTP (traffic never leaves the machine /
+home network). For TLS, uvicorn supports it natively — no proxy needed:
 
 ```powershell
-caddy run --config deploy/Caddyfile
+uv run uvicorn app.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem
 ```
 
-- App: https://localhost:8443 (proxies the Flet frontend, websockets included)
-- API: https://localhost:8444 (docs at /docs)
-
-First time only: accept the Windows dialog that asks to trust the
-"Caddy Local Authority" root certificate — after that, no browser warnings.
-The frontend keeps talking to the backend over loopback HTTP internally;
-the browser only ever sees the TLS endpoints.
+A public deployment should get certificates from the platform or Let's Encrypt.
 
 ## Changing the schema
 

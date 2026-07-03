@@ -17,6 +17,7 @@ class MediaType(str, enum.Enum):
     film = "film"
     tv_show = "tv_show"
     youtube = "youtube"
+    book = "book"
 
 
 class WatchStatus(str, enum.Enum):
@@ -91,6 +92,9 @@ class MediaItem(Base):
     current_season: Mapped[int | None] = mapped_column(Integer, nullable=True)
     current_episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
     episodes_watched: Mapped[int] = mapped_column(Integer, default=0)
+    # books
+    author: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
