@@ -5,8 +5,7 @@ FastAPI backend for Xoutaim — save and track films, TV shows and YouTube video
 ## Setup (uses [uv](https://docs.astral.sh/uv/))
 
 ```powershell
-uv venv .venv
-uv pip install -r requirements.txt
+uv sync
 copy .env.example .env   # then edit SECRET_KEY
 ```
 
@@ -14,7 +13,7 @@ copy .env.example .env   # then edit SECRET_KEY
 
 ```powershell
 uv run alembic upgrade head   # apply database migrations (first run and after every pull)
-uv run uvicorn app.main:app --reload
+uv run uvicorn xoutaim_backend.main:app --reload
 ```
 
 ## HTTPS
@@ -23,14 +22,14 @@ Local development runs over plain HTTP (traffic never leaves the machine /
 home network). For TLS, uvicorn supports it natively — no proxy needed:
 
 ```powershell
-uv run uvicorn app.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem
+uv run uvicorn xoutaim_backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem
 ```
 
 A public deployment should get certificates from the platform or Let's Encrypt.
 
 ## Changing the schema
 
-Edit `app/models.py`, then:
+Edit `src/xoutaim_backend/models.py`, then:
 
 ```powershell
 uv run alembic revision --autogenerate -m "describe the change"
@@ -55,6 +54,10 @@ API docs: http://127.0.0.1:8000/docs
 - `GET /tmdb/trending?media_type=...` / `GET /tmdb/popular?media_type=...` — Explore feeds
 - `GET /tmdb/details?media_type=...&tmdb_id=...` — runtime, episode count, genres
 - `GET /tmdb/season?tmdb_id=...&season_number=...` — episode list for a season
+- `GET /books/search?query=...` — Open Library proxy for auto-filling title, author,
+  year, page count and cover (free, no API key)
+- `GET /books/trending` — Open Library daily trending feed
+- `GET /books/cover/{cover_id}` — cached/redirect-safe cover image proxy
 - `GET /stats` — watch time, films/episodes watched, shows completed, favorites, top genres
 - `GET/PUT/POST /media/{id}/episodes...` — per-episode watched/rating tracking
   (`PUT .../episodes/{season}/{episode}`, `POST .../episodes/bulk`); responses include
@@ -67,7 +70,7 @@ API docs: http://127.0.0.1:8000/docs
 - `GET /notifications` (+ `/unread_count`, `POST /{id}/read`, `POST /read_all`,
   `DELETE /{id}`, `POST /check_now`) — new-episode notifications for tracked shows
 
-TMDB responses are cached in memory for 30 minutes.
+TMDB and Open Library responses are cached in memory for 30 minutes; book covers for 24 hours.
 
 A background task checks every `EPISODE_CHECK_MINUTES` (default 360) whether any
 tracked show aired a new episode in the last 7 days, and creates a notification
@@ -78,3 +81,7 @@ per user — skipping episodes the user already marked watched.
 - SQLite by default (`xoutaim.db`); set `DATABASE_URL` in `.env` for Postgres.
 - Schema is owned by Alembic (`alembic/versions/`); the app no longer creates tables itself.
   Migrations run in batch mode so ALTERs work on SQLite too.
+
+## License
+
+[PayBack License (PBL)](LICENSE)

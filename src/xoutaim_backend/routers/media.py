@@ -120,10 +120,12 @@ def _ratings_summary(item: MediaItem, db: Session) -> dict:
         .all()
     ]
     episode_avg = round(sum(ep_ratings) / len(ep_ratings), 1) if ep_ratings else None
-    if item.rating and episode_avg:
-        combined = round((item.rating + episode_avg) / 2, 1)
-    else:
-        combined = item.rating or episode_avg
+    all_episodes_rated = bool(item.total_episodes) and len(ep_ratings) >= item.total_episodes
+    combined = (
+        round((item.rating + episode_avg) / 2, 1)
+        if item.rating and episode_avg and all_episodes_rated
+        else None
+    )
     return {
         "overall_rating": item.rating,
         "episode_avg": episode_avg,
