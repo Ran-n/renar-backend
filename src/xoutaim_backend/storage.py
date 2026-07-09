@@ -1,4 +1,10 @@
-"""Content-addressed file store.
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/07 13:25:16.395889
+Revised: 2026/07/07 13:25:16.395889
+
+Content-addressed file store.
 
 Layout (git-style two-level fan-out, so no directory grows unbounded):
 
@@ -11,6 +17,8 @@ Layout (git-style two-level fan-out, so no directory grows unbounded):
 A file's name is the blake3 hash of its bytes; identical content is stored
 exactly once and shared by every row that references it.
 """
+
+import logging
 from pathlib import Path
 
 import blake3
@@ -18,6 +26,8 @@ import blake3
 from .config import settings
 
 IMAGES_ROOT = Path(settings.media_dir) / "images"
+
+_log = logging.getLogger(__name__)
 
 
 def hash_bytes(data: bytes) -> str:
@@ -43,7 +53,10 @@ def delete_image(hash_: str) -> None:
     path = image_path(hash_)
     try:
         path.unlink()
+    except FileNotFoundError:
+        return  # already gone — nothing to prune either
     except OSError:
+        _log.warning("could not delete image file %s", path, exc_info=True)
         return
     for parent in (path.parent, path.parent.parent):
         try:

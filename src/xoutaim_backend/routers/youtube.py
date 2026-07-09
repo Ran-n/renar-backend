@@ -1,4 +1,12 @@
-"""Resolve YouTube URLs to title/channel/thumbnail via oEmbed (no API key)."""
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/07 13:25:16.124960
+Revised: 2026/07/07 13:25:16.124960
+
+Resolve YouTube URLs to title/channel/thumbnail via oEmbed (no API key).
+"""
+
 import re
 
 import httpx
@@ -11,9 +19,7 @@ router = APIRouter(prefix="/youtube", tags=["youtube"])
 
 _http = httpx.Client(timeout=10)
 
-YT_URL_RE = re.compile(
-    r"(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})"
-)
+YT_URL_RE = re.compile(r"(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})")
 
 
 @router.get("/resolve")
@@ -23,22 +29,19 @@ def resolve_youtube(
 ):
     match = YT_URL_RE.search(url)
     if not match:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail="That does not look like a YouTube video URL")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="That does not look like a YouTube video URL"
+        )
     video_id = match.group(1)
     canonical = f"https://www.youtube.com/watch?v={video_id}"
     try:
-        resp = _http.get("https://www.youtube.com/oembed",
-                         params={"url": canonical, "format": "json"})
-    except httpx.HTTPError:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail="Could not reach YouTube")
+        resp = _http.get("https://www.youtube.com/oembed", params={"url": canonical, "format": "json"})
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach YouTube") from exc
     if resp.status_code == 404:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Video not found (private or deleted?)")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found (private or deleted?)")
     if resp.status_code != 200:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail=f"YouTube error {resp.status_code}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"YouTube error {resp.status_code}")
     data = resp.json()
     return {
         "url": canonical,

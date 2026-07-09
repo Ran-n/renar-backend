@@ -1,0 +1,142 @@
+[//]: # ( ---------------------------------------------------------------------- )
+[//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
+[//]: # (+ Created: 	2026/07/09 08:05:52.135465 )
+[//]: # (+ Revised: 	2026/07/09 08:05:52.135465 )
+[//]: # ( ---------------------------------------------------------------------- )
+
+# Anti-abuse system
+
+Implemented in `src/xoutaim_backend/security.py`, wired in as middleware in
+`main.py`. This exists because the API is exposed to the open internet and
+attracts constant scanner/bot traffic, while still needing to never punish a
+real user. Everything below is tuned around one rule: **many legitimate users
+can share one IP** (an office, a mobile carrier's CGNAT pool), so the default
+response to too much traffic is always a throttle, not a ban. Bans are
+reserved for behavior no legitimate client can produce by accident.
+
+State is all in-memory (a single dict/deque per tracker), which matches a
+single-process deployment — restarting clears temporary bans, and a scanner
+re-earns them within seconds. Permanent bans are the exception: they're
+persisted in the `banned_ips` table so they survive a restart. If this ever
+scales to multiple workers/processes, this state needs to move to Redis or
+similar so all workers see the same counters.
+
+## The five layers
+
+### 1. Honeypot paths — instant, permanent ban
+
+`HONEYPOT_PATHS` / `HONEYPOT_PREFIXES` in `security.py` list URLs no real
+client of this API would ever request: `/.env`, `/wp-login.php`,
+`/.aws/credentials`, `/phpmyadmin`, `/.git/config`, etc. Requesting one of
+these is a scanner fingerprinting the server, full stop — zero false-positive
+risk. One hit permabans the IP (`permaban()`), persisted to the `banned_ips`
+table, and returns a plain `404` so the scanner doesn't learn it hit a trap.
+Review or lift these bans at `<ADMIN_PATH>/bans`.
+
+`robots.txt` advertises `Disallow: /internal/` specifically as bait: well-
+behaved crawlers respect it and move on, while scanners that scrape
+`robots.txt` looking for "hidden" paths walk straight into the honeypot.
+
+If you rename the admin panel via `ADMIN_PATH` (recommended), the *default*
+`/admin` location automatically becomes a honeypot too, since nothing
+legitimate should ever hit it once it's been moved.
+
+### 2. Probe detection — repeated 404s on nonexistent routes
+
+Scanners map an API by requesting many different paths and seeing what
+sticks. `_matches_no_route()` checks whether a request's path matches *no
+registered route at all* — a real client hitting a 404 for a deleted item or
+a stale link, or a 405 on a route that exists, never counts. Only genuinely
+unknown paths accumulate in `probe_hits`. Hit `PROBE_BAN_THRESHOLD` (default
+12) unknown paths within `PROBE_WINDOW_MINUTES` (default 10) and the IP gets
+a temporary ban.
+
+Requests carrying a valid signed session token are exempt from this counter
+entirely — the reasoning is that a real, identifiable user (e.g. an app
+version calling an endpoint that's since been removed) must never get banned
+for it, since forging that token is infeasible without `SECRET_KEY`.
+
+### 3. Rate limiting — throttle first, ban only for floods
+
+Every counted request (i.e. not `/health` or `/robots.txt`, which must never
+eat into a client's budget) increments a per-IP counter with a 1-minute
+window:
+
+- Over `RATE_LIMIT_PER_MINUTE` (default 600): `429` + `Retry-After`. This is
+  the normal response to "busy office/app user", not an attack signal.
+- Over `FLOOD_BAN_PER_MINUTE` (default 2000): an unambiguous flood — nothing
+  legitimate sends 2000 req/min from one IP — earns a temporary ban.
+
+`/auth/login` and `/auth/register` get an additional, tighter per-IP budget
+(`AUTH_RATE_LIMIT_PER_MINUTE`, default 30/min) since each request there is a
+credential guess or account creation. Registration also has an hourly cap
+per IP (`REGISTER_PER_HOUR_PER_IP`, default 20/hour) to blunt bulk
+signups.
+
+Temporary bans escalate: the duration is `BAN_MINUTES * 2^(offense count - 1)`,
+capped at 24 hours, and the offense count resets if the IP has behaved for
+24 hours since its last one. So a first offense is a short ban; a repeat
+scanner gets progressively longer bans automatically.
+
+### 4. Per-account login backoff
+
+This one lives in `check_login_allowed()` / `note_login_failure()`, called
+directly from the `/auth/login` endpoint rather than the middleware, because
+only the endpoint knows which *account* was targeted and whether the attempt
+succeeded. Two independent trackers:
+
+- **Per (account, IP)**: `LOGIN_BACKOFF_THRESHOLD` (default 5) failures locks
+  that specific account+IP combination out for `LOGIN_BACKOFF_MINUTES`
+  (default 15) — stops one source from brute-forcing one account.
+- **Per account, across all IPs**: `LOGIN_BACKOFF_ACCOUNT_THRESHOLD` (default
+  30) failures locks the account out regardless of source IP — blunts
+  distributed credential stuffing (many IPs, one target account) without
+  letting a griefer lock a victim out by spraying a handful of failures from
+  one IP.
+
+A successful login clears both trackers for that account immediately.
+
+### 5. Repeat-offender strikes — persisted escalation to a permaban
+
+Every temporary ban from layers 2–3 (probe detection, flood limiting) also
+records a strike in the `strikes` table: one row per IP, upserted, so the
+table is bounded by distinct offenders rather than request volume. A day
+with no new offense resets that IP's streak back to a count of 1.
+
+Because strikes are persisted (not in-memory like the counters above), an
+offender who waits out a restart doesn't get a clean slate — `count` and
+the active `banned_until` are reloaded from the DB on startup. Once `count`
+reaches `STRIKE_BAN_THRESHOLD` (default 5), the next offense converts the
+temporary ban into a permanent one (same mechanism as the honeypot bans in
+layer 1). Rows untouched for 30 days are pruned automatically so the table
+doesn't grow unbounded from one-off offenders. Manage strikes/permabans
+from `<ADMIN_PATH>/bans`.
+
+## Supporting middleware (not rate limiting, but same file's territory)
+
+- **`SecurityHeadersMiddleware`** — sets baseline hardening headers
+  (`X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`,
+  HSTS) on every response, plus a `Content-Security-Policy`: the strict
+  `default-src 'none'` for the JSON API, or a relaxed self+inline-script/style
+  policy scoped to `ADMIN_PATH` since that panel is server-rendered HTML.
+- **`OriginCheckMiddleware`** — rejects cross-site browser requests (mismatched
+  `Origin` header) on unsafe methods (`POST`/`PUT`/`PATCH`/`DELETE`). Auth here
+  is a bearer token rather than a cookie, so classic CSRF doesn't apply
+  directly — this is defense-in-depth for a browser client that sends the
+  token anyway. Non-browser clients (the app, curl, server-to-server calls)
+  don't send `Origin` at all and are unaffected.
+
+## Operating it
+
+- `ABUSE_GUARD_ENABLED=false` disables everything in this file except the
+  security headers and origin check — used in tests, where all traffic
+  legitimately comes from one IP.
+- `TRUST_PROXY_HEADERS` must stay `false` unless there's an actual reverse
+  proxy/CDN in front of the app. `client_ip()` reads the rightmost entry of
+  `X-Forwarded-For` — the hop appended by *your* proxy — when trusted;
+  without a proxy that header is entirely client-supplied, so trusting it
+  would let anyone spoof their apparent IP to dodge every limit above, or
+  get an innocent IP (the proxy's own) banned.
+- All tunables are environment variables — see
+  [environment-variables.md](environment-variables.md) for the full list of
+  defaults.

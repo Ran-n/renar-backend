@@ -1,10 +1,22 @@
-"""Book catalog via Open Library (free, no API key)."""
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/07 13:25:14.719597
+Revised: 2026/07/07 13:25:14.719597
+
+Book catalog via Open Library (free, no API key).
+"""
+
+import os
 import time
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse, Response
 
 from ..auth import get_current_user
+from ..config import settings
 from ..models import User
 
 router = APIRouter(prefix="/books", tags=["books"])
@@ -13,7 +25,20 @@ OL_BASE = "https://openlibrary.org"
 COVER_BASE = "https://covers.openlibrary.org/b/id"
 
 CACHE_TTL_SECONDS = 30 * 60
+CACHE_MAX_ENTRIES = 1024  # bound: search responses are small JSON dicts
 _cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _cache_put(key: tuple, expiry: float, data: dict) -> None:
+    """Insert with eviction so the cache can't grow without bound."""
+    if len(_cache) >= CACHE_MAX_ENTRIES:
+        now = time.time()
+        for k in [k for k, (exp, _) in _cache.items() if exp <= now]:
+            del _cache[k]
+        while len(_cache) >= CACHE_MAX_ENTRIES:  # still full: drop oldest-expiring
+            del _cache[min(_cache, key=lambda k: _cache[k][0])]
+    _cache[key] = (expiry, data)
+
 
 _http = httpx.Client(
     timeout=15,
@@ -31,14 +56,12 @@ def _ol_get(path: str, params: dict | None = None) -> dict:
         return hit[1]
     try:
         resp = _http.get(f"{OL_BASE}{path}", params=params)
-    except httpx.HTTPError:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail="Could not reach Open Library")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach Open Library") from exc
     if resp.status_code != 200:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail=f"Open Library error {resp.status_code}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Open Library error {resp.status_code}")
     data = resp.json()
-    _cache[key] = (now + CACHE_TTL_SECONDS, data)
+    _cache_put(key, now + CACHE_TTL_SECONDS, data)
     return data
 
 
@@ -64,32 +87,44 @@ def _map_docs(docs: list[dict], limit: int = 20) -> list[dict]:
     return out
 
 
-COVER_TTL_SECONDS = 24 * 3600
-_cover_cache: dict[int, tuple[float, bytes]] = {}
+# Covers are stable per id, so cached files are kept forever on disk: each
+# cover is fetched from Open Library at most once (mirrors the TMDB proxy).
+COVER_CACHE_ROOT = Path(settings.media_dir) / "book_covers"
+_IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+# Missing covers can appear later, so 404s are only remembered for a day —
+# in memory, to avoid re-hitting Open Library on every books-tab render.
+MISS_TTL_SECONDS = 24 * 3600
+_cover_misses: dict[int, float] = {}
 
 
 @router.get("/cover/{cover_id}")
 def book_cover(cover_id: int):
     """Proxy + cache Open Library covers (public: <img>-style fetches)."""
-    from fastapi.responses import Response
+    cached = COVER_CACHE_ROOT / f"{cover_id}-M.jpg"
+    if cached.is_file():
+        return FileResponse(cached, media_type="image/jpeg", headers=_IMMUTABLE)
+
     now = time.time()
-    hit = _cover_cache.get(cover_id)
-    if hit and hit[0] > now:
-        return Response(hit[1], media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=86400"})
+    if _cover_misses.get(cover_id, 0) > now:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No cover")
+
     try:
         resp = _http.get(f"{COVER_BASE}/{cover_id}-M.jpg")
-    except httpx.HTTPError:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail="Could not reach cover server")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach cover server") from exc
     # OL returns a tiny placeholder for unknown ids — treat as missing
     if resp.status_code != 200 or len(resp.content) < 500:
+        if len(_cover_misses) > 10000:
+            _cover_misses.clear()
+        _cover_misses[cover_id] = now + MISS_TTL_SECONDS
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No cover")
-    if len(_cover_cache) > 1000:
-        _cover_cache.clear()
-    _cover_cache[cover_id] = (now + COVER_TTL_SECONDS, resp.content)
-    return Response(resp.content, media_type="image/jpeg",
-                    headers={"Cache-Control": "public, max-age=86400"})
+
+    COVER_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp = cached.with_suffix(cached.suffix + f".{os.getpid()}.tmp")
+    tmp.write_bytes(resp.content)
+    tmp.replace(cached)  # atomic: concurrent requests never see partial files
+    return Response(resp.content, media_type="image/jpeg", headers=_IMMUTABLE)
 
 
 @router.get("/search")
@@ -97,10 +132,14 @@ def search_books(
     query: str = Query(min_length=1, max_length=200),
     user: User = Depends(get_current_user),
 ):
-    data = _ol_get("/search.json", {
-        "q": query, "limit": 10,
-        "fields": "title,first_publish_year,author_name,cover_i,number_of_pages_median",
-    })
+    data = _ol_get(
+        "/search.json",
+        {
+            "q": query,
+            "limit": 10,
+            "fields": "title,first_publish_year,author_name,cover_i,number_of_pages_median",
+        },
+    )
     return _map_docs(data.get("docs", []), limit=10)
 
 

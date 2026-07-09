@@ -1,13 +1,22 @@
-"""Proxy against TMDB so the API key never reaches clients.
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/07 13:25:15.851386
+Revised: 2026/07/07 13:25:15.851386
+
+Proxy against TMDB so the API key never reaches clients.
 
 Read-only TMDB responses are cached in memory (30 min TTL) to keep the
 Explore feeds and season lists fast and to stay well inside rate limits.
 """
+
+import os
 import time
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
 from ..auth import get_current_user
 from ..config import settings
@@ -23,7 +32,20 @@ POSTER_BASE = f"{IMAGE_BASE}/w342"
 TMDB_KIND = {"film": "movie", "tv_show": "tv"}
 
 CACHE_TTL_SECONDS = 30 * 60
+CACHE_MAX_ENTRIES = 2048  # ~a few MB worst case; entries are small JSON dicts
 _cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _cache_put(key: tuple, expiry: float, data: dict) -> None:
+    """Insert with eviction so the cache can't grow without bound."""
+    if len(_cache) >= CACHE_MAX_ENTRIES:
+        now = time.time()
+        for k in [k for k, (exp, _) in _cache.items() if exp <= now]:
+            del _cache[k]
+        while len(_cache) >= CACHE_MAX_ENTRIES:  # still full: drop oldest-expiring
+            del _cache[min(_cache, key=lambda k: _cache[k][0])]
+    _cache[key] = (expiry, data)
+
 
 # one pooled client: reusing connections to TMDB saves a TLS handshake per call
 _http = httpx.Client(
@@ -55,14 +77,10 @@ def _tmdb_get(path: str, params: dict | None = None, cache: bool = True) -> dict
 
     try:
         resp = _http.get(f"{TMDB_BASE}{path}", params=params, headers=headers)
-    except httpx.HTTPError:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB"
-        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB") from exc
     if resp.status_code == 401:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="TMDB rejected the API key"
-        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="TMDB rejected the API key")
     if resp.status_code == 404:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found on TMDB")
     if resp.status_code != 200:
@@ -73,7 +91,7 @@ def _tmdb_get(path: str, params: dict | None = None, cache: bool = True) -> dict
 
     data = resp.json()
     if cache:
-        _cache[cache_key] = (time.time() + CACHE_TTL_SECONDS, data)
+        _cache_put(cache_key, time.time() + CACHE_TTL_SECONDS, data)
     return data
 
 
@@ -85,16 +103,14 @@ def _map_results(raw: list[dict], limit: int = 20) -> list[dict]:
         date = r.get("release_date") or r.get("first_air_date") or ""
         if not title:
             continue
-        results.append(
-            {
-                "tmdb_id": r["id"],
-                "title": title,
-                "year": int(date[:4]) if len(date) >= 4 and date[:4].isdigit() else None,
-                "poster_url": f"{POSTER_BASE}{r['poster_path']}" if r.get("poster_path") else None,
-                "overview": (r.get("overview") or "")[:300],
-                "vote_average": round(r.get("vote_average") or 0, 1),
-            }
-        )
+        results.append({
+            "tmdb_id": r["id"],
+            "title": title,
+            "year": int(date[:4]) if len(date) >= 4 and date[:4].isdigit() else None,
+            "poster_url": f"{POSTER_BASE}{r['poster_path']}" if r.get("poster_path") else None,
+            "overview": (r.get("overview") or "")[:300],
+            "vote_average": round(r.get("vote_average") or 0, 1),
+        })
     return results
 
 
@@ -137,6 +153,9 @@ def details_tmdb(
 ):
     data = _tmdb_get(f"/{TMDB_KIND[media_type]}/{tmdb_id}")
 
+    date = data.get("release_date") or data.get("first_air_date") or ""
+    year = int(date[:4]) if len(date) >= 4 and date[:4].isdigit() else None
+
     seasons = None
     if media_type == "film":
         runtime = data.get("runtime") or None
@@ -162,6 +181,7 @@ def details_tmdb(
 
     return {
         "tmdb_id": tmdb_id,
+        "year": year,
         "runtime_minutes": runtime,
         "total_episodes": total_episodes,
         "total_seasons": total_seasons,
@@ -174,8 +194,11 @@ def details_tmdb(
 
 
 ALLOWED_IMAGE_SIZES = {"w92", "w154", "w185", "w342", "w500", "w780", "original"}
-IMAGE_TTL_SECONDS = 24 * 3600
-_image_cache: dict[str, tuple[float, bytes, str]] = {}
+# TMDB image paths are immutable (a given /size/file never changes), so cached
+# files are kept forever on disk: each image is fetched from TMDB at most once.
+IMAGE_CACHE_ROOT = Path(settings.media_dir) / "tmdb_cache"
+_IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
+_CTYPES = {".png": "image/png", ".webp": "image/webp"}
 
 
 @router.get("/image/{size}/{filename}")
@@ -188,32 +211,30 @@ def image_proxy(size: str, filename: str):
     """
     if (
         size not in ALLOWED_IMAGE_SIZES
-        or "/" in filename or "\\" in filename or ".." in filename
+        or "/" in filename
+        or "\\" in filename
+        or ".." in filename
         or not filename.endswith((".jpg", ".jpeg", ".png", ".webp"))
     ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
-    key = f"{size}/{filename}"
-    now = time.time()
-    hit = _image_cache.get(key)
-    if hit and hit[0] > now:
-        return Response(hit[1], media_type=hit[2],
-                        headers={"Cache-Control": "public, max-age=86400"})
+    ctype = _CTYPES.get(Path(filename).suffix, "image/jpeg")
+    cached = IMAGE_CACHE_ROOT / size / filename
+    if cached.is_file():
+        return FileResponse(cached, media_type=ctype, headers=_IMMUTABLE)
 
     try:
         resp = _http.get(f"{IMAGE_BASE}/{size}/{filename}")
-    except httpx.HTTPError:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail="Could not reach TMDB images")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB images") from exc
     if resp.status_code != 200:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
-    ctype = resp.headers.get("content-type", "image/jpeg")
-    if len(_image_cache) > 1000:  # crude but sufficient eviction
-        _image_cache.clear()
-    _image_cache[key] = (now + IMAGE_TTL_SECONDS, resp.content, ctype)
-    return Response(resp.content, media_type=ctype,
-                    headers={"Cache-Control": "public, max-age=86400"})
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cached.with_suffix(cached.suffix + f".{os.getpid()}.tmp")
+    tmp.write_bytes(resp.content)
+    tmp.replace(cached)  # atomic: concurrent requests never see partial files
+    return Response(resp.content, media_type=ctype, headers=_IMMUTABLE)
 
 
 @router.get("/credits")
@@ -228,14 +249,12 @@ def credits_tmdb(
         {
             "name": c["name"],
             "character": c.get("character") or "",
-            "profile_url": f"{IMAGE_BASE}/w185{c['profile_path']}"
-            if c.get("profile_path") else None,
+            "profile_url": f"{IMAGE_BASE}/w185{c['profile_path']}" if c.get("profile_path") else None,
         }
         for c in data.get("cast", [])[:12]
     ]
     if media_type == "film":
-        directors = [c["name"] for c in data.get("crew", [])
-                     if c.get("job") == "Director"]
+        directors = [c["name"] for c in data.get("crew", []) if c.get("job") == "Director"]
         role = "Directed by"
     else:
         details = _tmdb_get(f"/tv/{tmdb_id}")
@@ -258,6 +277,16 @@ def season_tmdb(
             "name": e.get("name") or f"Episode {e['episode_number']}",
             "air_date": e.get("air_date"),
             "runtime": e.get("runtime"),
+            "overview": e.get("overview") or "",
+            "still_url": (f"{IMAGE_BASE}/w342{e['still_path']}" if e.get("still_path") else None),
+            "guest_stars": [
+                {
+                    "name": g["name"],
+                    "character": g.get("character") or "",
+                    "profile_url": (f"{IMAGE_BASE}/w185{g['profile_path']}" if g.get("profile_path") else None),
+                }
+                for g in e.get("guest_stars", [])[:12]
+            ],
         }
         for e in data.get("episodes", [])
     ]

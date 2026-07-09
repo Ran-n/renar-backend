@@ -1,13 +1,21 @@
-"""Watch-time and library statistics for the current user."""
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/07 13:25:15.713668
+Revised: 2026/07/07 13:25:15.713668
+
+Watch-time and library statistics for the current user.
+"""
+
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
 from ..database import get_db
-from ..models import EpisodeWatch, MediaItem, MediaType, User, WatchStatus
+from ..models import EpisodeWatch, LibraryEntry, MediaType, User, WatchStatus
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
@@ -18,7 +26,7 @@ DEFAULT_EPISODE_RUNTIME = 40
 def _as_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def _streaks(days: list[date]) -> tuple[int, int]:
@@ -26,14 +34,14 @@ def _streaks(days: list[date]) -> tuple[int, int]:
     if not days:
         return 0, 0
     longest = run = 1
-    for prev, cur in zip(days, days[1:]):
+    for prev, cur in zip(days, days[1:], strict=False):
         run = run + 1 if (cur - prev).days == 1 else 1
         longest = max(longest, run)
     today = date.today()
     current = 0
     if (today - days[-1]).days <= 1:  # streak still alive today or as of yesterday
         current = 1
-        for prev, cur in zip(reversed(days[:-1]), reversed(days[1:])):
+        for prev, cur in zip(reversed(days[:-1]), reversed(days[1:]), strict=False):
             if (cur - prev).days == 1:
                 current += 1
             else:
@@ -43,14 +51,13 @@ def _streaks(days: list[date]) -> tuple[int, int]:
 
 @router.get("")
 def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    items: list[MediaItem] = (
-        db.query(MediaItem).filter(MediaItem.user_id == user.id).all()
-    )
+    items: list[LibraryEntry] = db.query(LibraryEntry).filter(LibraryEntry.user_id == user.id).all()
     items_by_id = {item.id: item for item in items}
     watches: list[EpisodeWatch] = (
-        db.query(EpisodeWatch)
-        .join(MediaItem, EpisodeWatch.media_item_id == MediaItem.id)
-        .filter(MediaItem.user_id == user.id)
+        db
+        .query(EpisodeWatch)
+        .join(LibraryEntry, EpisodeWatch.media_item_id == LibraryEntry.id)
+        .filter(LibraryEntry.user_id == user.id)
         .all()
     )
 
@@ -95,13 +102,12 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         elif item.media_type == MediaType.youtube:
             if item.status == WatchStatus.completed:
                 youtube_watched += 1
-        elif item.media_type == MediaType.book:
-            if item.status == WatchStatus.completed:
-                books_read += 1
-                pages_read += item.page_count or 0
+        elif item.media_type == MediaType.book and item.status == WatchStatus.completed:
+            books_read += 1
+            pages_read += item.page_count or 0
 
     # ----- time-based stats from per-episode history -----
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     week_ago = now - timedelta(days=7)
     month_ago = now - timedelta(days=30)
     episodes_last_7_days = 0
@@ -161,7 +167,5 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         "most_watched_shows": most_watched,
         "by_status": dict(by_status),
         "by_type": dict(by_type),
-        "top_genres": [
-            {"genre": g, "count": c} for g, c in genre_counter.most_common(5)
-        ],
+        "top_genres": [{"genre": g, "count": c} for g, c in genre_counter.most_common(5)],
     }

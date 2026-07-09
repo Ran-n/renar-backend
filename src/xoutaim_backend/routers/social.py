@@ -1,11 +1,19 @@
-"""Social graph: user search, profiles, follow/unfollow, activity feed."""
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/07 13:25:15.566899
+Revised: 2026/07/07 13:25:15.566899
+
+Social graph: user search, profiles, follow/unfollow, activity feed.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
 from ..database import get_db
-from ..models import Follow, MediaItem, User
-from ..schemas import MediaItemOut
+from ..models import Follow, LibraryEntry, User
+from ..schemas import LibraryEntryOut
 
 router = APIRouter(tags=["social"])
 
@@ -19,9 +27,7 @@ def _user_or_404(user_id: int, db: Session) -> User:
 
 def _is_following(follower_id: int, followed_id: int, db: Session) -> bool:
     return (
-        db.query(Follow)
-        .filter(Follow.follower_id == follower_id, Follow.followed_id == followed_id)
-        .first()
+        db.query(Follow).filter(Follow.follower_id == follower_id, Follow.followed_id == followed_id).first()
         is not None
     )
 
@@ -34,7 +40,7 @@ def _public_user(target: User, me: User, db: Session) -> dict:
         "created_at": target.created_at,
         "followers": db.query(Follow).filter(Follow.followed_id == target.id).count(),
         "following": db.query(Follow).filter(Follow.follower_id == target.id).count(),
-        "items": db.query(MediaItem).filter(MediaItem.user_id == target.id).count(),
+        "items": db.query(LibraryEntry).filter(LibraryEntry.user_id == target.id).count(),
         "is_following": _is_following(me.id, target.id, db),
         "is_me": target.id == me.id,
     }
@@ -46,12 +52,7 @@ def search_users(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    users = (
-        db.query(User)
-        .filter(User.username.ilike(f"%{q}%"), User.id != me.id)
-        .limit(20)
-        .all()
-    )
+    users = db.query(User).filter(User.username.ilike(f"%{q}%"), User.id != me.id).limit(20).all()
     return [_public_user(u, me, db) for u in users]
 
 
@@ -71,9 +72,7 @@ def follow_user(
     me: User = Depends(get_current_user),
 ):
     if user_id == me.id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="You cannot follow yourself"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You cannot follow yourself")
     _user_or_404(user_id, db)
     if not _is_following(me.id, user_id, db):
         db.add(Follow(follower_id=me.id, followed_id=user_id))
@@ -86,11 +85,7 @@ def unfollow_user(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    follow = (
-        db.query(Follow)
-        .filter(Follow.follower_id == me.id, Follow.followed_id == user_id)
-        .first()
-    )
+    follow = db.query(Follow).filter(Follow.follower_id == me.id, Follow.followed_id == user_id).first()
     if follow:
         db.delete(follow)
         db.commit()
@@ -118,7 +113,7 @@ def list_followers(
     return [_public_user(db.get(User, f.follower_id), me, db) for f in follows]
 
 
-@router.get("/users/{user_id}/media", response_model=list[MediaItemOut])
+@router.get("/users/{user_id}/media", response_model=list[LibraryEntryOut])
 def user_media(
     user_id: int,
     db: Session = Depends(get_db),
@@ -126,11 +121,7 @@ def user_media(
 ):
     _user_or_404(user_id, db)
     return (
-        db.query(MediaItem)
-        .filter(MediaItem.user_id == user_id)
-        .order_by(MediaItem.updated_at.desc())
-        .limit(100)
-        .all()
+        db.query(LibraryEntry).filter(LibraryEntry.user_id == user_id).order_by(LibraryEntry.updated_at.desc()).limit(100).all()
     )
 
 
@@ -139,16 +130,15 @@ def activity_feed(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    followed_ids = [
-        f.followed_id for f in db.query(Follow).filter(Follow.follower_id == me.id)
-    ]
+    followed_ids = [f.followed_id for f in db.query(Follow).filter(Follow.follower_id == me.id)]
     if not followed_ids:
         return []
     entries = (
-        db.query(MediaItem, User.username)
-        .join(User, MediaItem.user_id == User.id)
-        .filter(MediaItem.user_id.in_(followed_ids))
-        .order_by(MediaItem.updated_at.desc())
+        db
+        .query(LibraryEntry, User.username)
+        .join(User, LibraryEntry.user_id == User.id)
+        .filter(LibraryEntry.user_id.in_(followed_ids))
+        .order_by(LibraryEntry.updated_at.desc())
         .limit(50)
         .all()
     )

@@ -24,6 +24,9 @@ dependencies = [
 [project.scripts]
 be = "xoutaim_backend.__main__:run"
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -40,6 +43,10 @@ preview = true
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = []
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom: these calls in argument defaults are intended
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
 
 [tool.ruff.format]
 quote-style = "double"

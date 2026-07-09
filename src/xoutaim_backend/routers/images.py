@@ -1,4 +1,12 @@
-"""Serve files from the content-addressed image store."""
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/07 13:25:15.011640
+Revised: 2026/07/07 13:25:15.011640
+
+Serve files from the content-addressed image store.
+"""
+
 import re
 
 from fastapi import APIRouter, HTTPException, status
@@ -19,5 +27,4 @@ def get_image(hash_: str):
     if not path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     # content-addressed => immutable => cache aggressively
-    return FileResponse(path, media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"})

@@ -1,4 +1,12 @@
-"""Notification center endpoints."""
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/07 13:25:15.426784
+Revised: 2026/07/07 13:25:15.426784
+
+Notification center endpoints.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -41,11 +49,7 @@ def unread_count(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    count = (
-        db.query(Notification)
-        .filter(Notification.user_id == user.id, Notification.read.is_(False))
-        .count()
-    )
+    count = db.query(Notification).filter(Notification.user_id == user.id, Notification.read.is_(False)).count()
     return {"count": count}
 
 
@@ -76,9 +80,7 @@ def mark_all_read(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    db.query(Notification).filter(
-        Notification.user_id == user.id, Notification.read.is_(False)
-    ).update({"read": True})
+    db.query(Notification).filter(Notification.user_id == user.id, Notification.read.is_(False)).update({"read": True})
     db.commit()
 
 
