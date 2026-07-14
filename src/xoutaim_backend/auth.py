@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.008319
-Revised: 2026/07/09 10:06:23.177271
+Revised: 2026/07/10 18:26:21.882347
 """
 
 import secrets
@@ -94,14 +94,21 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 
-def _touch_activity(user: User, db: Session) -> None:
-    """Usage bookkeeping: one authenticated request = one activity tick.
+def require_premium(user: User = Depends(get_current_user)) -> User:
+    """Gate for premium-only endpoints — the server-side check the UI locks
+    mirror. 403 (not 402) so clients treat it like any other permission."""
+    if not user.is_premium:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Premium subscription required")
+    return user
 
-    Server-side increment (not read-modify-write) so concurrent requests
-    from the same user can't lose counts.
+
+def _touch_activity(user: User, db: Session) -> None:
+    """Record the moment of this authenticated request. Request *counts* are
+    not kept here — they are derived from endpoint_stats / request_days,
+    which UsageTrackingMiddleware maintains.
     """
     db.query(User).filter(User.id == user.id).update(
-        {User.last_active_at: utcnow(), User.request_count: User.request_count + 1},
+        {User.last_active_at: utcnow()},
         synchronize_session=False,
     )
     db.commit()

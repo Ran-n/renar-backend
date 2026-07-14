@@ -2,21 +2,22 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.719597
-Revised: 2026/07/07 13:25:14.719597
+Revised: 2026/07/13 09:39:25.621276
 
 Book catalog via Open Library (free, no API key).
 """
 
-import os
 import time
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
+from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
-from ..config import settings
+from ..database import get_db
+from ..http_cache import TTLCache
+from ..image_cache import store_external_image, stored_external_image
 from ..models import User
 
 router = APIRouter(prefix="/books", tags=["books"])
@@ -26,19 +27,7 @@ COVER_BASE = "https://covers.openlibrary.org/b/id"
 
 CACHE_TTL_SECONDS = 30 * 60
 CACHE_MAX_ENTRIES = 1024  # bound: search responses are small JSON dicts
-_cache: dict[tuple, tuple[float, dict]] = {}
-
-
-def _cache_put(key: tuple, expiry: float, data: dict) -> None:
-    """Insert with eviction so the cache can't grow without bound."""
-    if len(_cache) >= CACHE_MAX_ENTRIES:
-        now = time.time()
-        for k in [k for k, (exp, _) in _cache.items() if exp <= now]:
-            del _cache[k]
-        while len(_cache) >= CACHE_MAX_ENTRIES:  # still full: drop oldest-expiring
-            del _cache[min(_cache, key=lambda k: _cache[k][0])]
-    _cache[key] = (expiry, data)
-
+_cache = TTLCache(ttl_seconds=CACHE_TTL_SECONDS, max_entries=CACHE_MAX_ENTRIES)
 
 _http = httpx.Client(
     timeout=15,
@@ -51,9 +40,8 @@ _http = httpx.Client(
 def _ol_get(path: str, params: dict | None = None) -> dict:
     key = (path, tuple(sorted((params or {}).items())))
     hit = _cache.get(key)
-    now = time.time()
-    if hit and hit[0] > now:
-        return hit[1]
+    if hit is not None:
+        return hit
     try:
         resp = _http.get(f"{OL_BASE}{path}", params=params)
     except httpx.HTTPError as exc:
@@ -61,7 +49,7 @@ def _ol_get(path: str, params: dict | None = None) -> dict:
     if resp.status_code != 200:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Open Library error {resp.status_code}")
     data = resp.json()
-    _cache_put(key, now + CACHE_TTL_SECONDS, data)
+    _cache.put(key, data)
     return data
 
 
@@ -87,9 +75,9 @@ def _map_docs(docs: list[dict], limit: int = 20) -> list[dict]:
     return out
 
 
-# Covers are stable per id, so cached files are kept forever on disk: each
-# cover is fetched from Open Library at most once (mirrors the TMDB proxy).
-COVER_CACHE_ROOT = Path(settings.media_dir) / "book_covers"
+# Covers are stable per id, so they are cached forever: bytes in the
+# content-addressed store, identity in external_images — each cover is
+# fetched from Open Library at most once (mirrors the TMDB image proxy).
 _IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
 
 # Missing covers can appear later, so 404s are only remembered for a day —
@@ -99,10 +87,10 @@ _cover_misses: dict[int, float] = {}
 
 
 @router.get("/cover/{cover_id}")
-def book_cover(cover_id: int):
+def book_cover(cover_id: int, db: Session = Depends(get_db)):
     """Proxy + cache Open Library covers (public: <img>-style fetches)."""
-    cached = COVER_CACHE_ROOT / f"{cover_id}-M.jpg"
-    if cached.is_file():
+    cached = stored_external_image(db, "openlibrary", str(cover_id))
+    if cached is not None:
         return FileResponse(cached, media_type="image/jpeg", headers=_IMMUTABLE)
 
     now = time.time()
@@ -120,10 +108,7 @@ def book_cover(cover_id: int):
         _cover_misses[cover_id] = now + MISS_TTL_SECONDS
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No cover")
 
-    COVER_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    tmp = cached.with_suffix(cached.suffix + f".{os.getpid()}.tmp")
-    tmp.write_bytes(resp.content)
-    tmp.replace(cached)  # atomic: concurrent requests never see partial files
+    store_external_image(db, "openlibrary", str(cover_id), resp.content)
     return Response(resp.content, media_type="image/jpeg", headers=_IMMUTABLE)
 
 

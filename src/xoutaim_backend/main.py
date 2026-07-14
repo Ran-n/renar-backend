@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/09 10:06:23.826801
+Revised: 2026/07/14 22:48:11.599312
 """
 
 import asyncio
@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import notifier
+from ._devserver import exit_when_orphaned
 from .config import settings
 from .routers import (
     admin,
@@ -23,8 +24,10 @@ from .routers import (
     imports,
     media,
     notifications,
+    premium,
     social,
     stats,
+    svc,
     tmdb,
     upcoming,
     youtube,
@@ -36,7 +39,8 @@ from .usage import UsageTrackingMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 _log = logging.getLogger(__name__)
@@ -44,6 +48,9 @@ _log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # As a reload worker, die with the reloader instead of becoming a
+    # zombie that squats the port with stale code (see _devserver).
+    exit_when_orphaned()
     if settings.secret_key.startswith("dev-only-"):
         _log.warning(
             "SECRET_KEY is the built-in dev default — tokens are forgeable. "
@@ -92,7 +99,9 @@ app.include_router(upcoming.router)
 app.include_router(books.router)
 app.include_router(youtube.router)
 app.include_router(imports.router)
+app.include_router(premium.router)
 app.include_router(admin.router)
+app.include_router(svc.router)
 
 
 @app.get("/")

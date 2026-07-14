@@ -1,7 +1,7 @@
 [project]
 name = "xoutaim-backend"
 version = "0.1.0"
-description = "FastAPI backend for Xoutaim — save and track films, TV shows and YouTube videos."
+description = "FastAPI backend for Xoutaim — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]
 license-files = ["LICENSE"]
@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.28",
     "pillow>=11.0",
     "blake3>=1.0",
+    "psycopg[binary]>=3.2",
 ]
 
 [project.scripts]
@@ -33,6 +34,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xoutaim_backend"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # starlette's TestClient warns on every import that httpx should be
+    # replaced by "httpx2" — that package isn't published on PyPI yet, so
+    # there's nothing to migrate to. Silence until it actually exists.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:UserWarning",
+]
 
 [tool.ruff]
 src = ["src"]

@@ -1,21 +1,22 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.275749 )
-[//]: # (+ Revised: 	2026/07/09 08:05:52.275749 )
+[//]: # (+ Revised: 	2026/07/13 13:42:10.397105 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Environment variables
 
 All settings live in `.env` (copy `.env.example` to start) and are read by
-`src/xoutaim_backend/config.py`. Every variable has a safe default baked into
-that file, so `.env` only needs to override what you care about.
+`src/xoutaim_backend/config.py`. Most variables have a safe default baked
+into that file, so `.env` only needs to override what you care about;
+`DATABASE_URL` is the exception and must always be set.
 
 ## Core
 
 | Variable | Default | What it does |
 |---|---|---|
 | `SECRET_KEY` | dev placeholder | Signs login tokens (JWT). Must be a long random value in any environment other than local dev — the app logs a warning at startup if you leave the default in place, since tokens signed with a known key can be forged. |
-| `DATABASE_URL` | `sqlite:///./xoutaim.db` | SQLAlchemy connection string. Swap for a Postgres URL (`postgresql://...`) for a real deployment. |
+| `DATABASE_URL` | *(required)* | SQLAlchemy Postgres connection string, e.g. `postgresql+psycopg://user:password@host:5432/xoutaim`. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` (7 days) | How long a login session stays valid before the client must log in again. |
 | `CORS_ORIGINS` | `["http://localhost:8550", "http://127.0.0.1:8550"]` | Browser origins allowed to call the API (JSON list). Add your deployed frontend's URL here; the mobile/desktop app isn't a browser so it isn't affected by CORS. |
 
@@ -25,7 +26,9 @@ that file, so `.env` only needs to override what you care about.
 |---|---|---|
 | `TMDB_API_KEY` | empty | Key/token for [TheMovieDB](https://www.themoviedb.org/settings/api) — powers search, trending, posters and episode data for films/TV. Free to obtain; v3 key or v4 read token both work. Without it, `/tmdb/*` endpoints don't work. |
 | `TVDB_API_KEY` | empty | Optional. Used as a fallback lookup when matching shows during a TV Time import. |
+| `YOUTUBE_API_KEY` | empty | Key for the [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) — powers Explore's YouTube channel search/trending/videos. Without it, `/youtube/search_channels`, `/youtube/trending_channels`, `/youtube/channel_videos` and `/youtube/video_info` don't work (`/youtube/resolve` still works, it uses oEmbed and needs no key). |
 | `EPISODE_CHECK_MINUTES` | `360` (6h) | How often a background task polls TMDB for new episodes of tracked shows and creates notifications. |
+| `TMDB_DB_CACHE_HOURS` | `24` | How long a persisted TMDB payload (details/season/credits of a tracked title, stored in the `tmdb_cache` table) is served without re-contacting TMDB. Older copies refresh on access and are served stale only while TMDB is unreachable. |
 
 ## Storage
 
@@ -39,6 +42,7 @@ that file, so `.env` only needs to override what you care about.
 |---|---|---|
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | empty | HTTP Basic credentials for the admin panel. The panel returns 503 until **both** are set — there's no way to accidentally expose it with a blank password. |
 | `ADMIN_PATH` | `/admin` | URL the admin panel is served at. Renaming it to something unguessable (e.g. `/nimda`, `/panel-x7k2`) is the main defense for this endpoint — see below, the *default* `/admin` path then automatically becomes a honeypot that permabans anyone who requests it. |
+| `INTERNAL_SERVICE_SECRET` | empty | Shared secret for `/svc/bans` (see [anti-abuse.md](anti-abuse.md#sharing-bans-with-the-frontend)), which lets the xoutaim-frontend web server's own anti-abuse guard read and add to this server's `banned_ips` table. Empty means the endpoints stay 404 to everyone, same posture as an unset admin panel. Must match `XOUTAIM_INTERNAL_SECRET` in the frontend's `.env`. |
 
 ## Anti-abuse
 

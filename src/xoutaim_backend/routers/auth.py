@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/07/09 13:01:55.019131
+Revised: 2026/07/12 18:29:11.030647
 """
 
 import base64
@@ -14,33 +14,43 @@ from PIL import Image as PILImage
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from .. import accounts
 from ..auth import create_access_token, get_current_user, hash_password, verify_password
 from ..config import settings
 from ..database import get_db
-from ..models import (
-    Comment,
-    CommentLike,
-    EndpointStat,
-    Follow,
-    Image,
-    LoginEvent,
-    Notification,
-    RequestDay,
-    User,
-    utcnow,
-)
-from ..schemas import PasswordChange, ProfileUpdate, Token, UserCreate, UserOut
+from ..image_service import gc_image, image_row_for
+from ..models import LoginEvent, User, utcnow
+from ..premium import FREE_PROGRESS_STYLES, FREE_THEMES
+from ..schemas import CropBox, PasswordChange, ProfileUpdate, Token, UserCreate, UserOut
 from ..security import check_login_allowed, client_ip, note_login_failure, note_login_success
-from ..storage import delete_image, hash_bytes, store_image
 
 AVATAR_SIZE = 256
+BACKGROUND_MAX = (1280, 480)  # landscape banner: 8:3 aspect
 
 
-def _process_avatar(avatar_b64: str) -> bytes:
-    """Decode, downscale to 256px, return normalized JPEG bytes."""
+def _apply_crop(img: PILImage.Image, crop: CropBox | None) -> PILImage.Image:
+    """Crop to the fractional region the user picked in the frontend's
+    position dialog, before thumbnailing. No-op when the frontend couldn't
+    read the image dimensions and skipped the position picker."""
+    if crop is None:
+        return img
+    w, h = img.size
+    box = (
+        round(crop.x * w),
+        round(crop.y * h),
+        round((crop.x + crop.w) * w),
+        round((crop.y + crop.h) * h),
+    )
+    return img.crop(box)
+
+
+def _process_avatar(avatar_b64: str, crop: CropBox | None = None) -> bytes:
+    """Decode, crop to the chosen focal region, downscale to 256px, return
+    normalized JPEG bytes."""
     try:
         img = PILImage.open(io.BytesIO(base64.b64decode(avatar_b64)))
         img = img.convert("RGB")
+        img = _apply_crop(img, crop)
         img.thumbnail((AVATAR_SIZE, AVATAR_SIZE))
         out = io.BytesIO()
         img.save(out, format="JPEG", quality=85)
@@ -52,29 +62,22 @@ def _process_avatar(avatar_b64: str) -> bytes:
         ) from exc
 
 
-def _attach_avatar(user: User, raw: bytes, db: Session) -> None:
-    """Point the user at the (deduplicated) image row for these bytes."""
-    hash_ = hash_bytes(raw)
-    image = db.query(Image).filter(Image.hash == hash_).first()
-    if image is None:
-        store_image(raw)
-        image = Image(hash=hash_, size_bytes=len(raw))
-        db.add(image)
-        db.flush()
-    user.avatar_id = image.id
-
-
-def _gc_image(image_id: int | None, db: Session) -> None:
-    """Delete an image row + file once nothing references it anymore."""
-    if image_id is None:
-        return
-    still_used = db.query(User).filter(User.avatar_id == image_id).count()
-    if still_used:
-        return
-    image = db.get(Image, image_id)
-    if image:
-        delete_image(image.hash)
-        db.delete(image)
+def _process_background(background_b64: str, crop: CropBox | None = None) -> bytes:
+    """Decode, crop to the chosen focal region, downscale to banner
+    dimensions, return normalized JPEG bytes."""
+    try:
+        img = PILImage.open(io.BytesIO(base64.b64decode(background_b64)))
+        img = img.convert("RGB")
+        img = _apply_crop(img, crop)
+        img.thumbnail(BACKGROUND_MAX)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        return out.getvalue()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Could not read that image file",
+        ) from exc
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -120,10 +123,9 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
     if user.banned:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account has been banned")
     now = utcnow()
-    user.last_login_at = now
     user.last_active_at = now
-    user.login_count = (user.login_count or 0) + 1
-    db.add(LoginEvent(user_id=user.id, created_at=now))  # time-series source for the admin panel
+    # the single record of this login; counts/last-login are derived from it
+    db.add(LoginEvent(user_id=user.id, created_at=now))
     db.commit()
     return Token(access_token=create_access_token(user.id))
 
@@ -152,12 +154,46 @@ def update_profile(
     if data.avatar_b64 is not None:
         old_avatar_id = user.avatar_id
         if data.avatar_b64:
-            _attach_avatar(user, _process_avatar(data.avatar_b64), db)
+            user.avatar_id = image_row_for(_process_avatar(data.avatar_b64, data.avatar_crop), db).id
         else:
             user.avatar_id = None
         if old_avatar_id != user.avatar_id:
             db.flush()  # session has autoflush off; GC must see the new reference
-            _gc_image(old_avatar_id, db)
+            gc_image(old_avatar_id, db)
+    if data.background_b64 is not None:
+        if data.background_b64 and not user.is_premium:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Premium required for background image",
+            )
+        old_background_id = user.background_id
+        if data.background_b64:
+            user.background_id = image_row_for(_process_background(data.background_b64, data.background_crop), db).id
+        else:
+            user.background_id = None
+        if old_background_id != user.background_id:
+            db.flush()  # session has autoflush off; GC must see the new reference
+            gc_image(old_background_id, db)
+    if data.theme is not None:
+        if data.theme not in FREE_THEMES and not user.is_premium:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Premium required for this theme",
+            )
+        user.theme = data.theme
+    if data.show_original_titles is not None:
+        user.show_original_titles = data.show_original_titles
+    if data.home_hero_enabled is not None:
+        user.home_hero_enabled = data.home_hero_enabled
+    if data.home_on_launch is not None:
+        user.home_on_launch = data.home_on_launch
+    if data.home_progress_style is not None:
+        if data.home_progress_style not in FREE_PROGRESS_STYLES and not user.is_premium:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Premium required for this progress style",
+            )
+        user.home_progress_style = data.home_progress_style
     db.commit()
     db.refresh(user)
     return user
@@ -183,24 +219,4 @@ def delete_account(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # social artifacts don't cascade from User — clean them up explicitly
-    my_comment_ids = [c.id for c in db.query(Comment.id).filter(Comment.user_id == user.id)]
-    likes = db.query(CommentLike).filter(CommentLike.user_id == user.id)
-    if my_comment_ids:
-        likes = db.query(CommentLike).filter(
-            or_(CommentLike.user_id == user.id, CommentLike.comment_id.in_(my_comment_ids))
-        )
-    likes.delete(synchronize_session=False)
-    db.query(Comment).filter(Comment.user_id == user.id).delete(synchronize_session=False)
-    db.query(Follow).filter(or_(Follow.follower_id == user.id, Follow.followed_id == user.id)).delete(
-        synchronize_session=False
-    )
-    db.query(Notification).filter(Notification.user_id == user.id).delete(synchronize_session=False)
-    db.query(LoginEvent).filter(LoginEvent.user_id == user.id).delete(synchronize_session=False)
-    db.query(EndpointStat).filter(EndpointStat.user_id == user.id).delete(synchronize_session=False)
-    db.query(RequestDay).filter(RequestDay.user_id == user.id).delete(synchronize_session=False)
-    old_avatar_id = user.avatar_id
-    db.delete(user)  # media items + episode watches + watch events cascade via ORM
-    db.flush()
-    _gc_image(old_avatar_id, db)
-    db.commit()
+    accounts.delete_account(user, db)

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/07/09 13:01:55.347924
+Revised: 2026/07/10 18:15:03.483025
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -11,7 +11,7 @@ from conftest import ADMIN_BASIC as BASIC
 from conftest import PASSWORD
 
 from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import Comment, CommentLike, LibraryEntry, LoginEvent, Notification, User
+from xoutaim_backend.models import Comment, CommentLike, CommentReport, LibraryEntry, LoginEvent, Notification, User
 
 
 def test_admin_unavailable_until_configured(client):
@@ -260,3 +260,32 @@ def test_admin_delete_comment_removes_comment_and_likes(client, admin_enabled, a
 
 def test_admin_delete_missing_comment_not_found(client, admin_enabled):
     assert client.post("/admin/comments/9999/delete", auth=BASIC).status_code == 404
+
+
+def test_admin_comments_page_shows_report_count(client, admin_enabled, alice, bob):
+    _, alice_headers = alice
+    _, bob_headers = bob
+    comment = _post_comment(client, alice_headers, "reported comment")
+    assert client.post(f"/comments/{comment['id']}/report", headers=bob_headers).status_code == 204
+
+    r = client.get("/admin/comments", auth=BASIC)
+    assert r.status_code == 200
+    assert "Reports" in r.text
+    assert "&#x2691; 1" in r.text
+
+
+def test_admin_delete_user_removes_filed_reports(client, admin_enabled, alice, bob):
+    _, alice_headers = alice
+    bob_user, bob_headers = bob
+    comment = _post_comment(client, alice_headers, "flagged by bob")
+    assert client.post(f"/comments/{comment['id']}/report", headers=bob_headers).status_code == 204
+
+    r = client.post(f"/admin/users/{bob_user['id']}/delete", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        assert db.query(CommentReport).count() == 0  # bob's report went with him
+        assert db.query(Comment).count() == 1  # alice's comment stays
+    finally:
+        db.close()

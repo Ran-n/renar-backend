@@ -3,9 +3,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from xoutaim_backend import models  # noqa: F401  (registers all tables on Base.metadata)
 from xoutaim_backend.config import settings
 from xoutaim_backend.database import Base
-from xoutaim_backend import models  # noqa: F401  (registers all tables on Base.metadata)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
@@ -22,7 +22,6 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=True,  # SQLite can't ALTER in place
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -38,7 +37,6 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True,  # SQLite can't ALTER in place
         )
         with context.begin_transaction():
             context.run_migrations()

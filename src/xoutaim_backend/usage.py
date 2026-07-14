@@ -63,8 +63,7 @@ def _record(method: str, path: str, user_id: int | None) -> None:
         if not updated:
             # A self-delete (DELETE /auth/me) removes the user before this
             # post-response hook runs; attribute that trailing request to no
-            # one rather than leaving a dangling user_id (a FK violation on
-            # Postgres, an orphan row on SQLite).
+            # one rather than leaving a dangling user_id (a FK violation).
             if user_id is not None and db.get(User, user_id) is None:
                 user_id = None
             db.add(EndpointStat(method=method, path=path, user_id=user_id, count=1, last_at=utcnow()))

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.135465 )
-[//]: # (+ Revised: 	2026/07/09 08:05:52.135465 )
+[//]: # (+ Revised: 	2026/07/12 17:25:56.318363 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Anti-abuse system
@@ -125,6 +125,49 @@ from `<ADMIN_PATH>/bans`.
   directly — this is defense-in-depth for a browser client that sends the
   token anyway. Non-browser clients (the app, curl, server-to-server calls)
   don't send `Origin` at all and are unaffected.
+
+## Sharing bans with the frontend
+
+The API isn't the only internet-facing surface — `xoutaim-frontend`'s web
+server (`uv run web`, a Flet/FastAPI app on its own port) is exposed
+directly too, and gets scanned independently of the API. It runs its own
+scaled-down copy of this guard (`anti_abuse.py` in that repo: honeypots,
+flood/probe temp bans — no login-specific logic, since it's a UI server with
+no auth endpoints of its own).
+
+Rather than give the frontend its own database, it shares this server's
+`banned_ips` *and* `strikes` tables over three machine-to-machine endpoints
+in `routers/svc.py` — the frontend has no persistence of its own at all:
+
+- `GET /svc/bans` — returns both permabanned IPs and currently-active temp
+  bans (`load_active_temp_bans()`). The frontend preloads this on startup so
+  a restart doesn't grant amnesty to an IP either surface already banned,
+  temporarily or permanently.
+- `POST /svc/bans` — the frontend calls this the moment its own guard decides
+  to permaban an IP (honeypot hit — zero false-positive risk, so this always
+  goes straight to a permaban), so that IP is blocked here too if it ever
+  targets the API directly.
+- `POST /svc/strikes` — the frontend calls this for everything else (floods),
+  going through the exact same `strike_and_maybe_ban()` escalation logic used
+  for this server's own offenders: first offense is a short temp ban, repeat
+  offenses double it (capped at 24h), and hitting `STRIKE_BAN_THRESHOLD`
+  converts it to a permaban — automatically, via the same `strikes` row an
+  API-side offense against the same IP would use.
+
+Both `/svc/bans` and `/svc/strikes` require the `X-Internal-Secret` header to
+match `INTERNAL_SERVICE_SECRET` exactly (constant-time compare); a
+missing/wrong secret gets a plain `404`, not `401`/`403`, so an
+unauthenticated prober learns nothing. Deliberately **not** under
+`/internal/` — that prefix is honeypot bait (see `HONEYPOT_PREFIXES`) and
+would permaban the frontend itself the moment `INTERNAL_SERVICE_SECRET` was
+left unset.
+
+If the frontend can't reach these endpoints (secret unset, or the backend is
+down), its guard falls back to a local, in-memory-only ban so the defense
+still works — it just isn't persisted or shared until connectivity is back.
+
+The frontend's temporary bans/rate-limit counters stay in-memory only, same
+as this server's: a scanner just re-earns them within seconds of a restart.
 
 ## Operating it
 

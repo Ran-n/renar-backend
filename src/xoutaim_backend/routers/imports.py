@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/07/07 13:25:15.146587
+Revised: 2026/07/10 18:19:20.072333
 
 Import a TV Time GDPR export zip: shows, episode history, movies, favorites.
 
@@ -39,7 +39,8 @@ from ..auth import get_current_user
 from ..config import settings
 from ..database import SessionLocal
 from ..models import EpisodeWatch, LibraryEntry, MediaType, Title, User, WatchStatus, normalize_title_key
-from .tmdb import POSTER_BASE, _tmdb_get
+from ..titles import find_or_create_title, find_title
+from ..tmdb_http import POSTER_BASE, tmdb_get
 
 router = APIRouter(prefix="/import", tags=["import"])
 _log = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ _log = logging.getLogger(__name__)
 # Matching a show/movie against TMDB is the slow part of an import (network
 # round trips), so each row's match + insert runs as one worker task. Postgres
 # handles the concurrent writes fine; the DB's unique constraints are the
-# authority on dedupe races (see _insert_library_entry).
+# authority on dedupe races (see _upsert_library_entry).
 MATCH_WORKERS = 8
 
 _progress: dict[int, dict] = {}
@@ -77,7 +78,7 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 def _find_tv_by_tvdb(tvdb_id: str) -> dict | None:
     try:
-        data = _tmdb_get(f"/find/{tvdb_id}", {"external_source": "tvdb_id"})
+        data = tmdb_get(f"/find/{tvdb_id}", {"external_source": "tvdb_id"})
         results = data.get("tv_results") or []
         return results[0] if results else None
     except Exception:
@@ -87,7 +88,7 @@ def _find_tv_by_tvdb(tvdb_id: str) -> dict | None:
 
 def _search_tv(name: str) -> dict | None:
     try:
-        data = _tmdb_get("/search/tv", {"query": name, "include_adult": "false"})
+        data = tmdb_get("/search/tv", {"query": name, "include_adult": "false"})
         results = data.get("results") or []
         return results[0] if results else None
     except Exception:
@@ -157,14 +158,14 @@ def _match_show(tvdb_id: str, name: str) -> tuple[dict | None, dict]:
     if found:
         tmdb_id = found["id"]
         try:
-            raw = _tmdb_get(f"/tv/{tmdb_id}")
+            raw = tmdb_get(f"/tv/{tmdb_id}")
             run_times = raw.get("episode_run_time") or []
             details = {
                 "runtime_minutes": round(sum(run_times) / len(run_times))
                 if run_times
                 else (raw.get("last_episode_to_air") or {}).get("runtime"),
                 "total_episodes": raw.get("number_of_episodes"),
-                "genres": ", ".join(g["name"] for g in raw.get("genres", []))[:300] or None,
+                "genres": [g["name"] for g in raw.get("genres", [])],
                 "poster_url": f"{POSTER_BASE}{raw['poster_path']}" if raw.get("poster_path") else None,
             }
         except Exception:
@@ -178,10 +179,10 @@ def _search_movie(name: str, year: str | None) -> dict | None:
         params = {"query": name, "include_adult": "false"}
         if year:
             params["primary_release_year"] = year
-        data = _tmdb_get("/search/movie", params)
+        data = tmdb_get("/search/movie", params)
         results = data.get("results") or []
         if not results and year:  # retry without the year constraint
-            data = _tmdb_get("/search/movie", {"query": name, "include_adult": "false"})
+            data = tmdb_get("/search/movie", {"query": name, "include_adult": "false"})
             results = data.get("results") or []
         return results[0] if results else None
     except Exception:
@@ -189,35 +190,40 @@ def _search_movie(name: str, year: str | None) -> dict | None:
         return None
 
 
-def _find_or_create_title(db: Session, media_type: MediaType, tmdb_id: int | None, title: str, meta: dict) -> Title:
-    """Find the shared Title for this import row, creating it if no one has tracked it yet."""
-    query = db.query(Title).filter(Title.media_type == media_type)
-    query = (
-        query.filter(Title.tmdb_id == tmdb_id)
-        if tmdb_id is not None
-        else query.filter(Title.tmdb_id.is_(None), Title.title_key == normalize_title_key(title))
-    )
-    found = query.first()
-    if found:
-        return found
-    new_title = Title(
-        media_type=media_type,
-        tmdb_id=tmdb_id,
-        title_key=None if tmdb_id is not None else normalize_title_key(title),
-        title=title,
-        **meta,
-    )
-    db.add(new_title)
-    try:
-        db.flush()
-    except IntegrityError:
-        # another import/request created the same global Title in the meantime
-        db.rollback()
-        return query.first()
-    return new_title
+def _reconcile_show_entry(entry: LibraryEntry, incoming: dict) -> bool:
+    """Merge import data into a show the user already tracks. Returns whether
+    anything actually changed.
+
+    Status is intentionally left untouched here: TV Time's followed/archived
+    flags are a weak guess next to whatever the user already set, and could
+    wrongly downgrade e.g. a manually-set "watching" to "want_to_watch". The
+    one legitimate status upgrade — all episodes now watched -> completed —
+    is derived from actual episode counts after history is merged, below.
+    """
+    changed = False
+    if incoming.get("is_favorite") and not entry.is_favorite:
+        entry.is_favorite = True
+        changed = True
+    if entry.rating is None and incoming.get("rating") is not None:
+        entry.rating = incoming["rating"]
+        changed = True
+    return changed
 
 
-def _insert_library_entry(
+def _reconcile_movie_entry(entry: LibraryEntry, incoming: dict) -> bool:
+    """Merge import data into a movie the user already tracks. Returns
+    whether anything actually changed.
+
+    "watched" from TV Time is a fact, not a guess, so it's allowed to
+    upgrade status forward — but never downgrade an already-completed entry.
+    """
+    if incoming.get("status") == WatchStatus.completed and entry.status != WatchStatus.completed:
+        entry.status = WatchStatus.completed
+        return True
+    return False
+
+
+def _upsert_library_entry(
     user_id: int,
     media_type: MediaType,
     tmdb_id: int | None,
@@ -226,37 +232,64 @@ def _insert_library_entry(
     entry_fields: dict,
     title_key: tuple,
     tmdb_key: tuple | None,
-    existing_titles: set,
-    existing_tmdb: set,
-    lock: threading.Lock,
-) -> int | None:
-    """Insert one LibraryEntry (creating its Title if needed) on its own session.
+    existing_map: dict,
+    reconcile,
+) -> tuple[int | None, bool, bool]:
+    """Insert or reconcile one LibraryEntry, on its own session.
 
-    The in-memory sets give a cheap fast-path dedupe check under `lock`; the
-    DB's unique constraint (uq_user_title) is the authority if two workers
-    ever race past that check for the same identity.
+    `existing_map` holds the identities the user already tracked *before*
+    this import started, mapped to their entry id — those get merged via
+    `reconcile` instead of skipped, so e.g. a newly-watched season on a show
+    already in the library still gets its episode history imported. It's
+    read-only after being built, so no locking is needed to consult it.
+
+    Two rows *within this run* can still resolve to the same brand-new
+    title; rather than reserve identities up front (and drop the loser),
+    both are allowed to race the insert and the DB's unique constraint
+    (uq_user_title) picks the winner — the loser catches the IntegrityError,
+    looks up what the winner just created, and reconciles into that instead
+    of losing its data.
+
+    Returns (item_id, is_new, changed).
     """
-    with lock:
-        if (tmdb_key and tmdb_key in existing_tmdb) or title_key in existing_titles:
-            return None
-        existing_titles.add(title_key)
-        if tmdb_key:
-            existing_tmdb.add(tmdb_key)
+    item_id = existing_map.get(tmdb_key) if tmdb_key else None
+    if item_id is None:
+        item_id = existing_map.get(title_key)
+    is_new = item_id is None
+
     db = SessionLocal()
     try:
-        db_title = _find_or_create_title(db, media_type, tmdb_id, title, title_meta)
-        entry = LibraryEntry(user_id=user_id, title_id=db_title.id, **entry_fields)
-        db.add(entry)
+        if is_new:
+            db_title = find_or_create_title(db, media_type, tmdb_id, title, **title_meta)
+            entry = LibraryEntry(user_id=user_id, title_id=db_title.id, **entry_fields)
+            db.add(entry)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                winner_title = find_title(db, media_type, tmdb_id, title)
+                winner = (
+                    db.query(LibraryEntry).filter_by(user_id=user_id, title_id=winner_title.id).first()
+                    if winner_title
+                    else None
+                )
+                if winner is None:
+                    return None, False, False
+                changed = reconcile(winner, entry_fields)
+                db.commit()
+                return winner.id, False, changed
+            db.refresh(entry)
+            return entry.id, True, False
+        entry = db.get(LibraryEntry, item_id)
+        if entry is None:
+            return None, False, False
+        changed = reconcile(entry, entry_fields)
         db.commit()
-        db.refresh(entry)
-        return entry.id
-    except IntegrityError:
-        db.rollback()
-        return None
+        return item_id, False, changed
     except Exception:
         db.rollback()
-        _log.warning("Insert failed for %r (user_id=%s)", title, user_id, exc_info=True)
-        return None
+        _log.warning("Upsert failed for %r (user_id=%s)", title, user_id, exc_info=True)
+        return None, is_new, False
     finally:
         db.close()
 
@@ -267,10 +300,8 @@ def _process_show(
     followed: dict,
     for_later: set,
     rates: dict,
-    existing_titles: set,
-    existing_tmdb: set,
-    lock: threading.Lock,
-) -> tuple[str, int | None, str | None] | None:
+    existing_map: dict,
+) -> tuple[str, int | None, str | None, bool, bool] | None:
     """Match one show row against TMDB and insert it. Runs in a worker thread."""
     tvdb_id = row.get("tv_show_id") or ""
     name = (row.get("tv_show_name") or "").strip()
@@ -312,7 +343,7 @@ def _process_show(
     # different TVDB entries can resolve to the same TMDB show
     title_key = ("tv_show", normalize_title_key(final_title))
     tmdb_key = ("tv_show", tmdb_id) if tmdb_id else None
-    item_id = _insert_library_entry(
+    item_id, is_new, changed = _upsert_library_entry(
         user_id,
         MediaType.tv_show,
         tmdb_id,
@@ -321,21 +352,18 @@ def _process_show(
         entry_fields,
         title_key,
         tmdb_key,
-        existing_titles,
-        existing_tmdb,
-        lock,
+        existing_map,
+        _reconcile_show_entry,
     )
-    return tvdb_id, item_id, unmatched
+    return tvdb_id, item_id, unmatched, is_new, changed
 
 
 def _process_movie(
     user_id: int,
     name: str,
     m: dict,
-    existing_titles: set,
-    existing_tmdb: set,
-    lock: threading.Lock,
-) -> tuple[int | None, str | None]:
+    existing_map: dict,
+) -> tuple[int | None, str | None, bool, bool]:
     """Match one movie against TMDB and insert it. Runs in a worker thread."""
     found = _search_movie(name, m["year"])
     tmdb_id = found["id"] if found else None
@@ -352,7 +380,7 @@ def _process_movie(
     }
     title_key = ("film", normalize_title_key(final_title))
     tmdb_key = ("film", tmdb_id) if tmdb_id else None
-    item_id = _insert_library_entry(
+    item_id, is_new, changed = _upsert_library_entry(
         user_id,
         MediaType.film,
         tmdb_id,
@@ -361,16 +389,15 @@ def _process_movie(
         entry_fields,
         title_key,
         tmdb_key,
-        existing_titles,
-        existing_tmdb,
-        lock,
+        existing_map,
+        _reconcile_movie_entry,
     )
-    return item_id, unmatched
+    return item_id, unmatched, is_new, changed
 
 
 def _run_import(user_id: int, zip_bytes: bytes):
     db: Session = SessionLocal()
-    summary = {"shows": 0, "episodes": 0, "movies": 0, "skipped": 0, "unmatched": []}
+    summary = {"shows": 0, "updated": 0, "episodes": 0, "movies": 0, "skipped": 0, "unmatched": []}
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
 
@@ -383,30 +410,36 @@ def _run_import(user_id: int, zip_bytes: bytes):
         episode_events = _read_csv(zf, "tracking-prod-records-v2.csv")
         movie_events = _read_csv(zf, "tracking-prod-records.csv")
 
-        user_titles = (
-            db.query(Title)
-            .join(LibraryEntry, LibraryEntry.title_id == Title.id)
+        user_rows = (
+            db.query(LibraryEntry.id, Title)
+            .join(Title, LibraryEntry.title_id == Title.id)
             .filter(LibraryEntry.user_id == user_id)
             .all()
         )
-        existing_tmdb = {(t.media_type.value, t.tmdb_id) for t in user_titles if t.tmdb_id}
-        existing_titles = {
-            (t.media_type.value, t.title_key or normalize_title_key(t.title)) for t in user_titles
-        }
-
-        lock = threading.Lock()
+        # Identity (media_type, tmdb_id-or-title_key) -> the user's existing
+        # entry id, for titles already tracked before this import started.
+        # _upsert_library_entry merges into these instead of skipping them,
+        # so e.g. a new season on an already-tracked show still gets imported.
+        existing_map: dict = {}
+        for entry_id, t in user_rows:
+            if t.tmdb_id:
+                existing_map[(t.media_type.value, t.tmdb_id)] = entry_id
+            existing_map[(t.media_type.value, t.title_key or normalize_title_key(t.title))] = entry_id
 
         # ---------- shows ----------
-        # Each row is matched against TMDB and inserted (own session) inside one
-        # worker call, so both the network round trip and the write happen in
-        # parallel; `lock` only guards the fast in-memory dedupe-set check.
+        # Each row is matched against TMDB and inserted/reconciled (own session)
+        # inside one worker call, so both the network round trip and the write
+        # happen in parallel. Bucketing into shows/updated/skipped is deferred
+        # until after episode history is merged below, since a show reconciled
+        # here with no favorite/rating change can still gain a new season's
+        # worth of episodes in the next step.
         _set(user_id, stage="Matching shows", done=0, total=len(show_rows))
         items_by_tvdb: dict[str, int] = {}
+        show_results: list[tuple[str, int, bool, bool]] = []
         done = 0
         with ThreadPoolExecutor(max_workers=MATCH_WORKERS) as pool:
             futures = [
-                pool.submit(_process_show, user_id, row, followed, for_later, rates, existing_titles, existing_tmdb, lock)
-                for row in show_rows
+                pool.submit(_process_show, user_id, row, followed, for_later, rates, existing_map) for row in show_rows
             ]
             for fut in as_completed(futures):
                 done += 1
@@ -414,18 +447,26 @@ def _run_import(user_id: int, zip_bytes: bytes):
                 result = fut.result()
                 if result is None:
                     continue
-                tvdb_id, item_id, unmatched = result
+                tvdb_id, item_id, unmatched, is_new, changed = result
                 if item_id is not None:
                     items_by_tvdb[tvdb_id] = item_id
-                    summary["shows"] += 1
+                    show_results.append((tvdb_id, item_id, is_new, changed))
                 else:
                     summary["skipped"] += 1
                 if unmatched:
                     summary["unmatched"].append(unmatched)
 
         # ---------- per-episode history ----------
+        # Seed with episodes already on record (whether from a manual mark or
+        # a prior import) so merging into an existing show's history doesn't
+        # try to re-insert them and trip the uq_item_episode constraint.
         _set(user_id, stage="Importing episode history", done=0, total=len(episode_events))
-        seen: set[tuple] = set()
+        seen: set[tuple] = set(
+            db.query(EpisodeWatch.media_item_id, EpisodeWatch.season, EpisodeWatch.episode)
+            .filter(EpisodeWatch.media_item_id.in_(items_by_tvdb.values()))
+            .all()
+        )
+        touched_items: set[int] = set()
         for n, ev in enumerate(episode_events, 1):
             if n % 500 == 0:
                 _set(user_id, done=n)
@@ -450,8 +491,17 @@ def _run_import(user_id: int, zip_bytes: bytes):
                     watched_at=_parse_dt(ev.get("created_at")) or datetime.now(UTC),
                 )
             )
+            touched_items.add(item_id)
             summary["episodes"] += 1
         db.commit()
+
+        for _tvdb_id, item_id, is_new, changed in show_results:
+            if is_new:
+                summary["shows"] += 1
+            elif changed or item_id in touched_items:
+                summary["updated"] += 1
+            else:
+                summary["skipped"] += 1
 
         # sync counters + auto-status per show
         for item_id in items_by_tvdb.values():
@@ -462,7 +512,13 @@ def _run_import(user_id: int, zip_bytes: bytes):
             item.episodes_watched = len(watches)
             last = max(watches, key=lambda w: (w.season, w.episode))
             item.current_season, item.current_episode = last.season, last.episode
-            if item.total_episodes and item.episodes_watched >= item.total_episodes:
+            # "dropped"/"paused" are deliberate calls the user made; reaching
+            # 100% watched shouldn't silently override them.
+            if (
+                item.total_episodes
+                and item.episodes_watched >= item.total_episodes
+                and item.status not in (WatchStatus.dropped, WatchStatus.paused)
+            ):
                 item.status = WatchStatus.completed
         db.commit()
 
@@ -484,23 +540,31 @@ def _run_import(user_id: int, zip_bytes: bytes):
                 m["year"] = release[:4]
 
         _set(user_id, stage="Matching movies", done=0, total=len(movies))
-        to_process = {
-            name: m for name, m in movies.items() if ("film", normalize_title_key(name)) not in existing_titles
-        }
-        done = len(movies) - len(to_process)
-        summary["skipped"] += done
-        _set(user_id, done=done)
+        done = 0
         with ThreadPoolExecutor(max_workers=MATCH_WORKERS) as pool:
-            futures = [
-                pool.submit(_process_movie, user_id, name, m, existing_titles, existing_tmdb, lock)
-                for name, m in to_process.items()
-            ]
+            futures = []
+            for name, m in movies.items():
+                # A movie already tracked under this exact name that TV Time
+                # doesn't report as watched has nothing to reconcile (only
+                # "watched" ever changes an existing entry) — skip the TMDB
+                # search entirely rather than re-matching every re-run.
+                if not m["watched"] and ("film", normalize_title_key(name)) in existing_map:
+                    done += 1
+                    summary["skipped"] += 1
+                    _set(user_id, done=done)
+                    continue
+                futures.append(pool.submit(_process_movie, user_id, name, m, existing_map))
             for fut in as_completed(futures):
                 done += 1
                 _set(user_id, done=done)
-                item_id, unmatched = fut.result()
+                item_id, unmatched, is_new, changed = fut.result()
                 if item_id is not None:
-                    summary["movies"] += 1
+                    if is_new:
+                        summary["movies"] += 1
+                    elif changed:
+                        summary["updated"] += 1
+                    else:
+                        summary["skipped"] += 1
                 else:
                     summary["skipped"] += 1
                 if unmatched:
@@ -509,11 +573,13 @@ def _run_import(user_id: int, zip_bytes: bytes):
         summary["unmatched"] = summary["unmatched"][:20]
         _set(user_id, stage="Done", finished=True, summary=summary, error=None)
         _log.info(
-            "TV Time import finished for user_id=%s: %s shows, %s episodes, %s movies, %s skipped, %s unmatched",
+            "TV Time import finished for user_id=%s: %s shows, %s episodes, %s movies, %s updated, %s skipped, "
+            "%s unmatched",
             user_id,
             summary["shows"],
             summary["episodes"],
             summary["movies"],
+            summary["updated"],
             summary["skipped"],
             len(summary["unmatched"]),
         )

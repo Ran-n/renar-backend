@@ -2,71 +2,54 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.990684
-Revised: 2026/07/07 13:25:15.990684
+Revised: 2026/07/13 09:26:03.346399
 
 Upcoming releases for tracked titles: next episodes and film premieres.
 """
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
-from typing import Optional
 
 from ..auth import get_current_user
 from ..database import get_db
-from ..models import LibraryEntry, MediaType, Title, User, WatchStatus
-from .tmdb import _tmdb_get
+from ..models import Episode, LibraryEntry, MediaType, Title, User, WatchStatus
+from ..tmdb_store import sync_show_episodes
 
 router = APIRouter(prefix="/upcoming", tags=["upcoming"])
 _log = logging.getLogger(__name__)
 
-# Large libraries mean hundreds of TMDB lookups per feed build; doing them
-# sequentially takes minutes and times out the client. 16 parallel workers
-# stay well under TMDB's ~50 req/s ceiling while cutting a cold build to
-# a few seconds (warm builds are served from the 30-min TMDB cache).
-_MAX_WORKERS = 16
 
-
-def _tv_entry(item: dict, today: date) -> dict | None:
-    data = _tmdb_get(f"/tv/{item['tmdb_id']}")
-    nxt = data.get("next_episode_to_air") or {}
-    air_str = nxt.get("air_date")
-    if not air_str:
-        return None
-    when = date.fromisoformat(air_str)
-    if when < today:
+def _tv_entry(entry: LibraryEntry, title: Title, today: date) -> dict | None:
+    when = title.next_episode_air_date
+    if when is None or when < today:
         return None
     return {
-        "item_id": item["id"],
+        "item_id": entry.id,
         "media_type": "tv_show",
-        "title": item["title"],
-        "poster_url": item["poster_url"],
-        "date": air_str,
+        "title": title.title,
+        "poster_url": title.poster_url,
+        "date": when.isoformat(),
         "days_until": (when - today).days,
-        "season": nxt.get("season_number"),
-        "episode": nxt.get("episode_number"),
-        "episode_name": nxt.get("name"),
+        "season": title.next_episode_season,
+        "episode": title.next_episode_number,
+        "episode_name": title.next_episode_name,
     }
 
 
-def _film_entry(item: dict, today: date) -> dict | None:
-    data = _tmdb_get(f"/movie/{item['tmdb_id']}")
-    rel_str = data.get("release_date")
-    if not rel_str:
-        return None
-    when = date.fromisoformat(rel_str)
-    if when <= today:
+def _film_entry(entry: LibraryEntry, title: Title, today: date) -> dict | None:
+    when = title.release_date
+    if when is None or when <= today:
         return None
     return {
-        "item_id": item["id"],
+        "item_id": entry.id,
         "media_type": "film",
-        "title": item["title"],
-        "poster_url": item["poster_url"],
-        "date": rel_str,
+        "title": title.title,
+        "poster_url": title.poster_url,
+        "date": when.isoformat(),
         "days_until": (when - today).days,
         "season": None,
         "episode": None,
@@ -74,26 +57,14 @@ def _film_entry(item: dict, today: date) -> dict | None:
     }
 
 
-def _entry(item: dict, today: date) -> dict | None:
-    try:
-        if item["media_type"] == MediaType.tv_show:
-            return _tv_entry(item, today)
-        return _film_entry(item, today)
-    except Exception:
-        # one unreachable title must not break the whole feed
-        _log.warning("upcoming lookup failed for %r (tmdb_id=%s)", item["title"], item["tmdb_id"], exc_info=True)
-        return None
-
-
 @router.get("")
 def get_upcoming(
-    status_filter: Optional[WatchStatus] = None,
+    status_filter: WatchStatus | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     query = (
-        db
-        .query(LibraryEntry, Title)
+        db.query(LibraryEntry, Title)
         .join(Title, LibraryEntry.title_id == Title.id)
         .filter(
             LibraryEntry.user_id == user.id,
@@ -114,20 +85,108 @@ def get_upcoming(
     if status_filter is not None:
         query = query.filter(LibraryEntry.status == status_filter)
     rows = query.all()
-    # plain dicts: worker threads must not touch ORM objects tied to the session
-    items = [
-        {
-            "id": entry.id,
-            "media_type": title.media_type,
-            "title": title.title,
-            "poster_url": title.poster_url,
-            "tmdb_id": title.tmdb_id,
-        }
-        for entry, title in rows
-    ]
     today = date.today()
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-        results = pool.map(lambda it: _entry(it, today), items)
-    out = [entry for entry in results if entry is not None]
+    # Next-episode/release-date data is synced onto Title in the background
+    # (notifier.run_periodic) and on add/visit (refresh_title_details), so
+    # this is a plain DB read — no per-title TMDB round trips on the request path.
+    out = []
+    for entry, title in rows:
+        found = (
+            _tv_entry(entry, title, today)
+            if title.media_type == MediaType.tv_show
+            else _film_entry(entry, title, today)
+        )
+        if found is not None:
+            out.append(found)
     out.sort(key=lambda e: e["date"])
     return out
+
+
+@router.get("/history")
+def get_upcoming_history(
+    status_filter: WatchStatus | None = None,
+    before: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Past releases: aired TV episodes and released films for tracked
+    titles, most recent first. `before` (an ISO date from a previous
+    page's oldest entry) pages further into the past."""
+    today = date.today()
+    cutoff = date.fromisoformat(before) if before else today + timedelta(days=1)
+
+    tv_query = (
+        db.query(LibraryEntry, Title)
+        .join(Title, LibraryEntry.title_id == Title.id)
+        .filter(
+            LibraryEntry.user_id == user.id,
+            Title.media_type == MediaType.tv_show,
+            Title.tmdb_id.isnot(None),
+            LibraryEntry.status != WatchStatus.dropped,
+        )
+    )
+    if status_filter is not None:
+        tv_query = tv_query.filter(LibraryEntry.status == status_filter)
+
+    out = []
+    for entry, title in tv_query.all():
+        # Backfilled lazily here (through the same persistent TMDB cache
+        # season_tmdb() uses) so a show's history shows up on the first
+        # request rather than waiting for the periodic background job;
+        # sync_show_episodes skips seasons already fully captured, so a
+        # synced show costs only indexed DB reads.
+        sync_show_episodes(db, title)
+        episodes = (
+            db.query(Episode)
+            .filter(
+                Episode.title_id == title.id,
+                Episode.air_date.isnot(None),
+                Episode.air_date < cutoff,
+            )
+            .order_by(Episode.air_date.desc())
+            .limit(limit)
+            .all()
+        )
+        for ep in episodes:
+            out.append({
+                "item_id": entry.id,
+                "media_type": "tv_show",
+                "title": title.title,
+                "poster_url": title.poster_url,
+                "date": ep.air_date.isoformat(),
+                "days_until": (ep.air_date - today).days,
+                "season": ep.season,
+                "episode": ep.episode_number,
+                "episode_name": ep.name,
+            })
+
+    film_query = (
+        db.query(LibraryEntry, Title)
+        .join(Title, LibraryEntry.title_id == Title.id)
+        .filter(
+            LibraryEntry.user_id == user.id,
+            Title.media_type == MediaType.film,
+            Title.tmdb_id.isnot(None),
+            LibraryEntry.status != WatchStatus.dropped,
+            Title.release_date.isnot(None),
+            Title.release_date < cutoff,
+        )
+    )
+    if status_filter is not None:
+        film_query = film_query.filter(LibraryEntry.status == status_filter)
+    for entry, title in film_query.all():
+        out.append({
+            "item_id": entry.id,
+            "media_type": "film",
+            "title": title.title,
+            "poster_url": title.poster_url,
+            "date": title.release_date.isoformat(),
+            "days_until": (title.release_date - today).days,
+            "season": None,
+            "episode": None,
+            "episode_name": None,
+        })
+
+    out.sort(key=lambda e: e["date"], reverse=True)
+    return out[:limit]

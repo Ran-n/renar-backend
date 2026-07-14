@@ -2,28 +2,50 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/07/07 13:25:14.143586
+Revised: 2026/07/12 17:00:10.948140
 """
 
+from pathlib import Path
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Repo root in the src layout (src/xoutaim_backend/config.py -> two up).
+# Anchoring here instead of the CWD keeps `.env` and a relative MEDIA_DIR
+# working no matter which directory the server was launched from; a
+# non-editable install should set both explicitly (absolute) anyway.
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # The CWD `.env` (second entry) wins over the repo one when both exist.
+    model_config = SettingsConfigDict(
+        env_file=(str(_ROOT / ".env"), ".env"),
+        env_file_encoding="utf-8",
+    )
 
     secret_key: str = "dev-only-secret-change-me-in-production-0000"
-    database_url: str = "sqlite:///./xoutaim.db"
+    database_url: str
     access_token_expire_minutes: int = 60 * 24 * 7  # one week
     cors_origins: list[str] = ["http://localhost:8550", "http://127.0.0.1:8550"]
     tmdb_api_key: str = ""
     tvdb_api_key: str = ""  # optional: fallback lookup for TV Time import matching
+    youtube_api_key: str = ""  # YouTube Data API v3, for channel search/video listing on Explore
     episode_check_minutes: int = 360  # how often to look for new episodes
+    # Persisted TMDB copies (tmdb_cache table) younger than this are served
+    # without contacting TMDB; older ones are refreshed on access and only
+    # served stale when TMDB is unreachable.
+    tmdb_db_cache_hours: int = 24
     media_dir: str = "./media"  # root of the content-addressed file store
     admin_username: str = ""  # admin panel stays 503 until both are set
     admin_password: str = ""
     # Where the admin panel lives. Rename it (e.g. /panel-x7k2) and the
     # default /admin location automatically becomes a honeypot.
     admin_path: str = "/admin"
+    # Shared secret for the frontend web server's own anti-abuse guard to
+    # push/pull banned_ips over /svc/bans (see routers/svc.py). Empty means
+    # the endpoints stay 404 to everyone, same as an unset admin panel.
+    internal_service_secret: str = ""
 
     # anti-abuse (see security.py); the API is exposed to the open internet.
     # Limits are per IP, and one IP can be a whole office or CGNAT pool of
@@ -47,6 +69,14 @@ class Settings(BaseSettings):
     strike_ban_threshold: int = 5  # persisted offenses (see Strike) before an IP is permabanned
     # honeypot hits (/.env, /wp-login.php, ...) are PERMANENT bans stored in
     # the banned_ips table; lift them from the admin panel
+
+    @field_validator("media_dir")
+    @classmethod
+    def _anchor_media_dir(cls, value: str) -> str:
+        """A relative MEDIA_DIR means "relative to the repo root", not to
+        whatever directory the server happened to be launched from."""
+        path = Path(value)
+        return str(path if path.is_absolute() else (_ROOT / path).resolve())
 
 
 settings = Settings()

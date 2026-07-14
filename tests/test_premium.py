@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/10 18:25:42.607537
+Revised: 2026/07/10 18:25:42.607537
+
+Premium accounts: badge derivation, style colors, verification requests,
+custom posters (upload + GC) and the admin grant/revoke/verify actions.
+"""
+
+import base64
+import io
+from datetime import timedelta
+
+from conftest import ADMIN_BASIC as BASIC
+from PIL import Image as PILImage
+
+from xoutaim_backend.database import SessionLocal
+from xoutaim_backend.models import Image, Title, User, utcnow
+from xoutaim_backend.premium import PALETTE
+
+COLOR = PALETTE[0]
+COLOR2 = PALETTE[1]
+
+
+def _set_premium(user_id: int, days: int = 30) -> None:
+    """Directly set premium_until (negative days => lapsed subscription)."""
+    db = SessionLocal()
+    try:
+        db.get(User, user_id).premium_until = utcnow() + timedelta(days=days)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _set_verified(user_id: int, value: bool = True) -> None:
+    db = SessionLocal()
+    try:
+        db.get(User, user_id).verified = value
+        db.commit()
+    finally:
+        db.close()
+
+
+def _png_b64(color: tuple[int, int, int] = (200, 30, 30)) -> str:
+    img = PILImage.new("RGB", (20, 30), color)
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return base64.b64encode(out.getvalue()).decode()
+
+
+def _image_count() -> int:
+    db = SessionLocal()
+    try:
+        return db.query(Image).count()
+    finally:
+        db.close()
+
+
+def _add_film(client, headers, title: str = "Heat", tmdb_id: int = 949) -> dict:
+    r = client.post("/media", json={"media_type": "film", "title": title, "tmdb_id": tmdb_id}, headers=headers)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+# ---------- /auth/me premium fields ----------
+
+
+def test_me_reports_free_account_defaults(client, alice):
+    _, headers = alice
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["is_premium"] is False
+    assert me["premium_until"] is None
+    assert me["badge"] is None
+    assert me["verified"] is False
+    assert me["verification_requested"] is False
+    assert me["ring_color"] is None
+    assert me["name_color"] is None
+
+
+def test_badge_premium_when_active(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["is_premium"] is True
+    assert me["badge"] == "premium"
+
+
+def test_verified_badge_replaces_premium(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    _set_verified(user["id"])
+    assert client.get("/auth/me", headers=headers).json()["badge"] == "verified"
+
+
+def test_badge_gone_when_premium_lapses(client, alice):
+    user, headers = alice
+    _set_premium(user["id"], days=-1)
+    _set_verified(user["id"])
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["is_premium"] is False
+    assert me["badge"] is None
+
+
+# ---------- palette ----------
+
+
+def test_palette_requires_auth(client):
+    assert client.get("/premium/palette").status_code == 401
+
+
+def test_palette_lists_hex_colors(client, alice):
+    _, headers = alice
+    colors = client.get("/premium/palette", headers=headers).json()["colors"]
+    assert colors == list(PALETTE)
+    assert all(c.startswith("#") and len(c) == 7 for c in colors)
+
+
+# ---------- style ----------
+
+
+def test_style_update_requires_premium(client, alice):
+    _, headers = alice
+    r = client.patch("/premium/style", json={"ring_color": COLOR}, headers=headers)
+    assert r.status_code == 403
+
+
+def test_style_update_roundtrip(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"ring_color": COLOR, "name_color": COLOR2}, headers=headers)
+    assert r.status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["ring_color"] == COLOR
+    assert me["name_color"] == COLOR2
+
+
+def test_style_rejects_non_palette_color(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"ring_color": "#123456"}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_style_clear_color_with_null(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    client.patch("/premium/style", json={"ring_color": COLOR, "name_color": COLOR2}, headers=headers)
+    r = client.patch("/premium/style", json={"ring_color": None}, headers=headers)
+    assert r.status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["ring_color"] is None
+    assert me["name_color"] == COLOR2  # untouched: only the sent field changed
+
+
+# ---------- flair in public payloads ----------
+
+
+def _premium_alice_with_style(client, alice) -> tuple[dict, dict]:
+    user, headers = alice
+    _set_premium(user["id"])
+    client.patch("/premium/style", json={"ring_color": COLOR, "name_color": COLOR2}, headers=headers)
+    return user, headers
+
+
+def test_comment_carries_flair(client, alice, bob):
+    _, a_headers = _premium_alice_with_style(client, alice)
+    _, b_headers = bob
+    client.post(
+        "/comments",
+        json={"media_type": "film", "tmdb_id": 949, "title": "Heat", "text": "great"},
+        headers=a_headers,
+    )
+    (comment,) = client.get("/comments", params={"media_type": "film", "tmdb_id": 949}, headers=b_headers).json()
+    assert comment["badge"] == "premium"
+    assert comment["ring_color"] == COLOR
+    assert comment["name_color"] == COLOR2
+
+
+def test_comment_flair_blank_after_lapse(client, alice, bob):
+    user, a_headers = _premium_alice_with_style(client, alice)
+    _, b_headers = bob
+    client.post(
+        "/comments",
+        json={"media_type": "film", "tmdb_id": 949, "title": "Heat", "text": "great"},
+        headers=a_headers,
+    )
+    _set_premium(user["id"], days=-1)
+    (comment,) = client.get("/comments", params={"media_type": "film", "tmdb_id": 949}, headers=b_headers).json()
+    assert comment["badge"] is None
+    assert comment["ring_color"] is None
+    assert comment["name_color"] is None
+
+
+def test_public_profile_includes_flair(client, alice, bob):
+    user, _ = _premium_alice_with_style(client, alice)
+    _, b_headers = bob
+    profile = client.get(f"/users/{user['id']}", headers=b_headers).json()
+    assert profile["badge"] == "premium"
+    assert profile["ring_color"] == COLOR
+    assert profile["name_color"] == COLOR2
+
+
+def test_feed_includes_flair(client, alice, bob):
+    a_user, a_headers = _premium_alice_with_style(client, alice)
+    _, b_headers = bob
+    client.post(f"/users/{a_user['id']}/follow", headers=b_headers)
+    _add_film(client, a_headers)
+    (row,) = client.get("/feed", headers=b_headers).json()
+    assert row["badge"] == "premium"
+    assert row["name_color"] == COLOR2
+
+
+# ---------- verification requests ----------
+
+
+def test_verification_request_requires_premium(client, alice):
+    _, headers = alice
+    assert client.post("/premium/verification-request", headers=headers).status_code == 403
+
+
+def test_verification_request_sets_flag(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.post("/premium/verification-request", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["verification_requested"] is True
+
+
+def test_verification_request_conflict_when_verified(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    _set_verified(user["id"])
+    assert client.post("/premium/verification-request", headers=headers).status_code == 409
+
+
+def test_verification_request_withdraw_works_without_premium(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    client.post("/premium/verification-request", headers=headers)
+    _set_premium(user["id"], days=-1)
+    r = client.delete("/premium/verification-request", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["verification_requested"] is False
+
+
+# ---------- custom posters ----------
+
+
+def test_set_poster_requires_premium(client, alice):
+    _, headers = alice
+    item = _add_film(client, headers)
+    r = client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
+    assert r.status_code == 403
+
+
+def test_upload_poster_overrides_only_own_entry(client, alice, bob):
+    a_user, a_headers = alice
+    _, b_headers = bob
+    _set_premium(a_user["id"])
+    a_item = _add_film(client, a_headers)
+    b_item = _add_film(client, b_headers)
+
+    r = client.put(f"/media/{a_item['id']}/poster", json={"image_b64": _png_b64()}, headers=a_headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["poster_url"].startswith("/images/")
+    assert body["custom_poster_url"] == body["poster_url"]
+
+    # the shared Title row and bob's entry are untouched
+    db = SessionLocal()
+    try:
+        assert db.query(Title).filter(Title.tmdb_id == 949).one().poster_url is None
+    finally:
+        db.close()
+    assert client.get(f"/media/{b_item['id']}", headers=b_headers).json()["poster_url"] is None
+
+
+def test_poster_from_foreign_url_rejected(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    r = client.put(
+        f"/media/{item['id']}/poster",
+        json={"tmdb_url": "https://evil.example.com/x.jpg"},
+        headers=headers,
+    )
+    assert r.status_code == 422
+
+
+def test_poster_requires_exactly_one_source(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    url = "https://image.tmdb.org/t/p/w500/x.jpg"
+    assert client.put(f"/media/{item['id']}/poster", json={}, headers=headers).status_code == 422
+    r = client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64(), "tmdb_url": url}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_poster_invalid_image_rejected(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    r = client.put(f"/media/{item['id']}/poster", json={"image_b64": "bm90IGFuIGltYWdl"}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_poster_falls_back_when_premium_lapses(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
+
+    _set_premium(user["id"], days=-1)
+    body = client.get(f"/media/{item['id']}", headers=headers).json()
+    assert body["poster_url"] is None  # back to the Title poster (none here)
+    assert body["custom_poster_url"] is not None  # the stored choice survives
+
+
+def test_clear_poster_works_without_premium_and_gcs_image(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
+    assert _image_count() == 1
+
+    _set_premium(user["id"], days=-1)
+    r = client.delete(f"/media/{item['id']}/poster", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["custom_poster_url"] is None
+    assert _image_count() == 0
+
+
+def test_poster_replace_gcs_old_image(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64((200, 30, 30))}, headers=headers)
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64((30, 200, 30))}, headers=headers)
+    assert _image_count() == 1
+
+
+def test_delete_entry_gcs_poster_image(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
+    assert client.delete(f"/media/{item['id']}", headers=headers).status_code == 204
+    assert _image_count() == 0
+
+
+def test_shared_image_survives_poster_gc(client, alice):
+    """Avatar and poster with identical bytes share one image row; clearing
+    the poster must not delete the file the avatar still uses."""
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    png = _png_b64()
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": png}, headers=headers)
+    poster_url = client.get(f"/media/{item['id']}", headers=headers).json()["custom_poster_url"]
+
+    # uploading the same source produces a different JPEG only if processing
+    # differs; force sharing by setting the avatar to the poster's exact bytes
+    raw = client.get(poster_url).content
+    client.patch("/auth/profile", json={"avatar_b64": base64.b64encode(raw).decode()}, headers=headers)
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["avatar"] == poster_url  # same hash — one shared row
+
+    client.delete(f"/media/{item['id']}/poster", headers=headers)
+    assert _image_count() == 1
+    assert client.get(me["avatar"]).status_code == 200
+
+
+def test_tmdb_posters_unconfigured_returns_503(client, alice):
+    _, headers = alice
+    r = client.get("/tmdb/posters", params={"media_type": "film", "tmdb_id": 949}, headers=headers)
+    assert r.status_code == 503  # no TMDB_API_KEY in the test env
+
+
+# ---------- admin actions ----------
+
+
+def test_admin_grant_and_revoke_premium(client, admin_enabled, alice):
+    user, headers = alice
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    assert client.get("/auth/me", headers=headers).json()["is_premium"] is True
+
+    r = client.post(f"/admin/users/{user['id']}/premium/revoke", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["is_premium"] is False
+    assert me["premium_until"] is None
+
+
+def test_admin_grant_premium_extends_active_subscription(client, admin_enabled, alice):
+    user, headers = alice
+    client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=BASIC, follow_redirects=False)
+    client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=BASIC, follow_redirects=False)
+    db = SessionLocal()
+    try:
+        until = db.get(User, user["id"]).premium_until
+    finally:
+        db.close()
+    assert until > utcnow() + timedelta(days=59)
+
+
+def test_admin_grant_premium_invalid_days_rejected(client, admin_enabled, alice):
+    user, _ = alice
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "0"}, auth=BASIC)
+    assert r.status_code == 422
+
+
+def test_admin_verify_and_unverify(client, admin_enabled, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    client.post("/premium/verification-request", headers=headers)
+
+    r = client.post(f"/admin/users/{user['id']}/verify", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["verified"] is True
+    assert me["verification_requested"] is False
+    assert me["badge"] == "verified"
+
+    client.post(f"/admin/users/{user['id']}/unverify", auth=BASIC, follow_redirects=False)
+    assert client.get("/auth/me", headers=headers).json()["verified"] is False
+
+
+def test_admin_premium_actions_missing_user_not_found(client, admin_enabled):
+    assert client.post("/admin/users/9999/premium", data={"days": "30"}, auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/verify", auth=BASIC).status_code == 404

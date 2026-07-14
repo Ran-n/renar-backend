@@ -2,17 +2,35 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/07/07 13:25:15.286403
+Revised: 2026/07/14 22:48:11.676185
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func
+import base64
+import io
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from PIL import Image as PILImage
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..auth import get_current_user, require_premium
 from ..database import get_db
-from ..models import EpisodeWatch, LibraryEntry, MediaType, Title, User, WatchEvent, WatchStatus, normalize_title_key
+from ..image_service import gc_image, image_row_for
+from ..models import (
+    Episode,
+    EpisodeCustomStill,
+    EpisodeWatch,
+    LibraryEntry,
+    MediaType,
+    Title,
+    TmdbCache,
+    User,
+    WatchEvent,
+    WatchStatus,
+    prefetch_episode_cache,
+)
 from ..schemas import (
+    CustomPosterSet,
     EpisodeBulk,
     EpisodeSet,
     LibraryEntryCreate,
@@ -20,8 +38,16 @@ from ..schemas import (
     LibraryEntryUpdate,
     RewatchCreate,
 )
+from ..titles import WITH_TITLE_GENRES, find_or_create_title, find_title
+from ..tmdb_store import localized_titles, refresh_title_details, warm_title_translations
+from .tmdb import fetch_poster_bytes
 
 router = APIRouter(prefix="/media", tags=["media"])
+
+# cap on how many titles get a background translation fetch per list_media
+# call — bounds worst-case TMDB load for a user with a huge library switching
+# language for the first time; the rest warm up over subsequent requests.
+_MAX_WARMUP_PER_REQUEST = 15
 
 
 def _get_owned_item(item_id: int, user: User, db: Session) -> LibraryEntry:
@@ -31,59 +57,56 @@ def _get_owned_item(item_id: int, user: User, db: Session) -> LibraryEntry:
     return item
 
 
-def _find_or_create_title(data: LibraryEntryCreate, db: Session) -> Title:
-    if data.tmdb_id is not None:
-        found = (
-            db.query(Title)
-            .filter(Title.media_type == data.media_type, Title.tmdb_id == data.tmdb_id)
-            .first()
-        )
-    else:
-        found = (
-            db.query(Title)
-            .filter(
-                Title.media_type == data.media_type,
-                Title.tmdb_id.is_(None),
-                Title.title_key == normalize_title_key(data.title),
-            )
-            .first()
-        )
-    if found:
-        return found
-    new_title = Title(
-        media_type=data.media_type,
-        tmdb_id=data.tmdb_id,
-        title_key=None if data.tmdb_id is not None else normalize_title_key(data.title),
-        title=data.title,
-        year=data.year,
-        poster_url=data.poster_url,
-        runtime_minutes=data.runtime_minutes,
-        total_episodes=data.total_episodes,
-        genres=data.genres,
-        author=data.author,
-        page_count=data.page_count,
-    )
-    db.add(new_title)
-    db.flush()
-    return new_title
-
-
 @router.get("", response_model=list[LibraryEntryOut])
 def list_media(
+    background_tasks: BackgroundTasks,
     media_type: MediaType | None = None,
     status_filter: WatchStatus | None = None,
     search: str | None = None,
+    lang: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    query = db.query(LibraryEntry).join(Title).filter(LibraryEntry.user_id == user.id)
+    query = db.query(LibraryEntry).join(Title).options(*WITH_TITLE_GENRES).filter(LibraryEntry.user_id == user.id)
     if media_type is not None:
         query = query.filter(Title.media_type == media_type)
     if status_filter is not None:
         query = query.filter(LibraryEntry.status == status_filter)
     if search:
-        query = query.filter(Title.title.ilike(f"%{search}%"))
-    return query.order_by(LibraryEntry.updated_at.desc()).all()
+        # matches the title's creation-time text, its language-independent
+        # original name, or any language's title we've already cached from
+        # TMDB (e.g. a Spanish title cached because some user viewed it in
+        # Spanish) — so a search in the user's own language finds it too.
+        cached_match = db.query(TmdbCache.title_id).filter(
+            TmdbCache.kind == "details",
+            or_(
+                TmdbCache.payload["title"].astext.ilike(f"%{search}%"),
+                TmdbCache.payload["name"].astext.ilike(f"%{search}%"),
+            ),
+        )
+        query = query.filter(
+            or_(
+                Title.title.ilike(f"%{search}%"),
+                Title.original_title.ilike(f"%{search}%"),
+                Title.id.in_(cached_match),
+            )
+        )
+    entries = query.order_by(LibraryEntry.updated_at.desc()).all()
+    prefetch_episode_cache(db, (e.title_id for e in entries))
+
+    if lang and lang != "en" and entries:
+        translations = localized_titles(db, [e.title_id for e in entries], lang)
+        missing_ids = []
+        for entry in entries:
+            found = translations.get(entry.title_id)
+            if found:
+                entry._display_title = found
+            elif entry.title_id not in missing_ids:
+                missing_ids.append(entry.title_id)
+        if missing_ids:
+            background_tasks.add_task(warm_title_translations, missing_ids[:_MAX_WARMUP_PER_REQUEST], lang)
+
+    return entries
 
 
 @router.post("", response_model=LibraryEntryOut, status_code=status.HTTP_201_CREATED)
@@ -92,12 +115,25 @@ def create_media(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    title = _find_or_create_title(data, db)
+    title = find_or_create_title(
+        db,
+        data.media_type,
+        data.tmdb_id,
+        data.title,
+        year=data.year,
+        poster_url=data.poster_url,
+        runtime_minutes=data.runtime_minutes,
+        total_episodes=data.total_episodes,
+        genres=data.genres,
+        author=data.author,
+        page_count=data.page_count,
+    )
+    # populate overview/status/etc. now that the title exists; best-effort
+    # (usually served from the in-memory TMDB cache — the client was just
+    # on the detail page) and never blocks the add
+    refresh_title_details(db, title)
     duplicate = (
-        db
-        .query(LibraryEntry)
-        .filter(LibraryEntry.user_id == user.id, LibraryEntry.title_id == title.id)
-        .first()
+        db.query(LibraryEntry).filter(LibraryEntry.user_id == user.id, LibraryEntry.title_id == title.id).first()
     )
     if duplicate:
         raise HTTPException(
@@ -135,18 +171,13 @@ def title_ratings(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide tmdb_id or title",
         )
-    title_query = db.query(Title.id).filter(Title.media_type == media_type)
-    title_query = (
-        title_query.filter(Title.tmdb_id == tmdb_id)
-        if tmdb_id is not None
-        else title_query.filter(Title.tmdb_id.is_(None), Title.title_key == normalize_title_key(title))
-    )
-    title_ids = [t for (t,) in title_query.all()]
+    title_row = find_title(db, media_type, tmdb_id, title)
+    if title_row is None:
+        return {"average": None, "count": 0}
     ratings = [
         r
-        for (r,) in db
-        .query(LibraryEntry.rating)
-        .filter(LibraryEntry.title_id.in_(title_ids), LibraryEntry.rating.isnot(None))
+        for (r,) in db.query(LibraryEntry.rating)
+        .filter(LibraryEntry.title_id == title_row.id, LibraryEntry.rating.isnot(None))
         .all()
     ]
     average = round(sum(ratings) / len(ratings), 1) if ratings else None
@@ -162,6 +193,27 @@ def get_media(
     return _get_owned_item(item_id, user, db)
 
 
+def _derive_season_episode(item: LibraryEntry, db: Session) -> None:
+    """Best-effort fill-in for current_season/current_episode from the
+    title's Episode catalog (ordered by season, episode_number), so the
+    season-relative display (e.g. "3x05") also works for the coarse
+    "+1 episodes_watched" flow, not just per-episode tracking. Never
+    overrides a season/episode the caller set explicitly in this same
+    request — see update_media."""
+    if not item.episodes_watched:
+        return
+    episodes = (
+        db.query(Episode)
+        .filter(Episode.title_id == item.title_id)
+        .order_by(Episode.season, Episode.episode_number)
+        .all()
+    )
+    if not episodes:
+        return
+    ep = episodes[min(item.episodes_watched, len(episodes)) - 1]
+    item.current_season, item.current_episode = ep.season, ep.episode_number
+
+
 @router.patch("/{item_id}", response_model=LibraryEntryOut)
 def update_media(
     item_id: int,
@@ -170,8 +222,11 @@ def update_media(
     user: User = Depends(get_current_user),
 ):
     item = _get_owned_item(item_id, user, db)
-    for field, value in data.model_dump(exclude_unset=True).items():
+    changed = data.model_dump(exclude_unset=True)
+    for field, value in changed.items():
         setattr(item, field, value)
+    if "episodes_watched" in changed and "current_season" not in changed and "current_episode" not in changed:
+        _derive_season_episode(item, db)
     db.commit()
     db.refresh(item)
     return item
@@ -184,8 +239,233 @@ def delete_media(
     user: User = Depends(get_current_user),
 ):
     item = _get_owned_item(item_id, user, db)
+    old_poster_image_id = item.custom_poster_image_id
+    old_backdrop_image_id = item.custom_backdrop_image_id
     db.delete(item)
+    db.flush()
+    gc_image(old_poster_image_id, db)
+    gc_image(old_backdrop_image_id, db)
     db.commit()
+
+
+# ---------- custom posters (premium) ----------
+
+POSTER_MAX = (800, 1200)  # w500-class 2:3 poster, generous headroom
+
+
+def _poster_jpeg(raw: bytes) -> bytes:
+    """Downscale to poster size and return normalized JPEG bytes; uploads and
+    downloaded TMDB alternates go through the same path."""
+    try:
+        img = PILImage.open(io.BytesIO(raw))
+        img = img.convert("RGB")
+        img.thumbnail(POSTER_MAX)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        return out.getvalue()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Could not read that image file",
+        ) from exc
+
+
+@router.put("/{item_id}/poster", response_model=LibraryEntryOut)
+def set_custom_poster(
+    item_id: int,
+    data: CustomPosterSet,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_premium),
+):
+    """Premium: override this entry's poster with an upload or a TMDB
+    alternate (downloaded server-side). Only touches the user's own entry —
+    the shared Title poster is never modified."""
+    item = _get_owned_item(item_id, user, db)
+    if data.image_b64:
+        try:
+            raw = base64.b64decode(data.image_b64)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Could not read that image file",
+            ) from exc
+    else:
+        raw = fetch_poster_bytes(data.tmdb_url)
+    old_image_id = item.custom_poster_image_id
+    item.custom_poster_image_id = image_row_for(_poster_jpeg(raw), db).id
+    if old_image_id != item.custom_poster_image_id:
+        db.flush()  # GC must see the new reference
+        gc_image(old_image_id, db)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/{item_id}/poster", response_model=LibraryEntryOut)
+def clear_custom_poster(
+    item_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Clearing works without premium: a lapsed subscriber can always go
+    back to the default poster."""
+    item = _get_owned_item(item_id, user, db)
+    old_image_id = item.custom_poster_image_id
+    item.custom_poster_image_id = None
+    if old_image_id is not None:
+        db.flush()
+        gc_image(old_image_id, db)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+# ---------- custom backdrops (premium) ----------
+
+BACKDROP_MAX = (1280, 720)  # w780-class 16:9 backdrop, generous headroom
+
+
+def _backdrop_jpeg(raw: bytes) -> bytes:
+    """Downscale to backdrop size and return normalized JPEG bytes; same
+    normalize-on-write path as posters, just a landscape target size."""
+    try:
+        img = PILImage.open(io.BytesIO(raw))
+        img = img.convert("RGB")
+        img.thumbnail(BACKDROP_MAX)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        return out.getvalue()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Could not read that image file",
+        ) from exc
+
+
+@router.put("/{item_id}/backdrop", response_model=LibraryEntryOut)
+def set_custom_backdrop(
+    item_id: int,
+    data: CustomPosterSet,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_premium),
+):
+    """Premium: override this entry's backdrop with an upload or a TMDB
+    alternate (downloaded server-side). Only touches the user's own entry —
+    the shared Title backdrop is never modified."""
+    item = _get_owned_item(item_id, user, db)
+    if data.image_b64:
+        try:
+            raw = base64.b64decode(data.image_b64)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Could not read that image file",
+            ) from exc
+    else:
+        raw = fetch_poster_bytes(data.tmdb_url)
+    old_image_id = item.custom_backdrop_image_id
+    item.custom_backdrop_image_id = image_row_for(_backdrop_jpeg(raw), db).id
+    if old_image_id != item.custom_backdrop_image_id:
+        db.flush()  # GC must see the new reference
+        gc_image(old_image_id, db)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/{item_id}/backdrop", response_model=LibraryEntryOut)
+def clear_custom_backdrop(
+    item_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Clearing works without premium: a lapsed subscriber can always go
+    back to the default backdrop."""
+    item = _get_owned_item(item_id, user, db)
+    old_image_id = item.custom_backdrop_image_id
+    item.custom_backdrop_image_id = None
+    if old_image_id is not None:
+        db.flush()
+        gc_image(old_image_id, db)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+# ---------- custom episode stills (premium) ----------
+
+
+def _get_custom_still(item: LibraryEntry, season: int, episode: int, db: Session) -> EpisodeCustomStill | None:
+    return (
+        db.query(EpisodeCustomStill)
+        .filter(
+            EpisodeCustomStill.media_item_id == item.id,
+            EpisodeCustomStill.season == season,
+            EpisodeCustomStill.episode == episode,
+        )
+        .first()
+    )
+
+
+@router.put("/{item_id}/episodes/{season}/{episode}/still")
+def set_custom_episode_still(
+    item_id: int,
+    season: int,
+    episode: int,
+    data: CustomPosterSet,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_premium),
+):
+    """Premium: override this episode's still with an upload or a TMDB
+    alternate, same rules/shape as the item-level poster/backdrop overrides.
+    Kept on its own table rather than EpisodeWatch — a still may be set on an
+    episode the user hasn't watched yet, and a watch row's mere existence
+    already means "watched" elsewhere in this file."""
+    item = _get_owned_item(item_id, user, db)
+    if data.image_b64:
+        try:
+            raw = base64.b64decode(data.image_b64)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Could not read that image file",
+            ) from exc
+    else:
+        raw = fetch_poster_bytes(data.tmdb_url)
+    still = _get_custom_still(item, season, episode, db)
+    img = image_row_for(_backdrop_jpeg(raw), db)
+    old_image_id = still.still_image_id if still else None
+    if still is None:
+        still = EpisodeCustomStill(media_item_id=item.id, season=season, episode=episode, still_image_id=img.id)
+        db.add(still)
+    else:
+        still.still_image_id = img.id
+    if old_image_id != img.id:
+        db.flush()  # GC must see the new reference
+        gc_image(old_image_id, db)
+    db.commit()
+    return {"still_url": f"/images/{img.hash}"}
+
+
+@router.delete("/{item_id}/episodes/{season}/{episode}/still")
+def clear_custom_episode_still(
+    item_id: int,
+    season: int,
+    episode: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Clearing works without premium: a lapsed subscriber can always go
+    back to the default still."""
+    item = _get_owned_item(item_id, user, db)
+    still = _get_custom_still(item, season, episode, db)
+    if still is not None:
+        old_image_id = still.still_image_id
+        db.delete(still)
+        db.flush()
+        gc_image(old_image_id, db)
+    db.commit()
+    return {"still_url": None}
 
 
 # ---------- per-episode tracking ----------
@@ -208,8 +488,7 @@ def _sync_progress(item: LibraryEntry, db: Session) -> None:
 def _ratings_summary(item: LibraryEntry, db: Session) -> dict:
     ep_ratings = [
         w.rating
-        for w in db
-        .query(EpisodeWatch)
+        for w in db.query(EpisodeWatch)
         .filter(EpisodeWatch.media_item_id == item.id, EpisodeWatch.rating.isnot(None))
         .all()
     ]
@@ -236,20 +515,30 @@ def list_episodes(
 ):
     item = _get_owned_item(item_id, user, db)
     watches = (
-        db
-        .query(EpisodeWatch)
+        db.query(EpisodeWatch)
         .filter(EpisodeWatch.media_item_id == item.id)
         .order_by(EpisodeWatch.season, EpisodeWatch.episode)
         .all()
     )
     rewatch_counts = {
         (s, e): c
-        for s, e, c in db
-        .query(WatchEvent.season, WatchEvent.episode, func.count(WatchEvent.id))
+        for s, e, c in db.query(WatchEvent.season, WatchEvent.episode, func.count(WatchEvent.id))
         .filter(WatchEvent.media_item_id == item.id, WatchEvent.season.isnot(None))
         .group_by(WatchEvent.season, WatchEvent.episode)
         .all()
     }
+    # custom stills exist independently of watch status, so they're listed
+    # separately rather than folded into `watched`; only served while the
+    # owner is premium (kept but not served once premium lapses, same rule
+    # as the item-level poster/backdrop overrides)
+    custom_stills = (
+        [
+            {"season": s.season, "episode": s.episode, "still_url": f"/images/{s.still_image.hash}"}
+            for s in db.query(EpisodeCustomStill).filter(EpisodeCustomStill.media_item_id == item.id).all()
+        ]
+        if item.owner.is_premium
+        else []
+    )
     return {
         "watched": [
             {
@@ -260,6 +549,7 @@ def list_episodes(
             }
             for w in watches
         ],
+        "custom_stills": custom_stills,
         **_ratings_summary(item, db),
     }
 
@@ -279,8 +569,7 @@ def rewatch(
         )
     if data.season is not None:
         watch = (
-            db
-            .query(EpisodeWatch)
+            db.query(EpisodeWatch)
             .filter(
                 EpisodeWatch.media_item_id == item.id,
                 EpisodeWatch.season == data.season,
@@ -307,8 +596,7 @@ def set_episode(
 ):
     item = _get_owned_item(item_id, user, db)
     watch = (
-        db
-        .query(EpisodeWatch)
+        db.query(EpisodeWatch)
         .filter(
             EpisodeWatch.media_item_id == item.id,
             EpisodeWatch.season == season,

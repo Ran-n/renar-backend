@@ -2,20 +2,23 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.713668
-Revised: 2026/07/07 13:25:15.713668
+Revised: 2026/07/10 08:47:47.421329
 
 Watch-time and library statistics for the current user.
 """
 
-from collections import Counter
+from collections import Counter, defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..auth import get_current_user, require_premium
 from ..database import get_db
 from ..models import EpisodeWatch, LibraryEntry, MediaType, User, WatchStatus
+from ..titles import WITH_TITLE_GENRES
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
@@ -51,11 +54,12 @@ def _streaks(days: list[date]) -> tuple[int, int]:
 
 @router.get("")
 def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    items: list[LibraryEntry] = db.query(LibraryEntry).filter(LibraryEntry.user_id == user.id).all()
+    items: list[LibraryEntry] = (
+        db.query(LibraryEntry).options(*WITH_TITLE_GENRES).filter(LibraryEntry.user_id == user.id).all()
+    )
     items_by_id = {item.id: item for item in items}
     watches: list[EpisodeWatch] = (
-        db
-        .query(EpisodeWatch)
+        db.query(EpisodeWatch)
         .join(LibraryEntry, EpisodeWatch.media_item_id == LibraryEntry.id)
         .filter(LibraryEntry.user_id == user.id)
         .all()
@@ -80,8 +84,7 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
             favorites += 1
         if item.rating:
             ratings.append(item.rating)
-        if item.genres:
-            genre_counter.update(g.strip() for g in item.genres.split(",") if g.strip())
+        genre_counter.update(item.genres)
 
         if item.media_type == MediaType.film:
             if item.status == WatchStatus.completed:
@@ -129,7 +132,7 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
     current_streak, longest_streak = _streaks(sorted(watch_days))
 
     most_watched = []
-    for item_id, count in episodes_per_item.most_common(5):
+    for item_id, count in episodes_per_item.most_common(20):
         if count == 0:
             continue
         item = items_by_id[item_id]
@@ -164,8 +167,76 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         "current_streak_days": current_streak,
         "longest_streak_days": longest_streak,
         "most_active_day": weekday_counter.most_common(1)[0][0] if weekday_counter else None,
+        "activity_by_weekday": dict(weekday_counter),
         "most_watched_shows": most_watched,
         "by_status": dict(by_status),
         "by_type": dict(by_type),
-        "top_genres": [{"genre": g, "count": c} for g, c in genre_counter.most_common(5)],
+        "top_genres": [{"genre": g, "count": c} for g, c in genre_counter.most_common(20)],
+    }
+
+
+def _total_watch_minutes_by_user(db: Session) -> dict[int, int]:
+    """Total film + tv watch minutes for every user, keyed by user id."""
+    totals: dict[int, int] = defaultdict(int)
+    for item in db.query(LibraryEntry).all():
+        if item.media_type == MediaType.film and item.status == WatchStatus.completed:
+            totals[item.user_id] += item.runtime_minutes or DEFAULT_FILM_RUNTIME
+        elif item.media_type == MediaType.tv_show:
+            eps = item.episodes_watched or 0
+            if item.status == WatchStatus.completed and eps == 0 and item.total_episodes:
+                eps = item.total_episodes
+            totals[item.user_id] += eps * (item.runtime_minutes or DEFAULT_EPISODE_RUNTIME)
+    return totals
+
+
+@dataclass(frozen=True)
+class RankingMetric:
+    """One leaderboard: a display label, the unit its value is in (so the
+    frontend knows how to format it), and how to compute per-user totals.
+    Add an entry here to add a new ranking — /stats/ranking/metrics and
+    /stats/ranking?metric=... both pick it up automatically."""
+
+    key: str
+    label: str
+    unit: str  # "minutes" | "count"
+    compute: Callable[[Session], dict[int, int]]
+
+
+RANKING_METRICS: dict[str, RankingMetric] = {
+    m.key: m
+    for m in [
+        RankingMetric("watch_time", "Total watch time", "minutes", _total_watch_minutes_by_user),
+    ]
+}
+
+
+@router.get("/ranking/metrics")
+def get_ranking_metrics(user: User = Depends(require_premium)):
+    """Which leaderboards exist, so the frontend can offer a metric picker
+    without hardcoding the list."""
+    return [{"key": m.key, "label": m.label, "unit": m.unit} for m in RANKING_METRICS.values()]
+
+
+@router.get("/ranking")
+def get_ranking(
+    metric: str = "watch_time", db: Session = Depends(get_db), user: User = Depends(require_premium)
+):
+    """Where a premium user stands against everyone else on the given metric.
+    Premium-gated at the router level — the frontend's locked card mirrors
+    this, it doesn't enforce it."""
+    ranking_metric = RANKING_METRICS.get(metric)
+    if ranking_metric is None:
+        raise HTTPException(status_code=404, detail=f"Unknown ranking metric: {metric}")
+    totals = ranking_metric.compute(db)
+    ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
+    total_users = len(ranked)
+    rank = next((i + 1 for i, (uid, _value) in enumerate(ranked) if uid == user.id), total_users + 1)
+    return {
+        "metric": ranking_metric.key,
+        "label": ranking_metric.label,
+        "unit": ranking_metric.unit,
+        "rank": rank,
+        "total_users": total_users,
+        "value": totals.get(user.id, 0),
+        "percentile": round((total_users - rank + 1) / total_users * 100, 1) if total_users else None,
     }

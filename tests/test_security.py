@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/07/07 13:25:16.707791
+Revised: 2026/07/11 15:23:12.394399
 
 AbuseGuardMiddleware + login backoff: what gets stopped, and — just as
 important for a commercial deployment — what must never be flagged.
@@ -20,7 +20,13 @@ from xoutaim_backend import security
 from xoutaim_backend.config import settings
 from xoutaim_backend.database import SessionLocal
 from xoutaim_backend.models import BannedIP
-from xoutaim_backend.security import AbuseGuardMiddleware, check_login_allowed, note_login_failure
+from xoutaim_backend.security import (
+    AbuseGuardMiddleware,
+    OriginCheckMiddleware,
+    SecurityHeadersMiddleware,
+    check_login_allowed,
+    note_login_failure,
+)
 
 
 def make_client() -> TestClient:
@@ -266,3 +272,88 @@ def test_login_backoff_case_insensitive():
         note_login_failure("Alice", "1.2.3.4")
     with pytest.raises(HTTPException):
         check_login_allowed("alice", "1.2.3.4")
+
+
+# --- origin check (CSRF defense-in-depth) ------------------------------------
+
+
+def make_origin_client() -> TestClient:
+    app = FastAPI()
+    app.add_middleware(OriginCheckMiddleware)
+
+    @app.get("/things")
+    def read():
+        return {"ok": True}
+
+    @app.post("/things")
+    def create():
+        return {"ok": True}
+
+    return TestClient(app)
+
+
+def test_post_without_origin_passes():
+    """Non-browser clients (the app, curl) send no Origin header at all."""
+    assert make_origin_client().post("/things").status_code == 200
+
+
+def test_same_origin_post_passes():
+    """The admin panel's own <form method=post> buttons."""
+    r = make_origin_client().post("/things", headers={"Origin": "http://testserver"})
+    assert r.status_code == 200
+
+
+def test_allowlisted_origin_post_passes():
+    r = make_origin_client().post("/things", headers={"Origin": settings.cors_origins[0]})
+    assert r.status_code == 200
+
+
+def test_foreign_origin_post_rejected():
+    r = make_origin_client().post("/things", headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert r.json()["detail"] == "Origin not allowed"
+
+
+def test_null_origin_post_rejected():
+    """`Origin: null` is what sandboxed iframes and opaque contexts send."""
+    r = make_origin_client().post("/things", headers={"Origin": "null"})
+    assert r.status_code == 403
+
+
+def test_foreign_origin_get_passes():
+    """Safe methods are never blocked (CORS handles read protection)."""
+    r = make_origin_client().get("/things", headers={"Origin": "https://evil.example"})
+    assert r.status_code == 200
+
+
+# --- security headers ---------------------------------------------------------
+
+
+def make_headers_client() -> TestClient:
+    app = FastAPI()
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    @app.get("/admin/users")
+    def admin_page():
+        return {"ok": True}
+
+    @app.get("/titles")
+    def api_route():
+        return {"ok": True}
+
+    return TestClient(app)
+
+
+def test_admin_referrer_policy_preserves_origin_header():
+    """Must NOT be `no-referrer`: per the Fetch spec the Origin header follows
+    the referrer policy on non-CORS POSTs, so `no-referrer` makes browsers
+    send `Origin: null` on the panel's own form buttons and OriginCheck
+    rejects them (regression: every admin POST answered 403)."""
+    r = make_headers_client().get("/admin/users")
+    assert r.headers["Referrer-Policy"] == "same-origin"
+
+
+def test_api_routes_send_no_referrer():
+    r = make_headers_client().get("/titles")
+    assert r.headers["Referrer-Policy"] == "no-referrer"
+    assert r.headers["Content-Security-Policy"].startswith("default-src 'none'")

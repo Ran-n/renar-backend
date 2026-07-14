@@ -77,6 +77,24 @@ def test_delete_notification(client, alice):
     assert client.get("/notifications", headers=headers).json() == []
 
 
+def test_delete_all_notifications(client, alice):
+    user, headers = alice
+    _seed_notification(user["id"], season=1, episode=1)
+    _seed_notification(user["id"], season=1, episode=2)
+    assert client.delete("/notifications", headers=headers).status_code == 204
+    assert client.get("/notifications", headers=headers).json() == []
+
+
+def test_delete_all_notifications_does_not_affect_other_users(client, alice, bob):
+    alice_user, alice_headers = alice
+    bob_user, bob_headers = bob
+    _seed_notification(alice_user["id"])
+    _seed_notification(bob_user["id"])
+    assert client.delete("/notifications", headers=alice_headers).status_code == 204
+    assert client.get("/notifications", headers=alice_headers).json() == []
+    assert len(client.get("/notifications", headers=bob_headers).json()) == 1
+
+
 def test_other_users_notification_not_found(client, alice, bob):
     alice_user, _ = alice
     _, bob_headers = bob

@@ -2,14 +2,15 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/07/07 13:25:16.263995
+Revised: 2026/07/12 18:29:10.766980
 """
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from .models import MediaType, WatchStatus
+from .premium import PALETTE, PROGRESS_STYLES, THEME_NAMES
 
 
 def _password_fits_bcrypt(password: str) -> str:
@@ -40,6 +41,24 @@ class UserOut(BaseModel):
     language: str
     avatar: str | None = None
     created_at: datetime
+    # premium state for the owner's own client: stored colors are returned
+    # even while lapsed (the style picker shows the saved choice); public
+    # payloads instead go through premium.flair(), which blanks them.
+    premium_until: datetime | None = None
+    is_premium: bool = False
+    verified: bool = False
+    verification_requested: bool = False
+    badge: str | None = None
+    ring_color: str | None = None
+    name_color: str | None = None
+    background: str | None = None
+    theme: str = "gruvbox"
+    show_original_titles: bool = False
+    home_hero_enabled: bool = True
+    home_on_launch: bool = True
+    home_progress_style: str = "rings"
+    home_season_color: str | None = None
+    home_series_color: str | None = None
 
 
 class Token(BaseModel):
@@ -54,11 +73,76 @@ class PasswordChange(BaseModel):
     _password_len = field_validator("new_password")(_password_fits_bcrypt)
 
 
+class PremiumStyleUpdate(BaseModel):
+    """Both colors optional; explicit null clears one. Values must come from
+    the server palette so nothing unreadable can be stored."""
+
+    ring_color: str | None = None
+    name_color: str | None = None
+    home_season_color: str | None = None
+    home_series_color: str | None = None
+
+    @field_validator("ring_color", "name_color", "home_season_color", "home_series_color")
+    @classmethod
+    def _in_palette(cls, value: str | None) -> str | None:
+        if value is not None and value not in PALETTE:
+            raise ValueError("Color must be one of the palette options")
+        return value
+
+
+class CustomPosterSet(BaseModel):
+    """Exactly one source: an uploaded image, or one of TMDB's alternate
+    posters (downloaded server-side into the image store)."""
+
+    image_b64: str | None = Field(default=None, max_length=8_000_000)
+    tmdb_url: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> CustomPosterSet:
+        if (self.image_b64 is None) == (self.tmdb_url is None):
+            raise ValueError("Provide exactly one of image_b64 or tmdb_url")
+        if self.tmdb_url is not None and not self.tmdb_url.startswith("https://image.tmdb.org/t/p/"):
+            raise ValueError("tmdb_url must be a TMDB image URL")
+        return self
+
+
+class CropBox(BaseModel):
+    """Fractional (0..1) region of an uploaded image to keep, chosen by the
+    user panning it in the frontend's position picker before thumbnailing."""
+
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    w: float = Field(gt=0, le=1)
+    h: float = Field(gt=0, le=1)
+
+
 class ProfileUpdate(BaseModel):
     username: str | None = Field(default=None, min_length=3, max_length=50)
     email: EmailStr | None = None
     language: str | None = Field(default=None, min_length=2, max_length=10, pattern=r"^[a-z]{2,10}$")
     avatar_b64: str | None = Field(default=None, max_length=8_000_000)  # raw upload, re-encoded server-side
+    background_b64: str | None = Field(default=None, max_length=8_000_000)  # raw upload, re-encoded server-side
+    avatar_crop: CropBox | None = None
+    background_crop: CropBox | None = None
+    theme: str | None = None
+    show_original_titles: bool | None = None
+    home_hero_enabled: bool | None = None
+    home_on_launch: bool | None = None
+    home_progress_style: str | None = None
+
+    @field_validator("theme")
+    @classmethod
+    def _valid_theme(cls, value: str | None) -> str | None:
+        if value is not None and value not in THEME_NAMES:
+            raise ValueError("Unknown theme")
+        return value
+
+    @field_validator("home_progress_style")
+    @classmethod
+    def _valid_progress_style(cls, value: str | None) -> str | None:
+        if value is not None and value not in PROGRESS_STYLES:
+            raise ValueError("Unknown progress style")
+        return value
 
 
 # ---------- media ----------
@@ -74,9 +158,13 @@ class TitleOut(BaseModel):
     poster_url: str | None = None
     runtime_minutes: int | None = None
     total_episodes: int | None = None
-    genres: str | None = None
+    total_seasons: int | None = None
+    genres: list[str] = []
     author: str | None = None
     page_count: int | None = None
+    overview: str | None = None
+    tagline: str | None = None
+    show_status: str | None = None
 
 
 class LibraryEntryCreate(BaseModel):
@@ -88,7 +176,7 @@ class LibraryEntryCreate(BaseModel):
     tmdb_id: int | None = None
     runtime_minutes: int | None = Field(default=None, ge=0)
     total_episodes: int | None = Field(default=None, ge=0)
-    genres: str | None = Field(default=None, max_length=300)
+    genres: list[str] | None = Field(default=None, max_length=20)
     author: str | None = Field(default=None, max_length=300)
     page_count: int | None = Field(default=None, ge=0)
     # user-owned fields
@@ -119,20 +207,35 @@ class LibraryEntryOut(BaseModel):
     id: int
     media_type: MediaType
     title: str
+    display_title: str
+    original_title: str | None = None
     year: int | None = None
-    poster_url: str | None = None
+    poster_url: str | None = None  # custom override when set + owner premium
+    custom_poster_url: str | None = None  # the stored override itself (picker UI)
+    backdrop_url: str | None = None  # custom override when set + owner premium
+    custom_backdrop_url: str | None = None  # the stored override itself (picker UI)
     tmdb_id: int | None = None
     runtime_minutes: int | None = None
     total_episodes: int | None = None
-    genres: str | None = None
+    total_seasons: int | None = None
+    genres: list[str] = []
     author: str | None = None
     page_count: int | None = None
+    overview: str | None = None
+    tagline: str | None = None
+    show_status: str | None = None
     url: str | None = None
     status: WatchStatus
     rating: int | None = None
     notes: str | None = None
     current_season: int | None = None
     current_episode: int | None = None
+    current_episode_name: str | None = None
+    current_season_total_episodes: int | None = None
+    next_season: int | None = None
+    next_episode: int | None = None
+    next_episode_name: str | None = None
+    next_season_total_episodes: int | None = None
     episodes_watched: int
     is_favorite: bool
     created_at: datetime
@@ -162,7 +265,12 @@ class CommentCreate(BaseModel):
     title: str | None = Field(default=None, max_length=300)
     season: int | None = Field(default=None, ge=0)
     episode: int | None = Field(default=None, ge=0)
+    parent_id: int | None = Field(default=None, ge=1)  # reply target; must be in the same thread
     text: str = Field(min_length=1, max_length=2000)
+
+
+class CommentReportCreate(BaseModel):
+    reason: str = Field(default="", max_length=500)
 
 
 # ---------- rewatch ----------

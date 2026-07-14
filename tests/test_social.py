@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.681273
-Revised: 2026/07/07 13:25:17.681273
+Revised: 2026/07/13 08:29:55.367678
 
 Social graph: search, public profiles, follow/unfollow, feed.
 """
@@ -36,6 +36,18 @@ def test_get_user_public_profile(client, alice, bob):
 def test_get_missing_user_not_found(client, alice):
     _, headers = alice
     assert client.get("/users/9999", headers=headers).status_code == 404
+
+
+def test_public_profile_shows_total_watch_minutes(client, alice, bob):
+    _, headers = alice
+    bob_user, bob_headers = bob
+    client.post(
+        "/media",
+        json={"media_type": "film", "title": "Alien", "runtime_minutes": 117, "status": "completed"},
+        headers=bob_headers,
+    )
+    profile = client.get(f"/users/{bob_user['id']}", headers=headers).json()
+    assert profile["total_watch_minutes"] == 117
 
 
 def test_follow_unfollow_roundtrip(client, alice, bob):

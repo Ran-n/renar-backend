@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/07 13:25:14.282446
+Revised: 2026/07/12 17:22:33.239004
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -62,22 +62,20 @@ _UNCOUNTED_PATHS = ("/health", "/robots.txt")
 # Paths only vulnerability scanners request. A hit means a PERMANENT ban,
 # persisted to the database (lifted only via the admin panel). The app must
 # never grow a real route that collides with these.
-HONEYPOT_PATHS = frozenset(
-    {
-        "/.env",
-        "/.env.local",
-        "/.env.production",
-        "/.aws/credentials",
-        "/.git/config",
-        "/id_rsa",
-        "/config.php",
-        "/xmlrpc.php",
-        "/wp-login.php",
-        "/server-status",
-        "/mcp",
-        "/jsonrpc",
-    }
-)
+HONEYPOT_PATHS = frozenset({
+    "/.env",
+    "/.env.local",
+    "/.env.production",
+    "/.aws/credentials",
+    "/.git/config",
+    "/id_rsa",
+    "/config.php",
+    "/xmlrpc.php",
+    "/wp-login.php",
+    "/server-status",
+    "/mcp",
+    "/jsonrpc",
+})
 HONEYPOT_PREFIXES = (
     "/wp-admin",
     "/wp-content",
@@ -151,12 +149,16 @@ def lift_permaban(ip: str) -> None:
 _last_strike_cleanup = 0.0
 
 
-def _strike_and_maybe_ban(ip: str, reason: str) -> tuple[int, float | None]:
+def strike_and_maybe_ban(ip: str, reason: str) -> tuple[int, float | None]:
     """Record an offense for `ip`, returning (strike count, temp-ban-until).
 
     A day with no new offense forgives the streak (count resets to 1).
     `until` is a `time.time()`-comparable epoch, or None once the caller
     should permaban instead of temp-banning (count hit the threshold).
+
+    Public: also called from routers/svc.py so the frontend's own guard can
+    record a strike (e.g. a flood ban) through the same persisted escalation
+    used here, instead of duplicating the logic.
     """
     now_dt = datetime.now(UTC)
     try:
@@ -187,8 +189,12 @@ def _strike_and_maybe_ban(ip: str, reason: str) -> tuple[int, float | None]:
         return 1, time.time() + settings.ban_minutes * _MINUTE
 
 
-def _load_active_temp_bans() -> dict[str, float]:
-    """Rebuild in-memory `banned_until` from the DB on startup."""
+def load_active_temp_bans() -> dict[str, float]:
+    """Rebuild in-memory `banned_until` from the DB on startup.
+
+    Public: also called from routers/svc.py so the frontend can preload the
+    same active temp bans (not just permabans) on its own startup.
+    """
     now_dt = datetime.now(UTC)
     result: dict[str, float] = {}
     try:
@@ -276,6 +282,15 @@ def note_login_success(username: str, ip: str) -> None:
     _login_failures_by_account.pop(account, None)
 
 
+def reset_login_backoff(username: str) -> None:
+    """Clear all recorded failures for this account, across every IP (admin action)."""
+    account = _account_key(username)
+    _login_failures_by_account.pop(account, None)
+    prefix = f"{account}|"
+    for key in [k for k in _login_failures_by_key if k.startswith(prefix)]:
+        _login_failures_by_key.pop(key, None)
+
+
 # ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
@@ -337,7 +352,7 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
         self.probe_hits: dict[str, deque[float]] = defaultdict(deque)
 
     def _ban(self, ip: str, reason: str) -> None:
-        count, until = _strike_and_maybe_ban(ip, reason)
+        count, until = strike_and_maybe_ban(ip, reason)
         if until is None:
             permaban(ip, f"{count} repeated offenses: {reason}")
             self.banned_until.pop(ip, None)
@@ -375,7 +390,7 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"detail": "Forbidden"}, status_code=403)
 
         if not self._temp_bans_loaded:
-            self.banned_until.update(_load_active_temp_bans())
+            self.banned_until.update(load_active_temp_bans())
             self._temp_bans_loaded = True
 
         until = self.banned_until.get(ip)
@@ -428,19 +443,14 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
         # stale link) or 405 on an existing endpoint can never trip this.
         # A valid signed token also exempts: an outdated app calling an
         # endpoint that no longer exists must not get its users banned.
-        if (
-            response.status_code == 404
-            and _matches_no_route(request)
-            and not _has_valid_token(request)
-        ):
+        if response.status_code == 404 and _matches_no_route(request) and not _has_valid_token(request):
             probes = self.probe_hits[ip]
             _prune(probes, now - settings.probe_window_minutes * _MINUTE)
             probes.append(now)
             if len(probes) >= settings.probe_ban_threshold:
                 self._ban(
                     ip,
-                    f"probing: {len(probes)} unknown paths "
-                    f"in {settings.probe_window_minutes} min (last: {path})",
+                    f"probing: {len(probes)} unknown paths in {settings.probe_window_minutes} min (last: {path})",
                 )
 
         self._sweep(now)
@@ -453,19 +463,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     The admin panel (settings.admin_path) is server-rendered HTML with
     inline <style>/<script> blocks, so it gets a CSP that permits those;
     every other route is JSON-only and gets the strict `default-src 'none'`.
+
+    The admin panel also gets `Referrer-Policy: same-origin` instead of
+    `no-referrer`: per the Fetch spec, the Origin header on non-GET
+    non-CORS requests follows the page's referrer policy, so under
+    `no-referrer` browsers send `Origin: null` on the panel's own form
+    POSTs — which OriginCheckMiddleware (rightly) rejects. `same-origin`
+    still keeps the referrer from leaking off-site.
     """
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
         if request.url.path.startswith(settings.admin_path.rstrip("/") or "/admin"):
+            response.headers["Referrer-Policy"] = "same-origin"
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                 "script-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
             )
         else:
+            response.headers["Referrer-Policy"] = "no-referrer"
             response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
@@ -494,6 +512,14 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
             if origin:
                 self_origin = f"{request.url.scheme}://{request.headers.get('host', '')}"
                 if origin != self_origin and origin not in settings.cors_origins:
+                    _log.warning(
+                        "blocked %s %s: Origin %r matches neither self (%s) nor CORS_ORIGINS %s",
+                        request.method,
+                        request.url.path,
+                        origin,
+                        self_origin,
+                        settings.cors_origins,
+                    )
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Origin not allowed"},

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.984505
-Revised: 2026/07/09 09:21:16.866014
+Revised: 2026/07/12 03:03:33.399341
 
 Auth endpoints: register, login, me, profile, password change, account delete.
 """
@@ -10,7 +10,7 @@ Auth endpoints: register, login, me, profile, password change, account delete.
 from conftest import PASSWORD, login, register
 
 from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import EpisodeWatch, LibraryEntry, LoginEvent, User, WatchEvent
+from xoutaim_backend.models import Comment, CommentReport, EpisodeWatch, LibraryEntry, LoginEvent, User, WatchEvent
 
 # ---------- register ----------
 
@@ -234,6 +234,69 @@ def test_deleted_account_token_is_invalid(client, alice):
     assert client.get("/auth/me", headers=headers).status_code == 401
 
 
+def _comment(client, headers, text="hi", parent_id=None) -> dict:
+    r = client.post(
+        "/comments",
+        json={"media_type": "film", "title": "Heat", "text": text, "parent_id": parent_id},
+        headers=headers,
+    )
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_delete_account_with_replies_from_others(client, alice, bob):
+    """Another user's reply hangs off my comment: deleting my account must
+    delete the whole thread (reply subtree), not crash on the parent_id FK."""
+    _, a_headers = alice
+    bob_user, b_headers = bob
+    mine = _comment(client, a_headers)
+    _comment(client, b_headers, text="reply from bob", parent_id=mine["id"])
+
+    assert client.delete("/auth/me", headers=a_headers).status_code == 204
+
+    db = SessionLocal()
+    try:
+        assert db.query(Comment).count() == 0  # bob's reply fell with the subtree
+        assert db.get(User, bob_user["id"]) is not None
+    finally:
+        db.close()
+
+
+def test_delete_account_with_reports_on_my_comments(client, alice, bob):
+    """Someone reported my comment: deleting my account must drop the report
+    with the comment, not crash on the comment_id FK."""
+    _, a_headers = alice
+    _, b_headers = bob
+    mine = _comment(client, a_headers)
+    assert client.post(f"/comments/{mine['id']}/report", json={"reason": "spam"}, headers=b_headers).status_code == 204
+
+    assert client.delete("/auth/me", headers=a_headers).status_code == 204
+
+    db = SessionLocal()
+    try:
+        assert db.query(CommentReport).count() == 0
+    finally:
+        db.close()
+
+
+def test_delete_account_after_reporting_others(client, alice, bob):
+    """I reported someone else's comment: deleting my account must drop my
+    report but leave their comment alone."""
+    _, a_headers = alice
+    bob_user, b_headers = bob
+    bobs = _comment(client, b_headers)
+    assert client.post(f"/comments/{bobs['id']}/report", json={"reason": "spam"}, headers=a_headers).status_code == 204
+
+    assert client.delete("/auth/me", headers=a_headers).status_code == 204
+
+    db = SessionLocal()
+    try:
+        assert db.query(CommentReport).count() == 0
+        assert db.query(Comment).filter(Comment.user_id == bob_user["id"]).count() == 1
+    finally:
+        db.close()
+
+
 # ---------- usage statistics ----------
 
 
@@ -251,8 +314,6 @@ def test_login_updates_usage_stats(client):
     login(client)
 
     row = _user_row(user["id"])
-    assert row.login_count == 2
-    assert row.last_login_at is not None
     assert row.last_active_at is not None
 
 
@@ -290,23 +351,10 @@ def test_delete_account_removes_login_events(client, alice):
         db.close()
 
 
-def test_failed_login_does_not_count(client):
-    user = register(client, "alice")
-    r = client.post("/auth/login", data={"username": "alice", "password": "wrong-password-1"})
-    assert r.status_code == 401
-
-    row = _user_row(user["id"])
-    assert row.login_count == 0
-    assert row.last_login_at is None
-
-
 def test_authenticated_request_bumps_activity(client, alice):
     user, headers = alice
-    before = _user_row(user["id"]).request_count
 
-    assert client.get("/auth/me", headers=headers).status_code == 200
     assert client.get("/auth/me", headers=headers).status_code == 200
 
     row = _user_row(user["id"])
-    assert row.request_count == before + 2
     assert row.last_active_at is not None

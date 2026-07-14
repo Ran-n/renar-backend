@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.529990
-Revised: 2026/07/09 13:01:55.175991
+Revised: 2026/07/14 22:48:11.756152
 
 Admin control panel, protected by HTTP Basic credentials from the .env file.
 
@@ -12,7 +12,7 @@ server-rendered management page.
 
 import html
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query
@@ -20,22 +20,22 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from .. import security
+from .. import accounts, security
 from ..auth import hash_password
 from ..auth import require_admin as _require_admin
+from ..comment_threads import resolve_root_scope
 from ..config import settings
 from ..database import get_db
 from ..models import (
     BannedIP,
     Comment,
     CommentLike,
+    CommentReport,
     EndpointStat,
     EpisodeWatch,
-    Follow,
     LibraryEntry,
     LoginEvent,
     MediaType,
-    Notification,
     RequestDay,
     Title,
     User,
@@ -43,7 +43,6 @@ from ..models import (
     WatchStatus,
     utcnow,
 )
-from .auth import _gc_image
 
 # Configurable so the panel can hide somewhere unguessable while the
 # default /admin becomes a honeypot (see security.py).
@@ -62,17 +61,19 @@ _BASE_CSS = """
     @keyframes spin { to { transform: rotate(360deg); } }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* Gruvbox, same ramp as the app theme (frontend themes.py GRUVBOX):
+       bg0..bg3 ladder, fg/fg_dim text, bright yellow/orange accents. */
     :root {
-      --bg: #1d2021;
-      --surface: #282828;
-      --surface-hi: #32302f;
-      --border: #3c3836;
-      --border-sub: #32302f;
+      --bg: #282828;
+      --surface: #3c3836;
+      --surface-hi: #504945;
+      --border: #665c54;
+      --border-sub: #504945;
       --text: #ebdbb2;
       --text-2: #a89984;
-      --text-3: #7c6f64;
-      --accent: #d79921;
-      --violet: #d65d0e;
+      --text-3: #928374;
+      --accent: #fabd2f;
+      --orange: #fe8019;
     }
 
     body {
@@ -91,12 +92,12 @@ _BASE_CSS = """
     }
     .logo {
       width: 30px; height: 30px;
-      background: linear-gradient(135deg, var(--accent), var(--violet));
+      background: linear-gradient(135deg, var(--accent), var(--orange));
       border-radius: 8px;
       display: flex; align-items: center; justify-content: center;
       font-size: 15px; flex-shrink: 0;
     }
-    .logo svg { width: 16px; height: 16px; stroke: #fff; }
+    .logo svg { width: 16px; height: 16px; stroke: var(--bg); }
     .brand { display: flex; flex-direction: column; gap: 1px; }
     .brand-name {
       font-size: .85rem; font-weight: 600; color: var(--text);
@@ -341,7 +342,7 @@ _DETAIL_CSS = """
       background: var(--border-sub); border: 1px solid var(--border); color: var(--text);
       border-radius: 7px; padding: .35rem .9rem; font-size: .78rem; font-weight: 500;
     }
-    .btn-save:hover { background: var(--surface-hi); border-color: var(--text-3); }
+    .btn-save:hover { background: var(--border); border-color: var(--text-3); }
     .action-sep { height: 1px; background: var(--border-sub); margin: .9rem 0; }
     .action-danger { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
 """
@@ -355,14 +356,14 @@ def _fmt_ts(ts) -> str:
         s = s.split(".", 1)[0]
     if " " in s:
         date, time = s.split(" ", 1)
-        return f"{date}<br><span style='opacity:.75'>{time}</span>"
+        return f"{date} <span style='opacity:.75'>{time}</span>"
     return s
 
 
 # ---- usage charts (self-contained inline SVG, no chart library) ----
 
 _CHART_DAYS = 30
-_CHART_ACCENT = "#d79921"  # gruvbox yellow; single-series so identity is the title, not the hue
+_CHART_ACCENT = "#fabd2f"  # gruvbox bright yellow (app accent); single-series so identity is the title, not the hue
 
 
 def _fmt_day(d) -> str:
@@ -551,6 +552,9 @@ def _render_users(
     users: list[User],
     item_counts: dict[int, int],
     comment_counts: dict[int, int],
+    login_counts: dict[int, int],
+    last_logins: dict[int, datetime],
+    request_counts: dict[int, int],
     totals: dict[str, int],
 ) -> str:
     rows = ""
@@ -573,6 +577,7 @@ def _render_users(
                   style="display:contents">
               <button class="btn-sm" type="submit">Ban</button>
             </form>"""
+        badge += _premium_pills(u)
         n_comments = comment_counts.get(u.id, 0)
         comments_cell = str(n_comments)
         if n_comments:
@@ -583,10 +588,10 @@ def _render_users(
           <td class="td-email">{html.escape(u.email)}</td>
           <td class="td-count">{item_counts.get(u.id, 0)}</td>
           <td class="td-count">{comments_cell}</td>
-          <td class="td-count">{u.login_count or 0}</td>
-          <td class="td-count">{u.request_count or 0}</td>
+          <td class="td-count">{login_counts.get(u.id, 0)}</td>
+          <td class="td-count">{request_counts.get(u.id, 0)}</td>
           <td class="td-ts">{_fmt_ts(u.created_at)}</td>
-          <td class="td-ts">{_fmt_ts(u.last_login_at)}</td>
+          <td class="td-ts">{_fmt_ts(last_logins.get(u.id))}</td>
           <td class="td-ts">{_fmt_ts(u.last_active_at)}</td>
           <td><div class="td-actions">
             {ban_action}
@@ -649,6 +654,14 @@ def _render_users(
       <div class="stat">
         <div class="stat-label">Active (7d)</div>
         <div class="stat-value" id="stat-active-7d">{totals["active_7d"]}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Hero on</div>
+        <div class="stat-value" id="stat-home-hero">{totals["home_hero_on"]}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Opens on Home</div>
+        <div class="stat-value" id="stat-home-launch">{totals["home_on_launch_on"]}</div>
       </div>
     </div>
 
@@ -834,12 +847,12 @@ _DASHBOARD_CSS = """
       padding: 1.5rem 1.25rem; text-decoration: none; color: inherit;
       transition: border-color .15s, background .15s, transform .1s; cursor: pointer;
     }
-    .tile:hover { background: var(--surface-hi); border-color: rgba(215,153,33,.4); transform: translateY(-2px); }
-    .tile:hover .tile-icon { background: rgba(215,153,33,.18); color: #fabd2f; }
+    .tile:hover { background: var(--surface-hi); border-color: rgba(250,189,47,.4); transform: translateY(-2px); }
+    .tile:hover .tile-icon { background: rgba(250,189,47,.18); color: #fbf1c7; }
     .tile-icon {
-      width: 52px; height: 52px; background: rgba(215,153,33,.12); border-radius: 12px;
+      width: 52px; height: 52px; background: rgba(250,189,47,.12); border-radius: 12px;
       display: flex; align-items: center; justify-content: center;
-      color: #d79921; transition: background .15s, color .15s; flex-shrink: 0;
+      color: var(--accent); transition: background .15s, color .15s; flex-shrink: 0;
     }
     .tile-icon svg { width: 26px; height: 26px; }
     .tile-name { font-size: .95rem; font-weight: 600; color: var(--text); letter-spacing: -.01em; }
@@ -907,6 +920,12 @@ def list_users(
     users = db.query(User).all()
     item_counts = dict(db.query(LibraryEntry.user_id, func.count()).group_by(LibraryEntry.user_id).all())
     comment_counts = dict(db.query(Comment.user_id, func.count()).group_by(Comment.user_id).all())
+    login_counts = dict(db.query(LoginEvent.user_id, func.count()).group_by(LoginEvent.user_id).all())
+    last_logins = dict(db.query(LoginEvent.user_id, func.max(LoginEvent.created_at)).group_by(LoginEvent.user_id).all())
+    request_counts = {
+        uid: int(total)
+        for uid, total in db.query(RequestDay.user_id, func.sum(RequestDay.count)).group_by(RequestDay.user_id).all()
+    }
     now = utcnow()
     totals = {
         "users": len(users),
@@ -916,13 +935,82 @@ def list_users(
         "active_today": db.query(func.count(User.id)).filter(User.last_active_at >= now - timedelta(days=1)).scalar()
         or 0,
         "active_7d": db.query(func.count(User.id)).filter(User.last_active_at >= now - timedelta(days=7)).scalar() or 0,
+        "home_hero_on": db.query(func.count(User.id)).filter(User.home_hero_enabled.is_(True)).scalar() or 0,
+        "home_on_launch_on": db.query(func.count(User.id)).filter(User.home_on_launch.is_(True)).scalar() or 0,
     }
-    return _render_users(users, item_counts, comment_counts, totals)
+    return _render_users(users, item_counts, comment_counts, login_counts, last_logins, request_counts, totals)
 
 
 def _stat_tile(label: str, value, small: bool = False) -> str:
     cls = "stat-value sm" if small else "stat-value"
     return f'<div class="stat"><div class="stat-label">{label}</div><div class="{cls}">{value}</div></div>'
+
+
+def _premium_pills(user: User) -> str:
+    """Stored premium/verified state (shown even while lapsed — the admin
+    needs to see what is on the account, not what currently renders)."""
+    pills = ""
+    if user.verified:
+        pills += ' <span class="pill" style="margin-left:.4rem">verified</span>'
+    elif user.is_premium:
+        pills += ' <span class="pill" style="margin-left:.4rem">premium</span>'
+    if user.verification_requested:
+        pills += ' <span class="pill" style="margin-left:.4rem">verification requested</span>'
+    return pills
+
+
+def _render_premium_actions(user: User) -> str:
+    """Grant/revoke premium time and approve/revoke the verified badge."""
+    uid = user.id
+    name_esc = html.escape(user.username)
+    if user.is_premium:
+        premium_state = f"Premium active until {_fmt_ts(user.premium_until)}"
+    elif user.premium_until:
+        premium_state = f"Premium lapsed {_fmt_ts(user.premium_until)}"
+    else:
+        premium_state = "No premium"
+    revoke = ""
+    if user.premium_until:
+        revoke = (
+            f'<form method="post" action="{_P}/users/{uid}/premium/revoke" style="display:contents"'
+            f" onsubmit=\"return confirm('Revoke premium for [{name_esc}]?')\">"
+            f'<button class="btn-sm" type="submit">Revoke premium</button></form>'
+        )
+    if user.verified:
+        verify_action = (
+            f'<form method="post" action="{_P}/users/{uid}/unverify" style="display:contents"'
+            f" onsubmit=\"return confirm('Remove the verified badge from [{name_esc}]?')\">"
+            f'<button class="btn-sm" type="submit">Remove verified</button></form>'
+        )
+    else:
+        verify_action = (
+            f'<form method="post" action="{_P}/users/{uid}/verify" style="display:contents">'
+            f'<button class="btn-sm" type="submit">Mark verified</button></form>'
+        )
+    requested = ""
+    deny_action = ""
+    if user.verification_requested:
+        requested = '<span class="pill" style="margin-left:.4rem">verification requested</span>'
+        deny_action = (
+            f'<form method="post" action="{_P}/users/{uid}/verify/deny" style="display:contents"'
+            f" onsubmit=\"return confirm('Deny the verification request from [{name_esc}]?')\">"
+            f'<button class="btn-sm" type="submit">Deny verification request</button></form>'
+        )
+    return f"""
+    <div class="actions-card">
+      <div class="actions-title">Premium &amp; badge</div>
+      <form class="action-row" method="post" action="{_P}/users/{uid}/premium">
+        <label>{premium_state}</label>
+        <input class="action-input" type="number" name="days" value="30" min="1" max="3650" required>
+        <button class="btn-save" type="submit">Grant days</button>
+      </form>
+      <div class="action-danger">
+        {revoke}
+        {verify_action}
+        {deny_action}
+        {requested}
+      </div>
+    </div>"""
 
 
 def _render_account_actions(user: User) -> str:
@@ -958,12 +1046,15 @@ def _render_account_actions(user: User) -> str:
       <form class="action-row" method="post" action="{_P}/users/{uid}/password"
             onsubmit="return confirm('Set a new password for [{name_esc}]?')">
         <label>New password</label>
-        <input class="action-input" type="text" name="new_password" placeholder="at least 8 characters"
+        <input class="action-input" type="password" name="new_password" placeholder="at least 8 characters"
                minlength="8" maxlength="72" required>
         <button class="btn-save" type="submit">Set password</button>
       </form>
       <div class="action-sep"></div>
       <div class="action-danger">
+        <form method="post" action="{_P}/users/{uid}/reset-login-limit" style="display:contents">
+          <button class="btn-sm" type="submit">Reset sign-in rate limit</button>
+        </form>
         {ban_action}
         <form method="post" action="{_P}/users/{uid}/delete" style="display:contents"
               onsubmit="return confirm('Permanently delete [{name_esc}] and all their data?')">
@@ -983,6 +1074,7 @@ def _render_user_detail(
     by_status: list[tuple],
     favorites: int,
     episodes_watched: int,
+    request_total: int,
     request_series: list,
     endpoints_href: str,
 ) -> str:
@@ -992,10 +1084,11 @@ def _render_user_detail(
     else:
         avatar = f'<span class="detail-avatar-fallback">{name_esc[:1].upper()}</span>'
     banned_badge = '<span class="pill">banned</span>' if user.banned else ""
+    banned_badge += _premium_pills(user)
 
     tiles = "".join([
-        _stat_tile("Logins", user.login_count or 0),
-        _stat_tile("API requests", user.request_count or 0),
+        _stat_tile("Logins", len(login_ts)),
+        _stat_tile("API requests", request_total),
         _stat_tile("Library items", len(add_ts)),
         _stat_tile("Comments", len(comment_ts)),
         _stat_tile("Favorites", favorites),
@@ -1012,7 +1105,7 @@ def _render_user_detail(
         _render_hbars("Library by type", by_type, "items", cap=True),
         _render_hbars("Library by status", by_status, "items", cap=True),
     ])
-    actions = _render_account_actions(user)
+    actions = _render_premium_actions(user) + _render_account_actions(user)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1046,8 +1139,9 @@ def _render_user_detail(
         <div class="detail-name">{name_esc}{banned_badge}</div>
         <div class="detail-email">{html.escape(user.email)}</div>
         <div class="detail-meta">
-          Joined {_fmt_ts(user.created_at)} &middot; last login {_fmt_ts(user.last_login_at)}
-          &middot; last active {_fmt_ts(user.last_active_at)}
+          <div>Joined {_fmt_ts(user.created_at)}</div>
+          <div>Last login {_fmt_ts(max(login_ts, default=None))}</div>
+          <div>Last active {_fmt_ts(user.last_active_at)}</div>
         </div>
       </div>
     </div>
@@ -1123,12 +1217,13 @@ def user_detail(
         or 0
     )
 
-    # Requests-per-day time-series for this user (last 30 days).
+    # Requests-per-day time-series for this user (last 30 days) + all-time total.
     since = utcnow().date() - timedelta(days=_CHART_DAYS - 1)
     request_map = dict(
         db.query(RequestDay.day, RequestDay.count).filter(RequestDay.user_id == user_id, RequestDay.day >= since).all()
     )
     request_series = _daily_from_map(request_map)
+    request_total = int(db.query(func.sum(RequestDay.count)).filter(RequestDay.user_id == user_id).scalar() or 0)
 
     return _render_user_detail(
         user,
@@ -1140,6 +1235,7 @@ def user_detail(
         by_status,
         favorites,
         episodes_watched,
+        request_total,
         request_series,
         f"{_P}/users/{user_id}/endpoints",
     )
@@ -1348,30 +1444,28 @@ def user_library(
     return _render_user_library(user, entries, label)
 
 
-def _comment_target(
-    c: Comment,
-    titles_by_tmdb: dict[tuple, Title],
-    titles_by_key: dict[tuple, Title],
-) -> str:
-    """Human-readable target cell: media-type pill + title (+ SxEy scope)."""
-    if c.tmdb_id is not None:
-        title = titles_by_tmdb.get((c.media_type, c.tmdb_id))
-        label = title.title if title else f"tmdb:{c.tmdb_id}"
-    else:
-        title = titles_by_key.get((c.media_type, c.title_key))
-        label = title.title if title else (c.title_key or "?")
-    label = html.escape(label)
-    if c.season is not None and c.episode is not None:
-        label += f' <span class="td-count">S{c.season}E{c.episode}</span>'
-    type_label = html.escape(c.media_type.value.replace("_", " "))
+def _comment_target(db: Session, c: Comment) -> str:
+    """Human-readable target cell: media-type pill + title (+ SxEy scope).
+
+    A reply doesn't store title_id/season/episode itself (see Comment's
+    docstring) — resolve its thread root to render the same label.
+    """
+    title_id, season, episode = resolve_root_scope(db, c)
+    title = db.get(Title, title_id)
+    label = html.escape(title.title) if title else "(deleted title)"
+    if season is not None and episode is not None:
+        label += f' <span class="td-count">S{season}E{episode}</span>'
+    if c.parent_id is not None:
+        label += ' <span class="td-count">&#x21B3; reply</span>'
+    type_label = html.escape(title.media_type.value.replace("_", " ")) if title else ""
     return f'<span class="type-pill">{type_label}</span> {label}'
 
 
 def _render_comments(
+    db: Session,
     comments: list[Comment],
     like_counts: dict[int, int],
-    titles_by_tmdb: dict[tuple, Title],
-    titles_by_key: dict[tuple, Title],
+    report_counts: dict[int, int],
     total: int,
     filter_user: User | None,
 ) -> str:
@@ -1385,12 +1479,15 @@ def _render_comments(
         else:
             avatar = f'<span class="avatar-fallback">{name_esc[:1].upper()}</span>'
         author_cell = f'<a class="td-link" href="{_P}/comments?user_id={c.user_id}">{name_esc}</a>'
+        n_reports = report_counts.get(c.id, 0)
+        report_cell = f'<span style="color:#fb4934;font-weight:600">&#x2691; {n_reports}</span>' if n_reports else "0"
         rows += f"""
         <tr>
           <td class="td-label"><div class="user-cell">{avatar}<span>{author_cell}</span></div></td>
-          <td class="td-email">{_comment_target(c, titles_by_tmdb, titles_by_key)}</td>
+          <td class="td-email">{_comment_target(db, c)}</td>
           <td><div class="td-text">{html.escape(c.text)}</div></td>
           <td class="td-count">{like_counts.get(c.id, 0)}</td>
+          <td class="td-count">{report_cell}</td>
           <td class="td-ts">{_fmt_ts(c.created_at)}</td>
           <td><div class="td-actions">
             <form method="post" action="{_P}/comments/{c.id}/delete{q}"
@@ -1401,7 +1498,7 @@ def _render_comments(
           </div></td>
         </tr>"""
 
-    empty_row = '<tr><td colspan="6" class="empty">No comments</td></tr>' if not rows else ""
+    empty_row = '<tr><td colspan="7" class="empty">No comments</td></tr>' if not rows else ""
     filter_pill = ""
     if filter_user:
         filter_pill = (
@@ -1449,6 +1546,7 @@ def _render_comments(
             <th>Target</th>
             <th>Comment</th>
             <th>Likes</th>
+            <th>Reports</th>
             <th>Posted</th>
             <th></th>
           </tr>
@@ -1481,19 +1579,8 @@ def list_comments(
     total = query.count()
     comments = query.order_by(Comment.created_at.desc()).limit(500).all()
     like_counts = dict(db.query(CommentLike.comment_id, func.count()).group_by(CommentLike.comment_id).all())
-
-    tmdb_ids = [c.tmdb_id for c in comments if c.tmdb_id is not None]
-    title_keys = [c.title_key for c in comments if c.tmdb_id is None and c.title_key]
-    titles_by_tmdb: dict[tuple, Title] = {}
-    titles_by_key: dict[tuple, Title] = {}
-    if tmdb_ids:
-        for t in db.query(Title).filter(Title.tmdb_id.in_(tmdb_ids)).all():
-            titles_by_tmdb[(t.media_type, t.tmdb_id)] = t
-    if title_keys:
-        for t in db.query(Title).filter(Title.title_key.in_(title_keys)).all():
-            titles_by_key[(t.media_type, t.title_key)] = t
-
-    return _render_comments(comments, like_counts, titles_by_tmdb, titles_by_key, total, filter_user)
+    report_counts = dict(db.query(CommentReport.comment_id, func.count()).group_by(CommentReport.comment_id).all())
+    return _render_comments(db, comments, like_counts, report_counts, total, filter_user)
 
 
 @router.post("/comments/{comment_id}/delete", include_in_schema=False)
@@ -1507,7 +1594,7 @@ def delete_comment(
     if not comment:
         raise HTTPException(status_code=404, detail="Comment not found")
     author = comment.author.username if comment.author else "?"
-    db.delete(comment)  # ORM delete cascades the comment's likes
+    db.delete(comment)  # ORM delete cascades the comment's likes, reports and reply subtree
     db.commit()
     _log.info("admin=%s deleted comment id=%s author=%s", admin_user, comment_id, author)
     dest = f"{_P}/comments" + (f"?user_id={user_id}" if user_id else "")
@@ -1547,7 +1634,14 @@ def _render_bans(bans: list[BannedIP]) -> str:
 
   <header class="topbar">
     <a class="topbar-brand-link" href="{_P}">
-      <div class="logo">&#x1F6E1;</div>
+      <div class="logo">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          <line x1="9" y1="9" x2="15" y2="15"/>
+          <line x1="15" y1="9" x2="9" y2="15"/>
+        </svg>
+      </div>
       <div class="brand">
         <span class="brand-name">Banned IPs</span>
         <span class="brand-sub">xoutaim</span>
@@ -1641,6 +1735,96 @@ def unban_user(
     return RedirectResponse(f"{_P}/users", status_code=303)
 
 
+@router.post("/users/{user_id}/premium", include_in_schema=False)
+def grant_premium(
+    user_id: int,
+    days: int = Form(...),
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not 1 <= days <= 3650:
+        raise HTTPException(status_code=422, detail="days must be between 1 and 3650")
+    # extend from whichever is later: an active subscription keeps its
+    # remaining time, a lapsed one restarts from now
+    base = user.premium_until if user.is_premium else utcnow()
+    user.premium_until = base + timedelta(days=days)
+    db.commit()
+    _log.info(
+        "admin=%s granted %s premium days to user id=%s username=%s (until %s)",
+        admin_user,
+        days,
+        user_id,
+        user.username,
+        user.premium_until.isoformat(),
+    )
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
+@router.post("/users/{user_id}/premium/revoke", include_in_schema=False)
+def revoke_premium(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.premium_until = None
+    db.commit()
+    _log.info("admin=%s revoked premium for user id=%s username=%s", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
+@router.post("/users/{user_id}/verify", include_in_schema=False)
+def verify_user(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.verified = True
+    user.verification_requested = False
+    db.commit()
+    _log.info("admin=%s verified user id=%s username=%s", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
+@router.post("/users/{user_id}/unverify", include_in_schema=False)
+def unverify_user(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.verified = False
+    user.verification_requested = False
+    db.commit()
+    _log.info("admin=%s unverified user id=%s username=%s", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
+@router.post("/users/{user_id}/verify/deny", include_in_schema=False)
+def deny_verification(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.verification_requested = False
+    db.commit()
+    _log.info("admin=%s denied verification request for user id=%s username=%s", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
 @router.post("/users/{user_id}/edit", include_in_schema=False)
 def edit_user(
     user_id: int,
@@ -1686,6 +1870,20 @@ def set_user_password(
     return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
 
 
+@router.post("/users/{user_id}/reset-login-limit", include_in_schema=False)
+def reset_user_login_limit(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    security.reset_login_backoff(user.username)
+    _log.info("admin=%s reset login rate limit for user id=%s username=%s", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
 @router.post("/users/{user_id}/delete", include_in_schema=False)
 def delete_user(
     user_id: int,
@@ -1696,21 +1894,6 @@ def delete_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     username = user.username
-    # SQLite doesn't enforce FKs here, so clear dependents explicitly.
-    db.query(CommentLike).filter(CommentLike.user_id == user_id).delete(synchronize_session=False)
-    for comment in db.query(Comment).filter(Comment.user_id == user_id).all():
-        db.delete(comment)  # ORM delete cascades the comment's likes
-    db.query(Follow).filter((Follow.follower_id == user_id) | (Follow.followed_id == user_id)).delete(
-        synchronize_session=False
-    )
-    db.query(Notification).filter(Notification.user_id == user_id).delete(synchronize_session=False)
-    db.query(LoginEvent).filter(LoginEvent.user_id == user_id).delete(synchronize_session=False)
-    db.query(EndpointStat).filter(EndpointStat.user_id == user_id).delete(synchronize_session=False)
-    db.query(RequestDay).filter(RequestDay.user_id == user_id).delete(synchronize_session=False)
-    old_avatar_id = user.avatar_id
-    db.delete(user)  # cascades media_items -> episode_watches + watch_events
-    db.flush()
-    _gc_image(old_avatar_id, db)
-    db.commit()
+    accounts.delete_account(user, db)
     _log.info("admin=%s deleted user id=%s username=%s", admin_user, user_id, username)
     return RedirectResponse(f"{_P}/users", status_code=303)

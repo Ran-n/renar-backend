@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_user
 from ..database import get_db
 from ..models import Notification, User
-from ..notifier import check_new_episodes
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
@@ -53,15 +52,6 @@ def unread_count(
     return {"count": count}
 
 
-@router.post("/check_now")
-def check_now(
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Run the new-episode check immediately (all users)."""
-    return {"created": check_new_episodes(db)}
-
-
 @router.post("/{notification_id}/read", status_code=status.HTTP_204_NO_CONTENT)
 def mark_read(
     notification_id: int,
@@ -94,4 +84,13 @@ def delete_notification(
     if n is None or n.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     db.delete(n)
+    db.commit()
+
+
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
+def delete_all_notifications(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    db.query(Notification).filter(Notification.user_id == user.id).delete()
     db.commit()
