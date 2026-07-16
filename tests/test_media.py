@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.395578
-Revised: 2026/07/07 13:25:17.395578
+Revised: 2026/07/16 09:54:31.767220
 
 Media library CRUD, filters, ownership, and community ratings.
 """
@@ -93,6 +93,42 @@ def test_list_filters(client, alice):
 
     by_search = client.get("/media", params={"search": "ark"}, headers=headers).json()
     assert [i["title"] for i in by_search] == ["Dark"]
+
+
+def test_list_pagination(client, alice):
+    _, headers = alice
+    for i in range(5):
+        _create(client, headers, title=f"Title {i}")
+
+    page1 = client.get("/media", params={"limit": 2, "offset": 0}, headers=headers).json()
+    page2 = client.get("/media", params={"limit": 2, "offset": 2}, headers=headers).json()
+    page3 = client.get("/media", params={"limit": 2, "offset": 4}, headers=headers).json()
+
+    assert [i["title"] for i in page1] == ["Title 4", "Title 3"]
+    assert [i["title"] for i in page2] == ["Title 2", "Title 1"]
+    assert [i["title"] for i in page3] == ["Title 0"]
+
+    unpaginated = client.get("/media", headers=headers).json()
+    assert len(unpaginated) == 5
+
+
+def test_list_favorites_only_paginated(client, alice):
+    _, headers = alice
+    _create(client, headers, title="Heat", is_favorite=True)
+    _create(client, headers, title="Alien", is_favorite=False)
+    _create(client, headers, title="Dark", media_type="tv_show", is_favorite=True)
+
+    favorites = client.get("/media", params={"favorites_only": True}, headers=headers).json()
+    assert {i["title"] for i in favorites} == {"Heat", "Dark"}
+
+    favorites_page1 = client.get(
+        "/media", params={"favorites_only": True, "limit": 1, "offset": 0}, headers=headers
+    ).json()
+    favorites_page2 = client.get(
+        "/media", params={"favorites_only": True, "limit": 1, "offset": 1}, headers=headers
+    ).json()
+    assert [i["title"] for i in favorites_page1] == ["Dark"]
+    assert [i["title"] for i in favorites_page2] == ["Heat"]
 
 
 # ---------- get / patch / ownership ----------

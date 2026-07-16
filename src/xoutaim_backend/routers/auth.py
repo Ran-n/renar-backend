@@ -2,15 +2,13 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/07/12 18:29:11.030647
+Revised: 2026/07/16 09:54:30.802208
 """
 
-import base64
-import io
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
-from PIL import Image as PILImage
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -19,65 +17,16 @@ from ..auth import create_access_token, get_current_user, hash_password, verify_
 from ..config import settings
 from ..database import get_db
 from ..image_service import gc_image, image_row_for
+from ..image_utils import decode_b64_image, normalize_jpeg
 from ..models import LoginEvent, User, utcnow
 from ..premium import FREE_PROGRESS_STYLES, FREE_THEMES
-from ..schemas import CropBox, PasswordChange, ProfileUpdate, Token, UserCreate, UserOut
+from ..schemas import PasswordChange, ProfileUpdate, Token, UserCreate, UserOut
 from ..security import check_login_allowed, client_ip, note_login_failure, note_login_success
+
+_log = logging.getLogger(__name__)
 
 AVATAR_SIZE = 256
 BACKGROUND_MAX = (1280, 480)  # landscape banner: 8:3 aspect
-
-
-def _apply_crop(img: PILImage.Image, crop: CropBox | None) -> PILImage.Image:
-    """Crop to the fractional region the user picked in the frontend's
-    position dialog, before thumbnailing. No-op when the frontend couldn't
-    read the image dimensions and skipped the position picker."""
-    if crop is None:
-        return img
-    w, h = img.size
-    box = (
-        round(crop.x * w),
-        round(crop.y * h),
-        round((crop.x + crop.w) * w),
-        round((crop.y + crop.h) * h),
-    )
-    return img.crop(box)
-
-
-def _process_avatar(avatar_b64: str, crop: CropBox | None = None) -> bytes:
-    """Decode, crop to the chosen focal region, downscale to 256px, return
-    normalized JPEG bytes."""
-    try:
-        img = PILImage.open(io.BytesIO(base64.b64decode(avatar_b64)))
-        img = img.convert("RGB")
-        img = _apply_crop(img, crop)
-        img.thumbnail((AVATAR_SIZE, AVATAR_SIZE))
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=85)
-        return out.getvalue()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Could not read that image file",
-        ) from exc
-
-
-def _process_background(background_b64: str, crop: CropBox | None = None) -> bytes:
-    """Decode, crop to the chosen focal region, downscale to banner
-    dimensions, return normalized JPEG bytes."""
-    try:
-        img = PILImage.open(io.BytesIO(base64.b64decode(background_b64)))
-        img = img.convert("RGB")
-        img = _apply_crop(img, crop)
-        img.thumbnail(BACKGROUND_MAX)
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=85)
-        return out.getvalue()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Could not read that image file",
-        ) from exc
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -104,6 +53,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
+    _log.info("new user registered: id=%s username=%r", user.id, user.username)
     return user
 
 
@@ -154,7 +104,9 @@ def update_profile(
     if data.avatar_b64 is not None:
         old_avatar_id = user.avatar_id
         if data.avatar_b64:
-            user.avatar_id = image_row_for(_process_avatar(data.avatar_b64, data.avatar_crop), db).id
+            user.avatar_id = image_row_for(
+                normalize_jpeg(decode_b64_image(data.avatar_b64), (AVATAR_SIZE, AVATAR_SIZE), data.avatar_crop), db
+            ).id
         else:
             user.avatar_id = None
         if old_avatar_id != user.avatar_id:
@@ -168,7 +120,9 @@ def update_profile(
             )
         old_background_id = user.background_id
         if data.background_b64:
-            user.background_id = image_row_for(_process_background(data.background_b64, data.background_crop), db).id
+            user.background_id = image_row_for(
+                normalize_jpeg(decode_b64_image(data.background_b64), BACKGROUND_MAX, data.background_crop), db
+            ).id
         else:
             user.background_id = None
         if old_background_id != user.background_id:
@@ -194,6 +148,8 @@ def update_profile(
                 detail="Premium required for this progress style",
             )
         user.home_progress_style = data.home_progress_style
+    if data.has_seen_welcome is not None:
+        user.has_seen_welcome = data.has_seen_welcome
     db.commit()
     db.refresh(user)
     return user

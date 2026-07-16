@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/07/13 13:41:16.136388 )
+[//]: # (+ Revised: 	2026/07/16 09:54:29.938960 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Xoutaim Backend
@@ -64,11 +64,12 @@ API docs: http://127.0.0.1:8000/docs
   `show_original_titles`, home screen preferences (`home_hero_enabled`,
   `home_on_launch`, `home_progress_style`), and — with active premium —
   profile background image and UI theme (gruvbox is free; all other themes
-  require a subscription)
+  require a subscription); also sets `has_seen_welcome`
 - `POST /auth/change_password` — change password
 - `GET /media` — list your items (filters: `media_type`, `status_filter`,
-  `search`; optional `lang` returns localized title display names from
-  cached TMDB translations, warming missing translations in the background)
+  `search`, `favorites_only`; `limit`/`offset` for pagination; optional `lang`
+  returns localized title display names from cached TMDB translations,
+  warming missing translations in the background)
 - `POST /media` — save a film / tv_show / book / youtube item
 - `GET /media/{id}` / `PATCH /media/{id}` / `DELETE /media/{id}`
 - `GET /media/ratings?tmdb_id=...|title=...` — community average rating for a title
@@ -96,6 +97,9 @@ API docs: http://127.0.0.1:8000/docs
 - `GET /books/trending` — Open Library daily trending feed
 - `GET /books/cover/{cover_id}` — cached/redirect-safe cover image proxy
 - `GET /stats` — watch time, films/episodes watched, shows completed, favorites, top genres
+- `GET /stats/ranking/metrics` — premium: list of available leaderboard metrics
+- `GET /stats/ranking?metric=...` — premium: percentile rank on one metric
+  (defaults to the metric the user ranks best on)
 - `GET/PUT/POST /media/{id}/episodes...` — per-episode watched/rating tracking
   (`PUT .../episodes/{season}/{episode}`, `POST .../episodes/bulk`); responses include
   overall grade, episode average and combined score

@@ -2,11 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.011640
-Revised: 2026/07/07 13:25:15.011640
+Revised: 2026/07/16 09:54:30.961587
 
 Serve files from the content-addressed image store.
 """
 
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, status
@@ -15,6 +16,7 @@ from fastapi.responses import FileResponse
 from ..storage import image_path
 
 router = APIRouter(prefix="/images", tags=["images"])
+_log = logging.getLogger(__name__)
 
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 

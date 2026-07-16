@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.200759
-Revised: 2026/07/12 18:29:22.825320
+Revised: 2026/07/16 09:54:30.478211
 
 DB-side helpers for the content-addressed image store.
 
@@ -15,11 +15,16 @@ avatars would delete a file still used as somebody's custom poster or as a
 cached external image.
 """
 
+import logging
+
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .models import EpisodeCustomStill, ExternalImage, Image, LibraryEntry, User
 from .storage import delete_image, store_image
+
+_log = logging.getLogger(__name__)
 
 
 def image_row_for(raw: bytes, db: Session) -> Image:
@@ -51,17 +56,27 @@ def gc_image(image_id: int | None, db: Session) -> None:
     """
     if image_id is None:
         return
+    # Four LIMIT-1 checks (short-circuiting) instead of six COUNT queries —
+    # each uses LIMIT 1 and Python's `or` stops as soon as a reference is found.
+    # Same-table checks are combined with OR so they hit each table at most once.
     still_used = (
-        db.query(User).filter(User.avatar_id == image_id).count()
-        + db.query(User).filter(User.background_id == image_id).count()
-        + db.query(LibraryEntry).filter(LibraryEntry.custom_poster_image_id == image_id).count()
-        + db.query(LibraryEntry).filter(LibraryEntry.custom_backdrop_image_id == image_id).count()
-        + db.query(EpisodeCustomStill).filter(EpisodeCustomStill.still_image_id == image_id).count()
-        + db.query(ExternalImage).filter(ExternalImage.image_id == image_id).count()
+        db.query(User).filter(or_(User.avatar_id == image_id, User.background_id == image_id)).first() is not None
+        or db.query(LibraryEntry)
+        .filter(
+            or_(
+                LibraryEntry.custom_poster_image_id == image_id,
+                LibraryEntry.custom_backdrop_image_id == image_id,
+            )
+        )
+        .first()
+        is not None
+        or db.query(EpisodeCustomStill).filter(EpisodeCustomStill.still_image_id == image_id).first() is not None
+        or db.query(ExternalImage).filter(ExternalImage.image_id == image_id).first() is not None
     )
     if still_used:
         return
     image = db.get(Image, image_id)
     if image:
+        _log.debug("gc_image: deleting image id=%s hash=%s", image_id, image.hash[:12])
         delete_image(image.hash)
         db.delete(image)

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.878175
-Revised: 2026/07/10 18:26:22.222090
+Revised: 2026/07/16 09:54:30.402782
 
 Cached external images (TMDB posters/stills, Open Library covers).
 
@@ -48,6 +48,6 @@ def store_external_image(db: Session, source: str, key: str, data: bytes) -> Pat
             with db.begin_nested():
                 db.add(ExternalImage(source=source, key=key, image_id=image.id))
         except IntegrityError:
-            pass  # another request cached it first — same content either way
+            _log.debug("external image %s/%s already cached by a concurrent request", source, key)
     db.commit()
     return image_path(image.hash)

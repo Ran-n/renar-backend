@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/12 17:25:56.443716 )
+[//]: # (+ Revised: 	2026/07/16 09:54:30.164984 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -90,6 +90,137 @@ are not a normalization concern at all: they depend on the whole of
 requires. Staleness of an external cache and redundant storage of *our
 own* data are different properties — the guard test only polices the
 latter.
+
+### `users.total_watch_minutes`: a stored aggregate, maintained by a database trigger, not application code
+
+The watch-time leaderboard (`/stats/ranking`) needs every user's total
+watch minutes to compute rank. Deriving that at read time means scanning
+every user's library on every ranking request; caching it (in memory, on
+a timer) means either a background job that runs whether or not anyone's
+using the app, or an unlucky request eating a live recompute when the
+cache expires. Both were tried and rejected in favor of storing the
+total on `users.total_watch_minutes` (migration `a7c2e9f4b816`), so a
+read is just an indexed `COUNT`.
+
+**Why this doesn't repeat the `login_count` mistake:** the whole reason
+per-user counters are normally derived at read time (see above) is that
+a *previous* stored counter drifted from the truth because application
+code was responsible for keeping it in sync and a code path didn't.
+`total_watch_minutes` carries the identical drift risk if it's
+maintained the same way — so it isn't. A Postgres trigger on
+`media_items` (fires on insert/delete, and on update only when
+`status`/`episodes_watched`/`user_id` actually changed) and on `titles`
+(fires when `runtime_minutes`/`total_episodes` changes, fanning out to
+every user with that title in their library) recomputes the affected
+user's total atomically, in the same transaction as the write. There is
+no "remember to call the recompute function" step for a future write
+path to omit — the column can't drift from `media_items`/`titles`
+because nothing can change those tables without the trigger running.
+
+**Trade-off accepted:** the aggregation logic now exists in two forms —
+the SQL inside the trigger functions, and `_total_watch_minutes_by_user`
+in `routers/stats.py` (kept only as an independent check the tests use to
+verify the trigger got it right, not called from request-time code).
+Adding a second ranking metric means writing its own trigger, not just a
+Python callable — more upfront cost than the derive-at-read-time default,
+justified here by how often `/stats` and `/stats/ranking` are hit.
+
+### `app_counters.total_users`: the same pattern, for a different reason
+
+`/stats/ranking`'s percentile needs `total_users` (the denominator)
+alongside each user's rank. The obvious implementation —
+`SELECT COUNT(*) FROM users` on every ranking request — has a property
+that's easy to miss: `COUNT(*)` has no O(1) shortcut in Postgres, index
+or not. MVCC means visibility must be checked per row, so counting the
+whole table gets slower in direct proportion to how many users exist,
+forever, on every single ranking read. This doesn't show up at small
+scale (a seq scan over a few dozen rows is instant) — it's the kind of
+cost that's invisible until the table is large, then becomes the
+dominant cost of the endpoint.
+
+`app_counters` is a singleton row (`id` is `CHECK`-constrained to always
+be `1`) holding `total_users`, kept current by a trigger on `users`
+(`AFTER INSERT OR DELETE`, incrementing/decrementing by exactly 1 — see
+migration `a7c2e9f4b816`), same reasoning as `total_watch_minutes` above:
+maintained atomically by the database, not by application code that
+could forget to call an increment somewhere. Reading it is a single
+primary-key lookup, `O(1)` regardless of how many users exist.
+
+**Why a singleton row isn't a hot-lock problem:** every registration and
+every account deletion serializes on updating that one row — a real
+contention point if it happened at the same rate as, say,
+`total_watch_minutes` updates (which fire on every watch action, from
+every user, constantly). Account creation/deletion is orders of
+magnitude rarer than that, by nature — nobody registers or deletes
+their account repeatedly per second the way they mark episodes watched.
+The same singleton-row pattern would be the wrong call for a
+counter that changes as often as user activity does; that's exactly why
+`total_watch_minutes` is a per-row counter (one row per user, no shared
+lock across users) rather than a single site-wide total.
+
+**Table creation ordering:** `app_counters` has no foreign key to `users`
+(it's not a per-user fact), so SQLAlchemy's dependency-based table
+creation order has nothing to anchor it to. `models.py` declares this
+explicitly with `AppCounters.__table__.add_is_dependent_on(User.__table__)`
+— the tool SQLAlchemy provides specifically for "must be created after,
+but there's no real foreign key" — rather than relying on incidental
+ordering that isn't actually guaranteed.
+
+### Ranking at large scale: what's built, what's deferred, and why
+
+The trigger-maintained columns above make `/stats/ranking` O(1) for the
+value itself and O(k) (k = users ahead of the viewer, via an index-only
+scan) for rank — a deliberate stopping point, not the ceiling of what's
+possible. Three further concerns were identified and intentionally left
+as documented plans rather than built speculatively, because each
+requires either infrastructure this repo doesn't provision or real
+production numbers this app doesn't have yet. Building any of them now
+would mean guessing at a shape (partition scheme, replica topology,
+bucket granularity) against data that doesn't exist.
+
+**Write throughput / WAL.** Each trigger firing is O(1), but at very
+high concurrent write volume the bottleneck stops being any individual
+query and becomes Postgres's write-ahead log — every transaction, however
+small, appends to one serial log, so throughput eventually becomes
+WAL-bound regardless of how cheap each write's own logic is. Two levers,
+both Postgres/deployment configuration rather than application code (no
+`postgresql.conf`, connection-pool config, or other infra file exists in
+this repo to hold them):
+- `synchronous_commit = local` or `off` trades a few ms of
+  worst-case durability (data since the last flush, lost only on a hard
+  crash) for meaningfully higher write throughput — a reasonable trade
+  for "marked an episode watched," not for anything that must never be
+  lost.
+- Connection pooling (PgBouncer) — standard, far smaller a lift than
+  anything below, and worth having independent of ranking specifically.
+
+**Table size (`media_items`/`titles`).** At hundreds of millions to
+billions of rows, B-tree lookups still scale logarithmically (not a
+correctness concern), but *maintenance* — VACUUM duration, index
+bloat — stops being tractable on one undivided table. Plan: hash-partition
+`media_items` by `user_id` once that's an observed problem (`pg_stat_user_tables`
+showing VACUUM taking too long, or index bloat trending up), not
+preemptively — nearly every query already filters `WHERE user_id = X`,
+so partition pruning would apply almost for free once partitioned. Doing
+this on a table with a few dozen rows would mean picking a partition
+count/scheme with no real data to size it against.
+
+**Single point of failure.** One Postgres primary serving all reads and
+writes is a ceiling regardless of query-level optimization. Plan:
+streaming replication, with staleness-tolerant read traffic (`/stats/ranking`,
+`/stats` overview — a leaderboard doesn't need read-your-writes
+consistency) routed to a replica while writes stay on the primary.
+Requires provisioning a second database instance, which is an operations
+decision, not a code change available inside this repo.
+
+**What would actually trigger building any of this:** production
+numbers, not a guessed row-count threshold. `EndpointStat` (existing
+usage-tracking table, see `UsageTrackingMiddleware`) currently records
+request *counts* per route, not latency — there is no signal today that
+would show `/stats/ranking` getting slow before users start noticing it.
+Adding latency tracking (even just a p95/p99 sample per route) would be
+the first real step toward knowing *when* any of the above is actually
+needed, rather than guessing.
 
 ### Every FK queried on its own carries an index
 

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/07/12 19:00:00.000000
+Revised: 2026/07/16 09:54:31.849390
 
 Schema normalization guard: fails CI the moment a denormalization sneaks
 back into the models.
@@ -62,6 +62,21 @@ ALLOWED_AGGREGATES: dict[str, str] = {
     "titles.total_seasons": "fact about the show from TMDB, not a count of our rows",
     "titles.page_count": "fact about the book from its catalog entry, not a count of our rows",
     "images.size_bytes": "fact about the stored file, not a count of rows",
+    "users.total_watch_minutes": (
+        "ranking leaderboard cache — unlike login_count (the counter that "
+        "drifted and motivated this rule), this is maintained by a Postgres "
+        "trigger on media_items/titles (migration a7c2e9f4b816), atomically "
+        "in the same transaction as the row that changed it, not by "
+        "application code remembering to call a recompute function; see "
+        "docs/design-decisions.md"
+    ),
+    "app_counters.total_users": (
+        "ranking leaderboard denominator cache, same trigger-maintained "
+        "pattern (and same justification) as users.total_watch_minutes — "
+        "COUNT(*) FROM users has no O(1) shortcut in Postgres regardless of "
+        "indexing, so this avoids scanning the whole users table on every "
+        "ranking request; see docs/design-decisions.md"
+    ),
 }
 
 # FK-looking columns that intentionally carry no ForeignKey.

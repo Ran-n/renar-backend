@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:14.175174
-Revised: 2026/07/13 10:27:24.306019
+Revised: 2026/07/16 09:54:30.628842
 
 Premium feature rules: the color palette users may pick from and the
 derivation of the "flair" (badge + colors) every user payload carries.
@@ -41,19 +41,17 @@ PALETTE: tuple[str, ...] = (
 # Mirrors the frontend's THEMES dict in xoutaim_frontend/themes.py — keep the
 # two in sync. Only "gruvbox" is free; the rest require an active subscription.
 FREE_THEMES: frozenset[str] = frozenset({"gruvbox"})
-THEME_NAMES: frozenset[str] = FREE_THEMES | frozenset(
-    {
-        "gruvbox_hard",
-        "gruvbox_soft",
-        "gruvbox_light",
-        "midnight",
-        "light",
-        "nord",
-        "dracula",
-        "solarized_light",
-        "catppuccin",
-    }
-)
+THEME_NAMES: frozenset[str] = FREE_THEMES | frozenset({
+    "gruvbox_hard",
+    "gruvbox_soft",
+    "gruvbox_light",
+    "midnight",
+    "light",
+    "nord",
+    "dracula",
+    "solarized_light",
+    "catppuccin",
+})
 
 
 # Home screen "continue watching" progress indicator style. Only "rings" is

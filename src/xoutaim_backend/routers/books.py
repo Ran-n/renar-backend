@@ -2,11 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.719597
-Revised: 2026/07/13 09:39:25.621276
+Revised: 2026/07/16 09:54:30.884085
 
 Book catalog via Open Library (free, no API key).
 """
 
+import logging
 import time
 
 import httpx
@@ -21,6 +22,7 @@ from ..image_cache import store_external_image, stored_external_image
 from ..models import User
 
 router = APIRouter(prefix="/books", tags=["books"])
+_log = logging.getLogger(__name__)
 
 OL_BASE = "https://openlibrary.org"
 COVER_BASE = "https://covers.openlibrary.org/b/id"

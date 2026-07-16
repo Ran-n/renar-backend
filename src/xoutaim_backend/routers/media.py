@@ -2,20 +2,19 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/07/14 22:48:11.676185
+Revised: 2026/07/16 09:54:31.041282
 """
 
-import base64
-import io
+import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from PIL import Image as PILImage
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user, require_premium
 from ..database import get_db
 from ..image_service import gc_image, image_row_for
+from ..image_utils import decode_b64_image, normalize_jpeg
 from ..models import (
     Episode,
     EpisodeCustomStill,
@@ -43,6 +42,7 @@ from ..tmdb_store import localized_titles, refresh_title_details, warm_title_tra
 from .tmdb import fetch_poster_bytes
 
 router = APIRouter(prefix="/media", tags=["media"])
+_log = logging.getLogger(__name__)
 
 # cap on how many titles get a background translation fetch per list_media
 # call — bounds worst-case TMDB load for a user with a huge library switching
@@ -64,6 +64,9 @@ def list_media(
     status_filter: WatchStatus | None = None,
     search: str | None = None,
     lang: str | None = None,
+    favorites_only: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -72,6 +75,8 @@ def list_media(
         query = query.filter(Title.media_type == media_type)
     if status_filter is not None:
         query = query.filter(LibraryEntry.status == status_filter)
+    if favorites_only:
+        query = query.filter(LibraryEntry.is_favorite.is_(True))
     if search:
         # matches the title's creation-time text, its language-independent
         # original name, or any language's title we've already cached from
@@ -91,7 +96,10 @@ def list_media(
                 Title.id.in_(cached_match),
             )
         )
-    entries = query.order_by(LibraryEntry.updated_at.desc()).all()
+    query = query.order_by(LibraryEntry.updated_at.desc())
+    if limit is not None:
+        query = query.offset(offset).limit(limit)
+    entries = query.all()
     prefetch_episode_cache(db, (e.title_id for e in entries))
 
     if lang and lang != "en" and entries:
@@ -248,26 +256,24 @@ def delete_media(
     db.commit()
 
 
-# ---------- custom posters (premium) ----------
+# ---------- custom posters and backdrops (premium) ----------
 
 POSTER_MAX = (800, 1200)  # w500-class 2:3 poster, generous headroom
+BACKDROP_MAX = (1280, 720)  # w780-class 16:9 backdrop, generous headroom
 
 
-def _poster_jpeg(raw: bytes) -> bytes:
-    """Downscale to poster size and return normalized JPEG bytes; uploads and
-    downloaded TMDB alternates go through the same path."""
-    try:
-        img = PILImage.open(io.BytesIO(raw))
-        img = img.convert("RGB")
-        img.thumbnail(POSTER_MAX)
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=85)
-        return out.getvalue()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Could not read that image file",
-        ) from exc
+def _resolve_raw_image(data: CustomPosterSet) -> bytes:
+    """Return raw image bytes from either a base64 upload or a TMDB URL."""
+    return decode_b64_image(data.image_b64) if data.image_b64 else fetch_poster_bytes(data.tmdb_url)
+
+
+def _swap_image(item: LibraryEntry, attr: str, new_image_id: int, db: Session) -> None:
+    """Replace the image FK on `attr`, GC the old one after flushing."""
+    old_image_id = getattr(item, attr)
+    setattr(item, attr, new_image_id)
+    if old_image_id != new_image_id:
+        db.flush()  # GC must see the new reference
+        gc_image(old_image_id, db)
 
 
 @router.put("/{item_id}/poster", response_model=LibraryEntryOut)
@@ -281,21 +287,9 @@ def set_custom_poster(
     alternate (downloaded server-side). Only touches the user's own entry —
     the shared Title poster is never modified."""
     item = _get_owned_item(item_id, user, db)
-    if data.image_b64:
-        try:
-            raw = base64.b64decode(data.image_b64)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Could not read that image file",
-            ) from exc
-    else:
-        raw = fetch_poster_bytes(data.tmdb_url)
-    old_image_id = item.custom_poster_image_id
-    item.custom_poster_image_id = image_row_for(_poster_jpeg(raw), db).id
-    if old_image_id != item.custom_poster_image_id:
-        db.flush()  # GC must see the new reference
-        gc_image(old_image_id, db)
+    raw = _resolve_raw_image(data)
+    new_id = image_row_for(normalize_jpeg(raw, POSTER_MAX), db).id
+    _swap_image(item, "custom_poster_image_id", new_id, db)
     db.commit()
     db.refresh(item)
     return item
@@ -320,28 +314,6 @@ def clear_custom_poster(
     return item
 
 
-# ---------- custom backdrops (premium) ----------
-
-BACKDROP_MAX = (1280, 720)  # w780-class 16:9 backdrop, generous headroom
-
-
-def _backdrop_jpeg(raw: bytes) -> bytes:
-    """Downscale to backdrop size and return normalized JPEG bytes; same
-    normalize-on-write path as posters, just a landscape target size."""
-    try:
-        img = PILImage.open(io.BytesIO(raw))
-        img = img.convert("RGB")
-        img.thumbnail(BACKDROP_MAX)
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=85)
-        return out.getvalue()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Could not read that image file",
-        ) from exc
-
-
 @router.put("/{item_id}/backdrop", response_model=LibraryEntryOut)
 def set_custom_backdrop(
     item_id: int,
@@ -353,21 +325,9 @@ def set_custom_backdrop(
     alternate (downloaded server-side). Only touches the user's own entry —
     the shared Title backdrop is never modified."""
     item = _get_owned_item(item_id, user, db)
-    if data.image_b64:
-        try:
-            raw = base64.b64decode(data.image_b64)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Could not read that image file",
-            ) from exc
-    else:
-        raw = fetch_poster_bytes(data.tmdb_url)
-    old_image_id = item.custom_backdrop_image_id
-    item.custom_backdrop_image_id = image_row_for(_backdrop_jpeg(raw), db).id
-    if old_image_id != item.custom_backdrop_image_id:
-        db.flush()  # GC must see the new reference
-        gc_image(old_image_id, db)
+    raw = _resolve_raw_image(data)
+    new_id = image_row_for(normalize_jpeg(raw, BACKDROP_MAX), db).id
+    _swap_image(item, "custom_backdrop_image_id", new_id, db)
     db.commit()
     db.refresh(item)
     return item
@@ -422,18 +382,9 @@ def set_custom_episode_still(
     episode the user hasn't watched yet, and a watch row's mere existence
     already means "watched" elsewhere in this file."""
     item = _get_owned_item(item_id, user, db)
-    if data.image_b64:
-        try:
-            raw = base64.b64decode(data.image_b64)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Could not read that image file",
-            ) from exc
-    else:
-        raw = fetch_poster_bytes(data.tmdb_url)
+    raw = _resolve_raw_image(data)
     still = _get_custom_still(item, season, episode, db)
-    img = image_row_for(_backdrop_jpeg(raw), db)
+    img = image_row_for(normalize_jpeg(raw, BACKDROP_MAX), db)
     old_image_id = still.still_image_id if still else None
     if still is None:
         still = EpisodeCustomStill(media_item_id=item.id, season=season, episode=episode, still_image_id=img.id)

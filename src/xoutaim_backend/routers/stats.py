@@ -2,28 +2,38 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.713668
-Revised: 2026/07/10 08:47:47.421329
+Revised: 2026/07/16 09:54:31.285598
 
 Watch-time and library statistics for the current user.
 """
 
+import logging
 from collections import Counter, defaultdict
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user, require_premium
 from ..database import get_db
-from ..models import EpisodeWatch, LibraryEntry, MediaType, User, WatchStatus
+from ..models import AppCounters, EpisodeWatch, LibraryEntry, MediaType, User, WatchStatus
 from ..titles import WITH_TITLE_GENRES
 
 router = APIRouter(prefix="/stats", tags=["stats"])
+_log = logging.getLogger(__name__)
 
 DEFAULT_FILM_RUNTIME = 110  # minutes, used when runtime is unknown
 DEFAULT_EPISODE_RUNTIME = 40
+
+
+def _runtime_or_default(runtime_minutes: int | None, default: int) -> int:
+    """`runtime_minutes or default` looks equivalent but is wrong: an
+    explicit 0 (a real, schema-allowed value) is falsy in Python, so `or`
+    would silently substitute the default. Only None means "unknown" — mirrors
+    the trigger SQL's COALESCE(runtime_minutes, default), which is NULL-only."""
+    return default if runtime_minutes is None else runtime_minutes
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -89,7 +99,7 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         if item.media_type == MediaType.film:
             if item.status == WatchStatus.completed:
                 films_watched += 1
-                film_minutes += item.runtime_minutes or DEFAULT_FILM_RUNTIME
+                film_minutes += _runtime_or_default(item.runtime_minutes, DEFAULT_FILM_RUNTIME)
         elif item.media_type == MediaType.tv_show:
             if item.status == WatchStatus.completed:
                 shows_completed += 1
@@ -101,7 +111,7 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
                 eps = item.total_episodes
             episodes_watched += eps
             episodes_per_item[item.id] = eps
-            tv_minutes += eps * (item.runtime_minutes or DEFAULT_EPISODE_RUNTIME)
+            tv_minutes += eps * _runtime_or_default(item.runtime_minutes, DEFAULT_EPISODE_RUNTIME)
         elif item.media_type == MediaType.youtube:
             if item.status == WatchStatus.completed:
                 youtube_watched += 1
@@ -139,7 +149,7 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         most_watched.append({
             "title": item.title,
             "episodes": count,
-            "minutes": count * (item.runtime_minutes or DEFAULT_EPISODE_RUNTIME),
+            "minutes": count * _runtime_or_default(item.runtime_minutes, DEFAULT_EPISODE_RUNTIME),
             "poster_url": item.poster_url,
         })
 
@@ -175,68 +185,126 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
     }
 
 
-def _total_watch_minutes_by_user(db: Session) -> dict[int, int]:
-    """Total film + tv watch minutes for every user, keyed by user id."""
+def _total_watch_minutes_by_user(db: Session, user_id: int | None = None) -> dict[int, int]:
+    """Total film + tv watch minutes for every user, keyed by user id — an
+    independent, from-scratch computation. Not used by request-time code
+    (which reads the trigger-maintained User.total_watch_minutes column
+    directly, see RankingMetric below); this exists so tests can verify the
+    Postgres triggers added in migration a7c2e9f4b816 actually keep that
+    column correct, by comparing against this."""
     totals: dict[int, int] = defaultdict(int)
-    for item in db.query(LibraryEntry).all():
+    query = db.query(LibraryEntry)
+    if user_id is not None:
+        query = query.filter(LibraryEntry.user_id == user_id)
+    for item in query.all():
         if item.media_type == MediaType.film and item.status == WatchStatus.completed:
-            totals[item.user_id] += item.runtime_minutes or DEFAULT_FILM_RUNTIME
+            totals[item.user_id] += _runtime_or_default(item.runtime_minutes, DEFAULT_FILM_RUNTIME)
         elif item.media_type == MediaType.tv_show:
             eps = item.episodes_watched or 0
             if item.status == WatchStatus.completed and eps == 0 and item.total_episodes:
                 eps = item.total_episodes
-            totals[item.user_id] += eps * (item.runtime_minutes or DEFAULT_EPISODE_RUNTIME)
+            totals[item.user_id] += eps * _runtime_or_default(item.runtime_minutes, DEFAULT_EPISODE_RUNTIME)
     return totals
 
 
 @dataclass(frozen=True)
 class RankingMetric:
     """One leaderboard: a display label, the unit its value is in (so the
-    frontend knows how to format it), and how to compute per-user totals.
-    Add an entry here to add a new ranking — /stats/ranking/metrics and
-    /stats/ranking?metric=... both pick it up automatically."""
+    frontend knows how to format it), and the indexed User column a Postgres
+    trigger keeps current (see migration a7c2e9f4b816 — total_watch_minutes
+    is maintained atomically by the database itself, in the same transaction
+    as the row that changed it, not by application code remembering to call
+    a recompute function after every write. That "remember to call it"
+    pattern is exactly the drift risk docs/design-decisions.md's
+    stored-aggregate rule exists to rule out — see ALLOWED_AGGREGATES).
+
+    Add an entry here to add a new ranking: it needs its own indexed User
+    column plus a migration-level trigger to maintain it — there's no
+    Python-level write path to hook, by design."""
 
     key: str
     label: str
     unit: str  # "minutes" | "count"
-    compute: Callable[[Session], dict[int, int]]
+    attr: str  # name of the persisted, trigger-maintained column on User
 
 
 RANKING_METRICS: dict[str, RankingMetric] = {
     m.key: m
     for m in [
-        RankingMetric("watch_time", "Total watch time", "minutes", _total_watch_minutes_by_user),
+        RankingMetric("watch_time", "Total watch time", "minutes", "total_watch_minutes"),
     ]
 }
 
 
-@router.get("/ranking/metrics")
-def get_ranking_metrics(user: User = Depends(require_premium)):
-    """Which leaderboards exist, so the frontend can offer a metric picker
-    without hardcoding the list."""
-    return [{"key": m.key, "label": m.label, "unit": m.unit} for m in RANKING_METRICS.values()]
-
-
-@router.get("/ranking")
-def get_ranking(
-    metric: str = "watch_time", db: Session = Depends(get_db), user: User = Depends(require_premium)
-):
-    """Where a premium user stands against everyone else on the given metric.
-    Premium-gated at the router level — the frontend's locked card mirrors
-    this, it doesn't enforce it."""
-    ranking_metric = RANKING_METRICS.get(metric)
-    if ranking_metric is None:
-        raise HTTPException(status_code=404, detail=f"Unknown ranking metric: {metric}")
-    totals = ranking_metric.compute(db)
-    ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
-    total_users = len(ranked)
-    rank = next((i + 1 for i, (uid, _value) in enumerate(ranked) if uid == user.id), total_users + 1)
+def _compute_ranking(db: Session, user: User, ranking_metric: RankingMetric) -> dict:
+    """Where `user` stands on this metric. `ahead` is one conditional-count
+    query — no scan of anyone's library, including the viewer's own, since
+    the column is already kept current by a database trigger, not computed
+    here. `total_users` is a single-row lookup (app_counters), not a
+    COUNT(*) FROM users: COUNT(*) has no O(1) shortcut in Postgres — MVCC
+    means every row's visibility must be checked regardless of indexing — so
+    at real scale that would mean scanning the entire users table on every
+    ranking request just to answer the denominator."""
+    column = getattr(User, ranking_metric.attr)
+    own_value = getattr(user, ranking_metric.attr)
+    ahead = (
+        db.query(func.count(User.id))
+        .filter(
+            or_(
+                column > own_value,
+                and_(column == own_value, User.created_at < user.created_at),
+            )
+        )
+        .scalar()
+    )
+    total_users = db.query(AppCounters.total_users).filter(AppCounters.id == 1).scalar() or 0
+    rank = ahead + 1
     return {
         "metric": ranking_metric.key,
         "label": ranking_metric.label,
         "unit": ranking_metric.unit,
         "rank": rank,
         "total_users": total_users,
-        "value": totals.get(user.id, 0),
-        "percentile": round((total_users - rank + 1) / total_users * 100, 1) if total_users else None,
+        "value": own_value,
+        "percentile": round(rank / total_users * 100, 1) if total_users else None,
+    }
+
+
+def _all_rankings(db: Session, user: User) -> list[dict]:
+    """Every metric's ranking, ordered so the metric the user is best
+    positioned on (smallest rank/total_users fraction) comes first."""
+    rankings = [_compute_ranking(db, user, m) for m in RANKING_METRICS.values()]
+    rankings.sort(key=lambda r: r["rank"] / r["total_users"] if r["total_users"] else 1)
+    return rankings
+
+
+@router.get("/ranking/metrics")
+def get_ranking_metrics(db: Session = Depends(get_db), user: User = Depends(require_premium)):
+    """Which leaderboards exist, so the frontend can offer a metric picker
+    without hardcoding the list."""
+    return [{"key": r["metric"], "label": r["label"], "unit": r["unit"]} for r in _all_rankings(db, user)]
+
+
+@router.get("/ranking")
+def get_ranking(metric: str | None = None, db: Session = Depends(get_db), user: User = Depends(require_premium)):
+    """Where a premium user stands against everyone else on the given metric —
+    defaults to whichever metric they're best positioned on. Premium-gated at
+    the router level — the frontend's locked card mirrors this, it doesn't
+    enforce it.
+
+    Bundles the full metrics list into the response too (as "metrics") so a
+    single request is enough to render tabs plus the selected standing,
+    instead of needing a round trip to /ranking/metrics first."""
+    rankings = _all_rankings(db, user)
+    if not rankings:
+        raise HTTPException(status_code=404, detail="No ranking metrics configured")
+    if metric is None:
+        selected = rankings[0]
+    else:
+        selected = next((r for r in rankings if r["metric"] == metric), None)
+        if selected is None:
+            raise HTTPException(status_code=404, detail=f"Unknown ranking metric: {metric}")
+    return {
+        **selected,
+        "metrics": [{"key": r["metric"], "label": r["label"], "unit": r["unit"]} for r in rankings],
     }

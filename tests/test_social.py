@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.681273
-Revised: 2026/07/13 08:29:55.367678
+Revised: 2026/07/16 09:54:31.933339
 
 Social graph: search, public profiles, follow/unfollow, feed.
 """
@@ -92,6 +92,34 @@ def test_following_list(client, alice, bob):
     client.post(f"/users/{bob_user['id']}/follow", headers=headers)
     following = client.get(f"/users/{alice_user['id']}/following", headers=headers).json()
     assert [u["username"] for u in following] == ["bob"]
+
+
+def test_following_list_paginated(client, alice, make_user):
+    alice_user, headers = alice
+    followed = [make_user(f"followed{i}")[0] for i in range(3)]
+    for user in followed:
+        client.post(f"/users/{user['id']}/follow", headers=headers)
+
+    # newest-followed first (created_at desc), so page order is reversed
+    page1 = client.get(f"/users/{alice_user['id']}/following", params={"limit": 2, "offset": 0}, headers=headers).json()
+    page2 = client.get(f"/users/{alice_user['id']}/following", params={"limit": 2, "offset": 2}, headers=headers).json()
+    assert [u["username"] for u in page1] == ["followed2", "followed1"]
+    assert [u["username"] for u in page2] == ["followed0"]
+
+    unpaginated = client.get(f"/users/{alice_user['id']}/following", headers=headers).json()
+    assert len(unpaginated) == 3
+
+
+def test_followers_list_paginated(client, bob, make_user):
+    bob_user, _ = bob
+    followers = [make_user(f"follower{i}") for i in range(3)]
+    for _, hdrs in followers:
+        client.post(f"/users/{bob_user['id']}/follow", headers=hdrs)
+
+    page1 = client.get(f"/users/{bob_user['id']}/followers", params={"limit": 2, "offset": 0}, headers=hdrs).json()
+    page2 = client.get(f"/users/{bob_user['id']}/followers", params={"limit": 2, "offset": 2}, headers=hdrs).json()
+    assert [u["username"] for u in page1] == ["follower2", "follower1"]
+    assert [u["username"] for u in page2] == ["follower0"]
 
 
 def test_user_media_is_visible_to_others(client, alice, bob):

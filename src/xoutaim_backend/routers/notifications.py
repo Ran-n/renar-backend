@@ -2,10 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.426784
-Revised: 2026/07/07 13:25:15.426784
+Revised: 2026/07/16 09:54:31.122846
 
 Notification center endpoints.
 """
+
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -15,6 +17,7 @@ from ..database import get_db
 from ..models import Notification, User
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
+_log = logging.getLogger(__name__)
 
 
 def _out(n: Notification) -> dict:
