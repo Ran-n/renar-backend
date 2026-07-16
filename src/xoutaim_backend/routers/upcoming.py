@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.990684
-Revised: 2026/07/13 09:26:03.346399
+Revised: 2026/07/16 09:54:31.445191
 
 Upcoming releases for tracked titles: next episodes and film premieres.
 """
@@ -10,7 +10,7 @@ Upcoming releases for tracked titles: next episodes and film premieres.
 import logging
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
@@ -114,7 +114,13 @@ def get_upcoming_history(
     titles, most recent first. `before` (an ISO date from a previous
     page's oldest entry) pages further into the past."""
     today = date.today()
-    cutoff = date.fromisoformat(before) if before else today + timedelta(days=1)
+    if before is not None:
+        try:
+            cutoff = date.fromisoformat(before)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid date: {before!r}") from exc
+    else:
+        cutoff = today + timedelta(days=1)
 
     tv_query = (
         db.query(LibraryEntry, Title)

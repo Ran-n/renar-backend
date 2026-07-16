@@ -2,10 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/07/13 08:34:07.837169
+Revised: 2026/07/16 09:54:31.202311
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
+
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import case, func, select
@@ -20,6 +22,7 @@ from ..titles import WITH_TITLE_GENRES
 from .stats import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 
 router = APIRouter(tags=["social"])
+_log = logging.getLogger(__name__)
 
 
 def _user_or_404(user_id: int, db: Session) -> User:
@@ -189,11 +192,16 @@ def unfollow_user(
 @router.get("/users/{user_id}/following")
 def list_following(
     user_id: int,
+    limit: int | None = None,
+    offset: int = 0,
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
     _user_or_404(user_id, db)
-    follows = db.query(Follow).filter(Follow.follower_id == user_id).all()
+    query = db.query(Follow).filter(Follow.follower_id == user_id).order_by(Follow.created_at.desc(), Follow.id.desc())
+    if limit is not None:
+        query = query.offset(offset).limit(limit)
+    follows = query.all()
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_([f.followed_id for f in follows]))}
     return _public_users_batch([users_by_id[f.followed_id] for f in follows], me, db)
 
@@ -201,11 +209,16 @@ def list_following(
 @router.get("/users/{user_id}/followers")
 def list_followers(
     user_id: int,
+    limit: int | None = None,
+    offset: int = 0,
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
     _user_or_404(user_id, db)
-    follows = db.query(Follow).filter(Follow.followed_id == user_id).all()
+    query = db.query(Follow).filter(Follow.followed_id == user_id).order_by(Follow.created_at.desc(), Follow.id.desc())
+    if limit is not None:
+        query = query.offset(offset).limit(limit)
+    follows = query.all()
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_([f.follower_id for f in follows]))}
     return _public_users_batch([users_by_id[f.follower_id] for f in follows], me, db)
 

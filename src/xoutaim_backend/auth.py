@@ -2,9 +2,10 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.008319
-Revised: 2026/07/10 18:26:21.882347
+Revised: 2026/07/16 09:54:30.246212
 """
 
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -18,6 +19,8 @@ from .config import settings
 from .database import get_db
 from .models import User, utcnow
 
+_log = logging.getLogger(__name__)
+
 ALGORITHM = "HS256"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -30,6 +33,7 @@ def require_admin(credentials: HTTPBasicCredentials = Depends(_basic)) -> str:
     user_ok = secrets.compare_digest(credentials.username.encode(), settings.admin_username.encode())
     pw_ok = secrets.compare_digest(credentials.password.encode(), settings.admin_password.encode())
     if not user_ok or not pw_ok:
+        _log.warning("admin authentication failed for username=%r", credentials.username)
         raise HTTPException(
             status_code=401,
             detail="Unauthorized",

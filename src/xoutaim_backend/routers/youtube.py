@@ -2,13 +2,14 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.124960
-Revised: 2026/07/13 10:25:58.052446
+Revised: 2026/07/16 09:54:31.525197
 
 Resolve YouTube URLs to title/channel/thumbnail via oEmbed (no API key), and
 channel search / video listing via the YouTube Data API v3 (needs a key) for
 the Explore YouTube tab.
 """
 
+import logging
 import re
 
 import httpx
@@ -20,6 +21,7 @@ from ..http_cache import TTLCache
 from ..models import User
 
 router = APIRouter(prefix="/youtube", tags=["youtube"])
+_log = logging.getLogger(__name__)
 
 _http = httpx.Client(timeout=10)
 

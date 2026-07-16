@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/09 08:05:51.980396 )
+[//]: # (+ Revised: 	2026/07/16 09:54:29.868949 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -14,6 +14,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Premium leaderboard/ranking (`GET /stats/ranking`, `GET /stats/ranking/metrics`):
+  pluggable per-metric rankings (starts with total watch time) with
+  percentile rank against `app_counters.total_users`
+- `users.total_watch_minutes` and `app_counters.total_users` — trigger-maintained
+  aggregates backing the ranking endpoints (see `docs/design-decisions.md`)
+- `users.has_seen_welcome`, settable via `PATCH /auth/profile`; admin can reset it
+  per user (`POST /admin/users/{id}/reset-onboarding`) to re-show onboarding
+- `GET /media` pagination (`limit`, `offset`) and a `favorites_only` filter
+- Composite index on `media_items (user_id, updated_at)` for library pagination
 - Anti-abuse system (`security.py`): honeypot paths, unknown-route probe
   detection, per-IP rate limiting/flood bans, per-account login backoff,
   and persisted repeat-offender strikes that escalate a temporary ban into

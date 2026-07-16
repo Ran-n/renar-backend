@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.529990
-Revised: 2026/07/14 22:48:11.756152
+Revised: 2026/07/16 09:54:30.712129
 
 Admin control panel, protected by HTTP Basic credentials from the .env file.
 
@@ -12,6 +12,7 @@ server-rendered management page.
 
 import html
 import logging
+import re
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
@@ -50,6 +51,10 @@ _P = settings.admin_path.rstrip("/") or "/admin"
 
 router = APIRouter(prefix=_P, tags=["admin"])
 _log = logging.getLogger(__name__)
+
+# Minimal but correct email check: local@domain.tld — far stricter than the
+# previous `"@" not in email` guard, which accepted "nope" as a valid email.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 _FAVICON = (
     "data:image/svg+xml,"
@@ -556,6 +561,8 @@ def _render_users(
     last_logins: dict[int, datetime],
     request_counts: dict[int, int],
     totals: dict[str, int],
+    page: int = 1,
+    total_pages: int = 1,
 ) -> str:
     rows = ""
     for u in sorted(users, key=lambda u: u.username.lower()):
@@ -774,8 +781,29 @@ def _render_users(
 
     initSort();
   </script>
+  {_pagination_nav(page, total_pages)}
 </body>
 </html>"""
+
+
+def _pagination_nav(page: int, total_pages: int) -> str:
+    """Simple prev/next page controls; only rendered when there is more than one page."""
+    if total_pages <= 1:
+        return ""
+    prev_link = (
+        f'<a class="admin-pill" href="{_P}/users?page={page - 1}">&laquo; Prev</a>'
+        if page > 1
+        else '<span class="admin-pill" style="opacity:.4">&laquo; Prev</span>'
+    )
+    next_link = (
+        f'<a class="admin-pill" href="{_P}/users?page={page + 1}">Next &raquo;</a>'
+        if page < total_pages
+        else '<span class="admin-pill" style="opacity:.4">Next &raquo;</span>'
+    )
+    return (
+        f'<div style="display:flex;gap:.5rem;justify-content:center;padding:1rem 0">'
+        f"{prev_link} <span>Page {page} / {total_pages}</span> {next_link}</div>"
+    )
 
 
 _SERVICES = [
@@ -912,23 +940,75 @@ def admin_dashboard(_: str = Depends(_require_admin)):
     return _render_dashboard()
 
 
+_USERS_PAGE_SIZE = 200
+
+
 @router.get("/users", response_class=HTMLResponse, include_in_schema=False)
 def list_users(
+    page: int = Query(default=1, ge=1),
     _: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
-    users = db.query(User).all()
-    item_counts = dict(db.query(LibraryEntry.user_id, func.count()).group_by(LibraryEntry.user_id).all())
-    comment_counts = dict(db.query(Comment.user_id, func.count()).group_by(Comment.user_id).all())
-    login_counts = dict(db.query(LoginEvent.user_id, func.count()).group_by(LoginEvent.user_id).all())
-    last_logins = dict(db.query(LoginEvent.user_id, func.max(LoginEvent.created_at)).group_by(LoginEvent.user_id).all())
-    request_counts = {
-        uid: int(total)
-        for uid, total in db.query(RequestDay.user_id, func.sum(RequestDay.count)).group_by(RequestDay.user_id).all()
-    }
+    total_users = db.query(func.count(User.id)).scalar() or 0
+    offset = (page - 1) * _USERS_PAGE_SIZE
+    users = db.query(User).order_by(User.username).offset(offset).limit(_USERS_PAGE_SIZE).all()
+    # Aggregate lookups scoped to the current page only — avoids full-table
+    # GROUP BY scans on every render when the user base is large.
+    page_user_ids = [u.id for u in users]
+    item_counts = (
+        dict(
+            db.query(LibraryEntry.user_id, func.count())
+            .filter(LibraryEntry.user_id.in_(page_user_ids))
+            .group_by(LibraryEntry.user_id)
+            .all()
+        )
+        if page_user_ids
+        else {}
+    )
+    comment_counts = (
+        dict(
+            db.query(Comment.user_id, func.count())
+            .filter(Comment.user_id.in_(page_user_ids))
+            .group_by(Comment.user_id)
+            .all()
+        )
+        if page_user_ids
+        else {}
+    )
+    login_counts = (
+        dict(
+            db.query(LoginEvent.user_id, func.count())
+            .filter(LoginEvent.user_id.in_(page_user_ids))
+            .group_by(LoginEvent.user_id)
+            .all()
+        )
+        if page_user_ids
+        else {}
+    )
+    last_logins = (
+        dict(
+            db.query(LoginEvent.user_id, func.max(LoginEvent.created_at))
+            .filter(LoginEvent.user_id.in_(page_user_ids))
+            .group_by(LoginEvent.user_id)
+            .all()
+        )
+        if page_user_ids
+        else {}
+    )
+    request_counts = (
+        {
+            uid: int(total)
+            for uid, total in db.query(RequestDay.user_id, func.sum(RequestDay.count))
+            .filter(RequestDay.user_id.in_(page_user_ids))
+            .group_by(RequestDay.user_id)
+            .all()
+        }
+        if page_user_ids
+        else {}
+    )
     now = utcnow()
     totals = {
-        "users": len(users),
+        "users": total_users,
         "items": db.query(func.count(LibraryEntry.id)).scalar() or 0,
         "watches": db.query(func.count(EpisodeWatch.id)).scalar() or 0,
         "comments": db.query(func.count(Comment.id)).scalar() or 0,
@@ -938,7 +1018,18 @@ def list_users(
         "home_hero_on": db.query(func.count(User.id)).filter(User.home_hero_enabled.is_(True)).scalar() or 0,
         "home_on_launch_on": db.query(func.count(User.id)).filter(User.home_on_launch.is_(True)).scalar() or 0,
     }
-    return _render_users(users, item_counts, comment_counts, login_counts, last_logins, request_counts, totals)
+    total_pages = max(1, -(-total_users // _USERS_PAGE_SIZE))  # ceiling division
+    return _render_users(
+        users,
+        item_counts,
+        comment_counts,
+        login_counts,
+        last_logins,
+        request_counts,
+        totals,
+        page=page,
+        total_pages=total_pages,
+    )
 
 
 def _stat_tile(label: str, value, small: bool = False) -> str:
@@ -1054,6 +1145,9 @@ def _render_account_actions(user: User) -> str:
       <div class="action-danger">
         <form method="post" action="{_P}/users/{uid}/reset-login-limit" style="display:contents">
           <button class="btn-sm" type="submit">Reset sign-in rate limit</button>
+        </form>
+        <form method="post" action="{_P}/users/{uid}/reset-onboarding" style="display:contents">
+          <button class="btn-sm" type="submit">Reset onboarding</button>
         </form>
         {ban_action}
         <form method="post" action="{_P}/users/{uid}/delete" style="display:contents"
@@ -1314,8 +1408,8 @@ def _render_usage(totals: dict, endpoint_items: list[tuple], login_series: list,
     )
     inner = (
         f'<div class="stats">{tiles}</div>'
-        f'<div style="margin-bottom:1.25rem">{endpoint_card}</div>'
         f'<div class="charts-grid">{charts}</div>'
+        f'<div style="margin-top:1.25rem">{endpoint_card}</div>'
     )
     return _usage_page("Usage & Analytics", "&#x1F4CA;", _P, "Admin", inner)
 
@@ -1841,7 +1935,7 @@ def edit_user(
             raise HTTPException(status_code=409, detail="Username already taken")
         user.username = username
     if email and email != user.email:
-        if "@" not in email:
+        if not _EMAIL_RE.match(email):
             raise HTTPException(status_code=422, detail="Invalid email address")
         if db.query(User).filter(User.email == email, User.id != user_id).first():
             raise HTTPException(status_code=409, detail="Email already taken")
@@ -1881,6 +1975,21 @@ def reset_user_login_limit(
         raise HTTPException(status_code=404, detail="User not found")
     security.reset_login_backoff(user.username)
     _log.info("admin=%s reset login rate limit for user id=%s username=%s", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
+@router.post("/users/{user_id}/reset-onboarding", include_in_schema=False)
+def reset_user_onboarding(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.has_seen_welcome = False
+    db.commit()
+    _log.info("admin=%s reset onboarding for user id=%s username=%s", admin_user, user_id, user.username)
     return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
 
 

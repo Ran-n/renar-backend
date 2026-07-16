@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.357680
-Revised: 2026/07/10 18:19:20.458217
+Revised: 2026/07/16 09:54:31.683423
 
 HTTP layer for TMDB: pooled client, auth, and the short-lived in-memory
 cache. Lives below the router so the notifier and tmdb_store can call TMDB
@@ -13,11 +13,15 @@ Explore feeds and season lists fast and to stay well inside rate limits.
 Longer-lived persistence for tracked titles is tmdb_store's job.
 """
 
+import logging
+
 import httpx
 from fastapi import HTTPException, status
 
 from .config import settings
 from .http_cache import TTLCache
+
+_log = logging.getLogger(__name__)
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 IMAGE_BASE = "https://image.tmdb.org/t/p"

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/07/14 22:48:35.261154
+Revised: 2026/07/16 09:54:31.367093
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -11,6 +11,7 @@ titles additionally get their raw payloads persisted through
 tmdb_store.py, so detail pages survive TMDB outages and server restarts.
 """
 
+import logging
 from pathlib import Path
 
 import httpx
@@ -26,6 +27,7 @@ from ..tmdb_http import BACKDROP_BASE, IMAGE_BASE, POSTER_BASE, TMDB_KIND, http_
 from ..tmdb_store import TMDB_LOCALE, cached_tmdb
 
 router = APIRouter(prefix="/tmdb", tags=["tmdb"])
+_log = logging.getLogger(__name__)
 
 
 def _locale_params(language: str) -> dict | None:

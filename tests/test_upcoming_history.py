@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/13 09:21:11.000000
-Revised: 2026/07/13 09:26:03.430062
+Revised: 2026/07/16 09:54:32.010518
 
 /upcoming/history: past aired episodes and released films for tracked
 titles. Episode data is backfilled lazily (through the same TMDB season
@@ -183,3 +183,10 @@ def test_sync_show_episodes_upserts_episode_rows(client, alice, monkeypatch):
         ]
     finally:
         db.close()
+
+
+def test_history_rejects_malformed_before_date(client, alice):
+    """A malformed `before` cursor must return 422, not a 500 from fromisoformat."""
+    _, headers = alice
+    r = client.get("/upcoming/history", params={"before": "not-a-date"}, headers=headers)
+    assert r.status_code == 422

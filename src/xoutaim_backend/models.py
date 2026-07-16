@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/13 09:26:03.172865
+Revised: 2026/07/16 09:54:30.554703
 """
 
 import enum
@@ -10,7 +10,9 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime
 
 from sqlalchemy import (
+    DDL,
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -23,11 +25,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     column,
+    event,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column, object_session, relationship
 
 from .database import Base
+from .db_triggers import USER_COUNT_TRIGGER_SQL, WATCH_MINUTES_TRIGGER_SQL
 
 
 def utcnow() -> datetime:
@@ -151,6 +155,15 @@ class User(Base):
     home_progress_style: Mapped[str] = mapped_column(String(20), default="rings", server_default="rings")
     home_season_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     home_series_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    # Set once the first-login welcome tour has been shown (or skipped).
+    # Synced server-side so it doesn't re-appear on a different device.
+    has_seen_welcome: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # Ranking metrics (see routers/stats.py RANKING_METRICS): kept up to date
+    # incrementally at write time (each write recomputes just the acting
+    # user's own value — never a full-table scan), so leaderboard rank/total
+    # can be read with a plain indexed COUNT query instead of aggregating
+    # every user's library on every request.
+    total_watch_minutes: Mapped[int] = mapped_column(Integer, default=0, server_default="0", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     # The only usage fact stored here: everything else the admin panel shows
     # (login count, last login, request totals) is derived from login_events /
@@ -183,6 +196,25 @@ class User(Base):
         if not self.is_premium:
             return None
         return "verified" if self.verified else "premium"
+
+
+class AppCounters(Base):
+    """Singleton row (id is always 1) holding site-wide counters too cheap to
+    justify their own table, but too expensive to recompute with COUNT(*) on
+    every read at scale — COUNT(*) has no O(1) shortcut in Postgres's MVCC
+    even with an index, since visibility must be checked per row. Maintained
+    by a trigger on the counted table (see db_triggers.py), same pattern as
+    users.total_watch_minutes: the database keeps it correct atomically,
+    nothing in application code has to remember to update it.
+
+    total_users specifically backs /stats/ranking's percentile denominator —
+    see routers/stats.py._compute_ranking and docs/design-decisions.md."""
+
+    __tablename__ = "app_counters"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_app_counters_singleton"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    total_users: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class LoginEvent(Base):
@@ -427,6 +459,7 @@ class LibraryEntry(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "title_id", name="uq_user_title"),
         Index("ix_media_items_user_id_status", "user_id", "status"),
+        Index("ix_media_items_user_id_updated_at", "user_id", "updated_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -797,3 +830,29 @@ class CommentReport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     comment: Mapped[Comment] = relationship(back_populates="reports")
+
+
+# Alembic migrations are the source of truth for real deployments, but tests
+# build the schema straight from Base.metadata.create_all() and never run
+# migrations (see tests/conftest.py) — so a trigger created only via a
+# migration's op.execute() would silently never exist there. Registering the
+# same DDL here, against LibraryEntry's own table "after_create" event, makes
+# create_all() create it too. Attached to LibraryEntry (media_items) rather
+# than Base.metadata itself: a metadata-level DDL event fires once for the
+# whole create_all() call, before any individual table is actually created
+# (confirmed empirically — it is NOT "after all tables", despite the name),
+# so DDL referencing table names must instead hang off a table that's
+# guaranteed to be created last among the ones it touches. media_items has FK
+# columns to users and titles, so SQLAlchemy's dependency sort always creates
+# both of those first — by the time this fires, all three exist.
+event.listen(LibraryEntry.__table__, "after_create", DDL(WATCH_MINUTES_TRIGGER_SQL))
+
+# app_counters has no FK to users (it's a singleton counter row, not a
+# per-user fact), so there's no natural dependency SQLAlchemy's creation-order
+# sort would pick up on its own — add_is_dependent_on declares one explicitly,
+# the same tool SQLAlchemy provides for exactly this "must be created after,
+# but there's no real foreign key" case. That guarantees users exists by the
+# time app_counters' own after_create fires, so the trigger DDL below (which
+# references both tables) is safe.
+AppCounters.__table__.add_is_dependent_on(User.__table__)
+event.listen(AppCounters.__table__, "after_create", DDL(USER_COUNT_TRIGGER_SQL))

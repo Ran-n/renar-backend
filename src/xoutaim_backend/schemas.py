@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/07/12 18:29:10.766980
+Revised: 2026/07/16 09:54:31.601408
 """
 
 from datetime import datetime
@@ -59,6 +59,7 @@ class UserOut(BaseModel):
     home_progress_style: str = "rings"
     home_season_color: str | None = None
     home_series_color: str | None = None
+    has_seen_welcome: bool = False
 
 
 class Token(BaseModel):
@@ -129,6 +130,7 @@ class ProfileUpdate(BaseModel):
     home_hero_enabled: bool | None = None
     home_on_launch: bool | None = None
     home_progress_style: str | None = None
+    has_seen_welcome: bool | None = None
 
     @field_validator("theme")
     @classmethod
