@@ -186,23 +186,32 @@ as this server's: a scanner just re-earns them within seconds of a restart.
 
 - `ABUSE_GUARD_ENABLED=false` disables everything in this file except the
   security headers and origin check — used in tests, where all traffic
-  legitimately comes from one IP.
+  legitimately comes from one IP. This one stays an `.env`-only, boot-time
+  flag: it decides whether `AbuseGuardMiddleware` is installed on the app at
+  all (see `main.py`), which can't be changed without a restart, so there's
+  no admin-panel equivalent.
 - `TRUST_PROXY_HEADERS` must stay `false` unless there's an actual reverse
   proxy/CDN in front of the app. `client_ip()` reads the rightmost entry of
   `X-Forwarded-For` — the hop appended by *your* proxy — when trusted;
   without a proxy that header is entirely client-supplied, so trusting it
   would let anyone spoof their apparent IP to dodge every limit above, or
-  get an innocent IP (the proxy's own) banned.
-- All tunables are environment variables — see
+  get an innocent IP (the proxy's own) banned. Same caution applies whether
+  it's set via `.env` or flipped from `<ADMIN_PATH>/settings` — the live
+  value lives in `site_settings.trust_proxy_headers` (see below), so
+  changing it takes effect immediately, with no restart to catch a mistake.
+- All tunables are environment variables (used as seed defaults — see
+  the section below) — see
   [environment-variables.md](environment-variables.md) for the full list of
   defaults.
 
 ## DB-backed runtime settings
 
-The twelve anti-abuse tunables and the two registration flags (`registration_open`,
+The anti-abuse tunables — twelve numeric limits, `trust_proxy_headers`,
+`exempt_ips` — and the two registration flags (`registration_open`,
 `invite_only`) are stored in a `site_settings` singleton row (id always 1,
 same pattern as `app_counters`) so they can be changed from the admin panel at
-`<ADMIN_PATH>/settings` without a server restart.
+`<ADMIN_PATH>/settings` without a server restart. `abuse_guard_enabled` is the
+one deliberate exception — see "Operating it" above.
 
 `src/xoutaim_backend/site_settings.py` provides:
 

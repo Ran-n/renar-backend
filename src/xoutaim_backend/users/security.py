@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/17 18:47:08.824851
+Revised: 2026/07/17 19:32:52.382654
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -312,7 +312,7 @@ def _prune(dq: deque[float], cutoff: float) -> None:
 
 
 def client_ip(request: Request) -> str:
-    if settings.trust_proxy_headers:
+    if site_settings.current().trust_proxy_headers:
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
             # rightmost entry = the hop appended by our own proxy;
@@ -391,8 +391,9 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         ip = client_ip(request)
         now = time.time()
+        ss = site_settings.current()
 
-        if ip in settings.exempt_ips:
+        if ip in ss.exempt_ips:
             return await call_next(request)
 
         if not _permabans_loaded:
@@ -421,7 +422,6 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
 
         counted = path not in _UNCOUNTED_PATHS
-        ss = site_settings.current()
         if counted:
             hits = self.hits[ip]
             _prune(hits, now - _MINUTE)

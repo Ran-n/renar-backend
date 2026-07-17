@@ -63,8 +63,8 @@ that point on the database owns them.  Quick reference:
 | `ABUSE_GUARD_ENABLED` | `true` | Master switch for all rate limiting/banning. Tests turn it off since test traffic all comes from one IP. **Stays in `.env`** (infrastructure flag, not runtime-tunable). |
 | `ENABLE_DOCS` | `false` | Serves `/docs` and `/openapi.json` when `true`. Leave off in any internet-facing deployment — it hands a full API map to scanners. **Stays in `.env`**. |
 | `REGISTRATION_OPEN` | `true` | **Seed default only.** The live value is in `site_settings.registration_open`, editable from `{ADMIN_PATH}/settings`. |
-| `TRUST_PROXY_HEADERS` | `false` | Set `true` **only** when running behind a reverse proxy/CDN (nginx, Caddy, Cloudflare) — it makes the app trust `X-Forwarded-For` for the real client IP. Leave `false` otherwise; that header is client-controlled and trusting it without a proxy lets anyone spoof their IP to dodge rate limits. **Stays in `.env`**. |
-| `EXEMPT_IPS` | `["127.0.0.1", "::1"]` | IPs (JSON list) that skip rate limiting/banning entirely — for monitoring or local tooling. **Stays in `.env`**. |
+| `TRUST_PROXY_HEADERS` | `false` | **Seed default only.** Live value in `site_settings`, editable from `{ADMIN_PATH}/settings`. Set `true` **only** when running behind a reverse proxy/CDN (nginx, Caddy, Cloudflare) — it makes the app trust `X-Forwarded-For` for the real client IP. Leave `false` otherwise; that header is client-controlled and trusting it without a proxy lets anyone spoof their IP to dodge rate limits — the same caution applies whether it's set here or flipped in the panel. |
+| `EXEMPT_IPS` | `["127.0.0.1", "::1"]` | **Seed default only.** Live value in `site_settings`, editable from `{ADMIN_PATH}/settings` as a comma-separated list. IPs that skip rate limiting/banning entirely — for monitoring or local tooling only, never a shared/public IP. |
 | `RATE_LIMIT_PER_MINUTE` | `600` | **Seed default only.** Live value in `site_settings`. |
 | `FLOOD_BAN_PER_MINUTE` | `2000` | **Seed default only.** Live value in `site_settings`. |
 | `AUTH_RATE_LIMIT_PER_MINUTE` | `30` | **Seed default only.** Live value in `site_settings`. |
