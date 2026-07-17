@@ -27,8 +27,12 @@ into that file, so `.env` only needs to override what you care about;
 | `TMDB_API_KEY` | empty | Key/token for [TheMovieDB](https://www.themoviedb.org/settings/api) — powers search, trending, posters and episode data for films/TV. Free to obtain; v3 key or v4 read token both work. Without it, `/tmdb/*` endpoints don't work. |
 | `TVDB_API_KEY` | empty | Optional. Used as a fallback lookup when matching shows during a TV Time import. |
 | `YOUTUBE_API_KEY` | empty | Key for the [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) — powers Explore's YouTube channel search/trending/videos. Without it, `/youtube/search_channels`, `/youtube/trending_channels`, `/youtube/channel_videos` and `/youtube/video_info` don't work (`/youtube/resolve` still works, it uses oEmbed and needs no key). |
-| `EPISODE_CHECK_MINUTES` | `360` (6h) | How often a background task polls TMDB for new episodes of tracked shows and creates notifications. |
 | `TMDB_DB_CACHE_HOURS` | `24` | How long a persisted TMDB payload (details/season/credits of a tracked title, stored in the `tmdb_cache` table) is served without re-contacting TMDB. Older copies refresh on access and are served stale only while TMDB is unreachable. |
+
+Background-task poll intervals (episode check, episode history sync, film
+release check, strike cleanup) are no longer env vars — each is independently
+enabled and scheduled from the admin panel's Periodic Tasks page
+(`<ADMIN_PATH>/periodic-tasks`), stored in the database.
 
 ## Storage
 

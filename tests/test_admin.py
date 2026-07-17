@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/07/16 13:37:27.231698
+Revised: 2026/07/17 18:08:59.133057
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -19,6 +19,7 @@ from xoutaim_backend.models import (
     LibraryEntry,
     LoginEvent,
     Notification,
+    PeriodicTaskRun,
     SiteSettings,
     User,
 )
@@ -309,6 +310,9 @@ def test_admin_settings_page_renders(client, admin_enabled):
     assert r.status_code == 200
     assert "Site Settings" in r.text
     assert "registration_open" in r.text
+    # periodic-task toggles moved to their own page (see periodic tasks tests)
+    assert "episode_check_enabled" not in r.text
+    assert "/admin/periodic-tasks" in r.text
 
 
 def test_admin_settings_page_requires_auth(client, admin_enabled):
@@ -372,6 +376,174 @@ def test_admin_settings_invite_only_toggle(client, admin_enabled):
         assert row.invite_only is True
     finally:
         db.close()
+
+
+# ---------- periodic tasks ----------
+
+
+def test_admin_periodic_tasks_page_renders(client, admin_enabled):
+    r = client.get("/admin/periodic-tasks", auth=BASIC)
+    assert r.status_code == 200
+    assert "Episode check" in r.text
+    assert "Never run" in r.text
+
+
+def test_admin_periodic_tasks_grouped_by_media_type(client, admin_enabled):
+    r = client.get("/admin/periodic-tasks", auth=BASIC)
+    for group in ("TV Shows", "Films", "Security"):
+        assert group in r.text
+    # both TV-show tasks land under the same "TV Shows" section
+    tv_section = r.text.split("TV Shows", 1)[1].split("Films", 1)[0]
+    assert "Episode check" in tv_section
+    assert "Episode history sync" in tv_section
+
+
+def test_admin_periodic_tasks_page_requires_auth(client, admin_enabled):
+    assert client.get("/admin/periodic-tasks").status_code == 401
+
+
+def test_admin_periodic_tasks_toggle_persists(client, admin_enabled):
+    r = client.post(
+        "/admin/periodic-tasks/toggle",
+        data={"task_key": "film_check", "value": "0"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        row = db.get(PeriodicTaskRun, "film_check")
+        assert row.enabled is False
+    finally:
+        db.close()
+
+    assert "Disabled" in client.get("/admin/periodic-tasks", auth=BASIC).text
+
+
+def test_admin_periodic_tasks_toggle_is_atomized(client, admin_enabled):
+    """Disabling episode_check must not disable episode_history_sync — the
+    whole point of splitting them into separate task_keys."""
+    from xoutaim_backend import task_runs
+
+    client.post(
+        "/admin/periodic-tasks/toggle",
+        data={"task_key": "episode_check", "value": "0"},
+        auth=BASIC,
+    )
+    assert task_runs.is_enabled("episode_check") is False
+    assert task_runs.is_enabled("episode_history_sync") is True
+
+
+def test_admin_periodic_tasks_toggle_rejects_unknown_task(client, admin_enabled):
+    r = client.post(
+        "/admin/periodic-tasks/toggle",
+        data={"task_key": "not_a_real_task", "value": "1"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        assert db.get(PeriodicTaskRun, "not_a_real_task") is None
+    finally:
+        db.close()
+
+
+def test_admin_periodic_tasks_toggle_requires_auth(client, admin_enabled):
+    r = client.post("/admin/periodic-tasks/toggle", data={"task_key": "film_check", "value": "0"})
+    assert r.status_code == 401
+
+
+def test_admin_periodic_tasks_shows_recorded_run(client, admin_enabled):
+    from xoutaim_backend import task_runs
+    from xoutaim_backend.models import utcnow
+
+    task_runs.record_run("episode_check", utcnow(), "ok", "3 new notifications")
+    r = client.get("/admin/periodic-tasks", auth=BASIC)
+    assert "3 new notifications" in r.text
+    assert "OK" in r.text
+
+
+def test_admin_periodic_tasks_shows_error_status(client, admin_enabled):
+    from xoutaim_backend import task_runs
+    from xoutaim_backend.models import utcnow
+
+    task_runs.record_run("strike_cleanup", utcnow(), "error", "db timeout")
+    r = client.get("/admin/periodic-tasks", auth=BASIC)
+    assert "db timeout" in r.text
+    assert "Error" in r.text
+
+
+def test_admin_periodic_tasks_interval_persists(client, admin_enabled):
+    r = client.post(
+        "/admin/periodic-tasks/interval",
+        data={"task_key": "episode_check", "minutes": "45"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        row = db.get(PeriodicTaskRun, "episode_check")
+        assert row.interval_minutes == 45
+    finally:
+        db.close()
+
+    assert 'value="45"' in client.get("/admin/periodic-tasks", auth=BASIC).text
+
+
+def test_admin_periodic_tasks_interval_is_atomized(client, admin_enabled):
+    """Rescheduling episode_check must not reschedule episode_history_sync —
+    each task keeps its own interval, same as its own enable flag."""
+    from xoutaim_backend import task_runs
+
+    client.post(
+        "/admin/periodic-tasks/interval",
+        data={"task_key": "episode_check", "minutes": "30"},
+        auth=BASIC,
+    )
+    assert task_runs.get_interval_minutes("episode_check") == 30
+    assert task_runs.get_interval_minutes("episode_history_sync") == 360  # untouched default
+
+
+def test_admin_periodic_tasks_interval_rejects_out_of_range(client, admin_enabled):
+    r = client.post(
+        "/admin/periodic-tasks/interval",
+        data={"task_key": "film_check", "minutes": "0"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        assert db.get(PeriodicTaskRun, "film_check") is None
+    finally:
+        db.close()
+
+
+def test_admin_periodic_tasks_interval_rejects_unknown_task(client, admin_enabled):
+    r = client.post(
+        "/admin/periodic-tasks/interval",
+        data={"task_key": "not_a_real_task", "minutes": "30"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        assert db.get(PeriodicTaskRun, "not_a_real_task") is None
+    finally:
+        db.close()
+
+
+def test_admin_periodic_tasks_interval_requires_auth(client, admin_enabled):
+    r = client.post("/admin/periodic-tasks/interval", data={"task_key": "film_check", "minutes": "30"})
+    assert r.status_code == 401
 
 
 # ---------- invite codes ----------
@@ -444,6 +616,21 @@ def test_admin_create_invite_appears_on_page(client, admin_enabled):
         db.close()
 
 
+def test_admin_create_invite_records_admin_username(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        assert code.created_by_user_id is None
+        assert code.created_by_admin == "root"
+    finally:
+        db.close()
+
+    r = client.get("/admin/invites", auth=BASIC)
+    assert 'class="td-email">root</td>' in r.text
+
+
 def test_admin_revoke_invite_marks_revoked(client, admin_enabled):
     client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
 
@@ -464,6 +651,57 @@ def test_admin_revoke_invite_marks_revoked(client, admin_enabled):
         assert code.revoked is True
     finally:
         db.close()
+
+
+def test_admin_restore_invite_clears_revoked(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code_id = db.query(InviteCode).first().id
+    finally:
+        db.close()
+
+    client.post(f"/admin/invites/{code_id}/revoke", auth=BASIC)
+
+    r = client.post(f"/admin/invites/{code_id}/restore", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        assert db.get(InviteCode, code_id).revoked is False
+    finally:
+        db.close()
+
+
+def test_admin_restore_invite_missing_returns_404(client, admin_enabled):
+    r = client.post("/admin/invites/999999/restore", auth=BASIC)
+    assert r.status_code == 404
+
+
+def test_admin_delete_invite_removes_row(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code_id = code.id
+    finally:
+        db.close()
+
+    r = client.post(f"/admin/invites/{code_id}/delete", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        assert db.get(InviteCode, code_id) is None
+    finally:
+        db.close()
+
+
+def test_admin_delete_invite_missing_returns_404(client, admin_enabled):
+    r = client.post("/admin/invites/999999/delete", auth=BASIC)
+    assert r.status_code == 404
 
 
 def test_revoked_invite_cannot_register(client, admin_enabled):

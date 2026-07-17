@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/17 12:35:05.862800 )
+[//]: # (+ Revised: 	2026/07/17 18:16:45.505283 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -12,10 +12,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-17
+
 ### Added
 
 - Test coverage for `routers/books.py` (`tests/test_books.py`), matching the mocking
   approach already used for `routers/youtube.py`
+- `periodic_task_runs` table (migration `f2a7c9d1b3e4`, extended by `a4e8d0c62f17`
+  and `b7c3f5a91d02`): per-task `enabled` flag, `interval_minutes`, and last-run
+  status (`ok` / `error` / `skipped`, started/finished timestamps, a free-text
+  detail) — replaces the old grouped `site_settings` toggles with one independently
+  controllable row per background task
+- `task_runs.py`: registry of background tasks (`episode_check`,
+  `episode_history_sync`, `film_check`, `strike_cleanup`), each with its own
+  media-type `group` (TV Shows / Films / Security) for the admin UI; short-TTL
+  cached `is_enabled()` / `get_interval_minutes()` reads (same pattern as
+  `site_settings.current()`) and `set_enabled()` / `set_interval_minutes()` /
+  `record_run()` writes
+- Admin panel: **Periodic Tasks** tile and page (`GET <ADMIN_PATH>/periodic-tasks`),
+  replacing the toggle-only section that used to live on Site Settings — cards
+  grouped by media type, each task independently enabled/disabled
+  (`POST .../periodic-tasks/toggle`) and rescheduled
+  (`POST .../periodic-tasks/interval`), showing live status: last run, result
+  detail, and an estimated next run
 
 ### Changed
 
@@ -23,6 +42,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   in `db_triggers.py` and `routers/stats.py`, into a single `src/xoutaim_backend/constants.py`
   source of truth; `routers/social.py` now imports from there directly instead of via
   `routers/stats.py`
+- Admin Invite Codes page (`routers/admin/`): revoked status pill now uses a distinct
+  color instead of gray, newly generated codes are copied to the clipboard automatically,
+  and the invite table has a refresh button matching the Users page pattern
+- Admin Invite Codes page: the "just generated" banner now auto-hides itself after 8s;
+  the table has a search box + status chips (client-side filter) and sortable columns
+  (click a header to sort, click again to reverse); a permanent **Delete** action
+  (`POST <ADMIN_PATH>/invites/{id}/delete`) sits alongside the existing soft **Revoke**
+  — nothing references `invite_codes.id` as a foreign key, so the delete is a plain
+  hard delete with no cascade concerns
+- Admin Invite Codes page: Revoke, Restore, and Delete are now visually distinct
+  (`.btn-warn` amber / `.btn-good` green / `.btn-purge` red) instead of all three
+  sharing the red "destructive" style; added a **Restore** action
+  (`POST <ADMIN_PATH>/invites/{id}/restore`) that clears the `revoked` flag without
+  otherwise touching the code (an already-expired code stays expired)
+- `invite_codes.created_by_admin`: admin-panel-generated invites now record the
+  HTTP Basic admin's username as plain text, since that auth is a single
+  env-configured credential with no `users.id` row to point `created_by_user_id`
+  at — the Created by column previously showed "—" for every admin-created code
+  (`models.py`, `routers/admin/`, migration `23dd41789cea`)
+- `notifier.run_periodic()` split from one shared loop into three independent
+  per-task loops (`episode_check`, `episode_history_sync`, `film_check`), each
+  sleeping its own admin-configurable interval instead of one shared poll period
+  — pausing or rescheduling one task no longer affects the others
+- `security._cleanup_old_strikes` reads its run interval from `task_runs`
+  (admin-editable) instead of a hardcoded 1-hour gate
+- Admin Site Settings page (`routers/admin/settings.py`): periodic-task toggles
+  removed (moved to the new Periodic Tasks page); links there instead
+
+### Removed
+
+- `EPISODE_CHECK_MINUTES` env var / `Settings.episode_check_minutes` — replaced
+  by per-task, admin-editable intervals (`periodic_task_runs.interval_minutes`)
+- `site_settings.episode_check_enabled` / `film_check_enabled` / `bans_check_enabled`
+  columns (migration `a4e8d0c62f17`) — replaced by `periodic_task_runs.enabled`,
+  one independent flag per task instead of three flags shared across four tasks
+
+### Fixed
+
+- Admin dashboard (`routers/admin/dashboard.py`): the tile-grid landing page lost
+  its own `.page { max-width: 860px }` override when `routers/admin.py` was split
+  into the `routers/admin/` package — the dashboard picked up no width constraint
+  at all and the tiles stretched edge-to-edge across the full viewport instead of
+  a centered column, with the icon+text layout flipped from stacked to side-by-side;
+  restored the original narrow centered layout and vertical tile card
+- Admin Invite Codes page: the expiry chip presets (`24 hours`, `7 days`, `30 days`,
+  custom) sent the browser's local wall-clock digits for `expires_at`, which the
+  server then stored as if they were already UTC (`create_invite` in `routers/admin/invites.py`)
+  — codes expired off-by-the-admin's-UTC-offset instead of the chosen duration from
+  creation; the form now converts to a true UTC instant before submitting
+- Admin Invite Codes page: auto-copy-on-generate silently did nothing because
+  `navigator.clipboard` requires a secure context (https/localhost) and the failure
+  was swallowed; copy now falls back to an `execCommand('copy')` textarea trick when
+  the Clipboard API isn't usable, shared by both the auto-copy and the manual
+  per-row Copy buttons
 
 ## [0.3.0] - 2026-07-17
 
@@ -110,7 +183,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and persisted repeat-offender strikes that escalate a temporary ban into
   a permanent one (`strikes` / `banned_ips` tables) — see
   `docs/anti-abuse.md` and `docs/environment-variables.md`
-- Admin panel (`routers/admin.py`, HTML behind HTTP Basic): user manager
+- Admin panel (`routers/admin/`, HTML behind HTTP Basic): user manager
   with per-user usage stats, comment manager, ban/strike management
 - `GET /media/ratings` (community average rating) and
   `POST /media/{id}/rewatch` (log a rewatch of an item or one episode)

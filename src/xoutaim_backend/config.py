@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/07/17 18:08:58.788785
+Revised: 2026/07/17 18:47:08.268328
 """
 
 from pathlib import Path
@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     tmdb_api_key: str = ""
     tvdb_api_key: str = ""  # optional: fallback lookup for TV Time import matching
     youtube_api_key: str = ""  # YouTube Data API v3, for channel search/video listing on Explore
-    episode_check_minutes: int = 360  # how often to look for new episodes
     # Persisted TMDB copies (tmdb_cache table) younger than this are served
     # without contacting TMDB; older ones are refreshed on access and only
     # served stale when TMDB is unreachable.

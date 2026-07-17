@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/17 18:08:57.036333
+Revised: 2026/07/17 18:47:08.406187
 """
 
 import enum
@@ -243,9 +243,28 @@ class SiteSettings(Base):
     probe_window_minutes: Mapped[int] = mapped_column(Integer, default=10)
     ban_minutes: Mapped[int] = mapped_column(Integer, default=60)
     strike_ban_threshold: Mapped[int] = mapped_column(Integer, default=5)
-    episode_check_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    film_check_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    bans_check_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+
+class PeriodicTaskRun(Base):
+    """One row per background task key (see task_runs.TASKS): whether it's
+    enabled, its admin-configurable poll interval, and its last-run outcome.
+
+    Replaces the old grouped SiteSettings booleans (episode_check_enabled,
+    film_check_enabled, bans_check_enabled) and the single shared
+    EPISODE_CHECK_MINUTES env var — each task is now independently
+    controllable. A missing row (task never toggled/run) is treated as
+    enabled with the task's coded default interval; see task_runs.py.
+    """
+
+    __tablename__ = "periodic_task_runs"
+
+    task_key: Mapped[str] = mapped_column(String, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    interval_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_detail: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
 class InviteCode(Base):

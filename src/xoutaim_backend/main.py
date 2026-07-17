@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/16 22:44:34.716294
+Revised: 2026/07/17 18:47:08.337880
 """
 
 import asyncio
@@ -75,11 +75,13 @@ async def lifespan(app: FastAPI):
             "SECRET_KEY is the built-in dev default — tokens are forgeable. "
             "Set SECRET_KEY in .env before exposing this server."
         )
-    checker = asyncio.create_task(notifier.run_periodic())
+    checkers = notifier.start_periodic_tasks()
     yield
-    checker.cancel()
-    with suppress(asyncio.CancelledError):
-        await checker
+    for checker in checkers:
+        checker.cancel()
+    for checker in checkers:
+        with suppress(asyncio.CancelledError):
+            await checker
 
 
 # openapi_url=None also kills /docs and /redoc — scanners use the schema to
