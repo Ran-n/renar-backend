@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.543016
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/17 20:02:06.415134
 
 Write-through persistence for TMDB data (see TmdbCache in models.py).
 
@@ -22,8 +22,8 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .. import site_settings as _site_settings_mod
 from ..catalog.titles import find_title, resolve_genres
-from ..config import settings
 from ..models import Episode, MediaType, Title, TmdbCache, utcnow
 from .tmdb_http import BACKDROP_BASE, POSTER_BASE, TMDB_KIND, tmdb_get
 
@@ -42,7 +42,8 @@ TMDB_LOCALE = {"gl": "gl-ES", "pt": "pt-PT", "es": "es-ES"}
 
 
 def _is_fresh(fetched_at: datetime) -> bool:
-    return utcnow() - fetched_at < timedelta(hours=settings.tmdb_db_cache_hours)
+    hours = _site_settings_mod.current().tmdb_db_cache_hours
+    return utcnow() - fetched_at < timedelta(hours=hours)
 
 
 def _parse_date(value: str | None) -> date | None:

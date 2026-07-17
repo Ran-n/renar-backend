@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/07/17 10:25:32.702003
+Revised: 2026/07/17 19:40:36.383004
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -251,6 +251,7 @@ def activity_feed(
     entries = (
         db.query(LibraryEntry, User)
         .join(User, LibraryEntry.user_id == User.id)
+        .options(*WITH_TITLE_GENRES)
         .filter(LibraryEntry.user_id.in_(followed_ids))
         .order_by(LibraryEntry.updated_at.desc())
         .limit(50)

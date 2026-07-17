@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/17 18:16:45.505283 )
+[//]: # (+ Revised: 	2026/07/17 19:45:57.192199 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- Admin panel: `trust_proxy_headers`/`exempt_ips` are now live-editable from
+  `<ADMIN_PATH>/settings` (Network & exemptions section), backed by the
+  `site_settings` DB row instead of requiring an `.env` edit + restart
+
+### Fixed
+
+- Comments N+1: `routers/comments.py`'s `_comment_out` walked
+  `Comment.author`/`.likes`/`.reports`/`.replies` per node, firing on the order
+  of hundreds to thousands of queries for a page of nested comments. Added
+  `social/comment_threads.load_thread()` (one recursive CTE + three
+  `selectinload`s) so a whole thread loads in a fixed number of queries
+  regardless of size/depth
+- `routers/social.py`'s `activity_feed` wasn't eager-loading `title_ref`/
+  genres/custom images, causing a lazy load per row (up to 50/request)
+- Missing composite indexes on `Notification`: replaced the low-cardinality
+  standalone `read` index with `(user_id, read)` and `(user_id, created_at)`
+  (migration `45a9dba29ff9`), matching `LibraryEntry`'s existing pattern
 
 ## [0.4.0] - 2026-07-17
 

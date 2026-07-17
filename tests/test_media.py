@@ -108,8 +108,56 @@ def test_list_pagination(client, alice):
     assert [i["title"] for i in page2] == ["Title 2", "Title 1"]
     assert [i["title"] for i in page3] == ["Title 0"]
 
-    unpaginated = client.get("/media", headers=headers).json()
-    assert len(unpaginated) == 5
+    no_limit_given = client.get("/media", headers=headers).json()
+    assert len(no_limit_given) == 5
+
+
+def test_list_default_limit(client, alice):
+    _, headers = alice
+    for i in range(65):
+        _create(client, headers, title=f"Title {i}")
+
+    capped = client.get("/media", headers=headers).json()
+    assert len(capped) == 60  # default page size when `limit` is omitted
+
+    page2 = client.get("/media", params={"offset": 60}, headers=headers).json()
+    assert len(page2) == 5
+
+
+def test_list_keys(client, alice, bob):
+    _, headers = alice
+    _, bob_headers = bob
+    _create(client, headers, title="Heat", tmdb_id=101)
+    _create(client, headers, media_type="youtube", title="Some Video", url="https://youtu.be/abc")
+    _create(client, bob_headers, title="Alien", tmdb_id=202)  # someone else's — must not leak
+
+    keys = client.get("/media/keys", headers=headers).json()
+    assert {(k["media_type"], k["tmdb_id"], k["title"]) for k in keys} == {
+        ("film", 101, "Heat"),
+        ("youtube", None, "Some Video"),
+    }
+    assert next(k for k in keys if k["media_type"] == "youtube")["url"] == "https://youtu.be/abc"
+
+
+def test_get_media_by_tmdb(client, alice):
+    _, headers = alice
+    created = _create(client, headers, title="Heat", tmdb_id=101)
+
+    found = client.get("/media/by_tmdb", params={"media_type": "film", "tmdb_id": 101}, headers=headers)
+    assert found.status_code == 200
+    assert found.json()["id"] == created["id"]
+
+    missing = client.get("/media/by_tmdb", params={"media_type": "film", "tmdb_id": 999}, headers=headers)
+    assert missing.status_code == 404
+
+
+def test_get_media_by_tmdb_not_other_users(client, alice, bob):
+    _, headers = alice
+    _, bob_headers = bob
+    _create(client, bob_headers, title="Alien", tmdb_id=202)
+
+    r = client.get("/media/by_tmdb", params={"media_type": "film", "tmdb_id": 202}, headers=headers)
+    assert r.status_code == 404
 
 
 def test_list_favorites_only_paginated(client, alice):

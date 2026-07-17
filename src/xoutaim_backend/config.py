@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/07/17 19:32:52.093726
+Revised: 2026/07/17 20:02:06.275881
 """
 
 from pathlib import Path
@@ -31,10 +31,6 @@ class Settings(BaseSettings):
     tmdb_api_key: str = ""
     tvdb_api_key: str = ""  # optional: fallback lookup for TV Time import matching
     youtube_api_key: str = ""  # YouTube Data API v3, for channel search/video listing on Explore
-    # Persisted TMDB copies (tmdb_cache table) younger than this are served
-    # without contacting TMDB; older ones are refreshed on access and only
-    # served stale when TMDB is unreachable.
-    tmdb_db_cache_hours: int = 24
     media_dir: str = "./media"  # root of the content-addressed file store
     admin_username: str = ""  # admin panel stays 503 until both are set
     admin_password: str = ""
@@ -65,6 +61,10 @@ class Settings(BaseSettings):
     registration_open: bool = True
     trust_proxy_headers: bool = False  # true ONLY behind a reverse proxy/CDN (X-Forwarded-For)
     exempt_ips: list[str] = ["127.0.0.1", "::1"]  # monitoring, local tooling
+    # Persisted TMDB copies (tmdb_cache table) younger than this are served
+    # without contacting TMDB; older ones refresh on access and only served
+    # stale when TMDB is unreachable (see tmdb/tmdb_store.py::_is_fresh).
+    tmdb_db_cache_hours: int = 24
     rate_limit_per_minute: int = 600  # soft per-IP ceiling: throttles, never bans
     flood_ban_per_minute: int = 2000  # unambiguous flood: temp ban
     auth_rate_limit_per_minute: int = 30  # login/register requests per IP (throttle)

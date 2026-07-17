@@ -333,6 +333,7 @@ def test_admin_settings_post_updates_and_persists(client, admin_enabled):
         "probe_window_minutes": "7",
         "ban_minutes": "45",
         "strike_ban_threshold": "3",
+        "tmdb_db_cache_hours": "24",
         # invite_only omitted → False (unchecked checkbox)
     }
     r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
@@ -366,6 +367,7 @@ def test_admin_settings_invite_only_toggle(client, admin_enabled):
         "probe_window_minutes": "10",
         "ban_minutes": "60",
         "strike_ban_threshold": "5",
+        "tmdb_db_cache_hours": "24",
     }
     r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
     assert r.status_code == 303
@@ -722,6 +724,7 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
         "probe_window_minutes": "10",
         "ban_minutes": "60",
         "strike_ban_threshold": "5",
+        "tmdb_db_cache_hours": "24",
     }
     client.post("/admin/settings", data=payload_settings, auth=BASIC)
     site_settings.invalidate()

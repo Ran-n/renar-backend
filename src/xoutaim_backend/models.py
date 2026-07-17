@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/17 18:47:08.406187
+Revised: 2026/07/17 20:01:54.400214
 """
 
 import enum
@@ -243,6 +243,16 @@ class SiteSettings(Base):
     probe_window_minutes: Mapped[int] = mapped_column(Integer, default=10)
     ban_minutes: Mapped[int] = mapped_column(Integer, default=60)
     strike_ban_threshold: Mapped[int] = mapped_column(Integer, default=5)
+    # False unless there's an actual reverse proxy/CDN in front of the app —
+    # see client_ip() in users/security.py for why trusting X-Forwarded-For
+    # without one lets any client spoof its IP.
+    trust_proxy_headers: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # IPs that skip the guard entirely (monitoring, local tooling).
+    exempt_ips: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    # Persisted TMDB copies (tmdb_cache table) younger than this are served
+    # without contacting TMDB; older ones refresh on access and are served
+    # stale only while TMDB is unreachable (see tmdb/tmdb_store.py::_is_fresh).
+    tmdb_db_cache_hours: Mapped[int] = mapped_column(Integer, default=24)
 
 
 class PeriodicTaskRun(Base):
@@ -862,6 +872,14 @@ class Notification(Base):
             "kind",
             name="uq_notification_event",
         ),
+        # Backs list_notifications' unread_only filter and unread_count — both
+        # filter (user_id, read) together, so the composite index serves both
+        # instead of a standalone `read` index (low-cardinality, near-useless
+        # alone) plus a separate scan on user_id.
+        Index("ix_notifications_user_id_read", "user_id", "read"),
+        # Backs list_notifications' default order (user_id filter + created_at
+        # desc), same pattern as LibraryEntry.ix_media_items_user_id_updated_at.
+        Index("ix_notifications_user_id_created_at", "user_id", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -872,7 +890,7 @@ class Notification(Base):
     body: Mapped[str] = mapped_column(String(500))
     season: Mapped[int | None] = mapped_column(Integer, nullable=True)
     episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    read: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

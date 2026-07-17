@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 19:32:52.480946
+Revised: 2026/07/17 20:02:06.486462
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
@@ -58,7 +58,6 @@ _SETTINGS_CSS = """
       font-size: .82rem; font-weight: 600; color: var(--text); margin-bottom: .9rem;
     }
     .settings-title .icon { font-size: 1rem; line-height: 1; }
-    .settings-hint { font-size: .72rem; color: var(--text-3); margin-top: .5rem; }
     .toggle-row {
       display: flex; align-items: flex-start; gap: .8rem;
       padding: .5rem 0; border-bottom: 1px solid var(--border-sub);
@@ -315,6 +314,22 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
       </div>
 
       <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x1F3AC;</span>TMDB cache</div>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <label for="tmdb_hours">Cache freshness (hours)</label>
+            <input type="number" id="tmdb_hours" name="tmdb_db_cache_hours"
+                   value="{nv(ss.tmdb_db_cache_hours)}" min="1" max="8760" required>
+          </div>
+        </div>
+        <p class="settings-hint">
+          How long a persisted TMDB payload (details/season/credits of a tracked
+          title) is served without re-contacting TMDB. Older copies refresh on
+          access and are served stale only while TMDB is unreachable.
+        </p>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-title"><span class="icon">&#x23F1;</span>Periodic background tasks</div>
         <p class="settings-hint">
           Episode check, episode history sync, film release check, and strike
@@ -358,6 +373,7 @@ def save_settings(
     strike_ban_threshold: int = Form(...),
     trust_proxy_headers: str | None = Form(default=None),
     exempt_ips: str = Form(default=""),
+    tmdb_db_cache_hours: int = Form(...),
     admin_user: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
@@ -377,6 +393,7 @@ def save_settings(
     ss.strike_ban_threshold = strike_ban_threshold
     ss.trust_proxy_headers = trust_proxy_headers == "1"
     ss.exempt_ips = [ip.strip() for ip in exempt_ips.split(",") if ip.strip()]
+    ss.tmdb_db_cache_hours = tmdb_db_cache_hours
     db.commit()
     _site_settings_mod.invalidate()
     _log.info(

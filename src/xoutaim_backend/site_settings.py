@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 13:30:00.000000
-Revised: 2026/07/17 19:32:52.285872
+Revised: 2026/07/17 20:02:06.345432
 
 Runtime-tunable site settings backed by the `site_settings` singleton row.
 
@@ -56,6 +56,7 @@ def _make_defaults() -> SiteSettings:
         strike_ban_threshold=settings.strike_ban_threshold,
         trust_proxy_headers=settings.trust_proxy_headers,
         exempt_ips=settings.exempt_ips,
+        tmdb_db_cache_hours=settings.tmdb_db_cache_hours,
     )
 
 

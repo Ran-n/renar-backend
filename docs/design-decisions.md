@@ -514,8 +514,9 @@ get a longer TTL (24h) since cover art essentially never changes.
 
 Raw TMDB details/season/credits responses for titles that exist in the
 `titles` table are stored in `tmdb_cache` (JSONB, keyed by title + kind +
-season). Copies younger than `TMDB_DB_CACHE_HOURS` (default 24) are served
-without contacting TMDB; older ones are refreshed on access, and the stale
+season). Copies younger than `site_settings.tmdb_db_cache_hours` (seeded from
+`TMDB_DB_CACHE_HOURS`, default 24, editable from `{ADMIN_PATH}/settings`) are
+served without contacting TMDB; older ones are refreshed on access, and the stale
 copy is served only when TMDB is unreachable. Explore browsing (search/
 trending/popular, or details of untracked titles) is never persisted —
 memory cache only — so the table is bounded by the titles table. Details

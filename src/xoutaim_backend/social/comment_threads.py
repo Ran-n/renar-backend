@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 20:00:00.000000
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/17 19:40:36.456228
 
 Thread-root resolution for comments. Only a root comment (parent_id is
 NULL) stores title_id/season/episode; a reply's scope is the thread it
@@ -11,8 +11,10 @@ derived by walking parent_id up to the root instead of being copied onto
 every row (see docs/design-decisions.md, "Comment replies").
 """
 
+from collections import defaultdict
+
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, selectinload
 
 from ..models import Comment
 
@@ -55,3 +57,35 @@ def resolve_root_scope(db: Session, comment: Comment) -> tuple[int, int | None, 
     if row is None:
         raise RuntimeError(f"comment {comment.id} has no root with a title_id — broken thread")
     return row.title_id, row.season, row.episode
+
+
+def load_thread(db: Session, root_ids: list[int]) -> tuple[dict[int, Comment], dict[int | None, list[Comment]]]:
+    """Every comment in the threads rooted at `root_ids` — the roots plus
+    every nested reply, arbitrarily deep — fetched in one recursive query
+    with author/likes/reports eager-loaded.
+
+    routers.comments._comment_out used to walk Comment.replies/.author/
+    .likes/.reports directly, which are all lazy relationships: rendering a
+    page of 100 root comments with replies fired on the order of 100s-1000s
+    of queries. Returns (comments_by_id, children_by_parent_id) so the
+    caller can rebuild the reply tree in Python without touching those
+    relationships at all.
+    """
+    if not root_ids:
+        return {}, {}
+    base = select(Comment.id).where(Comment.id.in_(root_ids)).cte(name="thread_ids", recursive=True)
+    child = aliased(Comment)
+    ids_cte = base.union_all(select(child.id).where(child.parent_id == base.c.id))
+    all_ids = db.execute(select(ids_cte.c.id)).scalars().all()
+    comments = (
+        db.query(Comment)
+        .options(selectinload(Comment.author), selectinload(Comment.likes), selectinload(Comment.reports))
+        .filter(Comment.id.in_(all_ids))
+        .order_by(Comment.created_at)
+        .all()
+    )
+    by_id = {c.id: c for c in comments}
+    children_by_parent: dict[int | None, list[Comment]] = defaultdict(list)
+    for c in comments:
+        children_by_parent[c.parent_id].append(c)
+    return by_id, children_by_parent
