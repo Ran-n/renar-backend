@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.543016
-Revised: 2026/07/14 22:48:35.335411
+Revised: 2026/07/17 00:00:00.000000
 
 Write-through persistence for TMDB data (see TmdbCache in models.py).
 
@@ -22,9 +22,9 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .config import settings
-from .models import Episode, MediaType, Title, TmdbCache, utcnow
-from .titles import find_title, resolve_genres
+from ..catalog.titles import find_title, resolve_genres
+from ..config import settings
+from ..models import Episode, MediaType, Title, TmdbCache, utcnow
 from .tmdb_http import BACKDROP_BASE, POSTER_BASE, TMDB_KIND, tmdb_get
 
 _log = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ def warm_title_translations(title_ids: list[int], language: str) -> None:
     Runs in a FastAPI BackgroundTasks callback (own DB session, after the
     response is already sent) — never blocks the request that triggered it.
     """
-    from .database import SessionLocal  # local import: avoids a cycle at module load
+    from ..database import SessionLocal  # local import: avoids a cycle at module load
 
     with SessionLocal() as db:
         titles = db.query(Title).filter(Title.id.in_(title_ids), Title.tmdb_id.isnot(None)).all()

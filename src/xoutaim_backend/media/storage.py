@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.395889
-Revised: 2026/07/07 13:25:16.395889
+Revised: 2026/07/17 00:00:00.000000
 
 Content-addressed file store.
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import blake3
 
-from .config import settings
+from ..config import settings
 
 IMAGES_ROOT = Path(settings.media_dir) / "images"
 

@@ -17,7 +17,7 @@ from PIL import Image as PILImage
 
 from xoutaim_backend.database import SessionLocal
 from xoutaim_backend.models import Image, Title, User, utcnow
-from xoutaim_backend.premium import PALETTE
+from xoutaim_backend.users.premium import PALETTE
 
 COLOR = PALETTE[0]
 COLOR2 = PALETTE[1]

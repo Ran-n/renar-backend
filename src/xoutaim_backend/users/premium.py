@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:14.175174
-Revised: 2026/07/16 09:54:30.628842
+Revised: 2026/07/17 00:00:00.000000
 
 Premium feature rules: the color palette users may pick from and the
 derivation of the "flair" (badge + colors) every user payload carries.
@@ -13,7 +13,7 @@ and the dark theme. The frontend fetches it from GET /premium/palette
 instead of duplicating the list.
 """
 
-from .models import User
+from ..models import User
 
 # Radix-scale step-9 accents (saturated enough to read as color on white and
 # on near-black backgrounds alike), plus true black/white/grey. The frontend

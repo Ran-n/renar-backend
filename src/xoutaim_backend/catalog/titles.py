@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/07/10 08:47:45.999441
+Revised: 2026/07/17 00:00:00.000000
 
 Shared Title resolution: every place that addresses a global title by
 (media_type, tmdb_id-or-title text) — library adds, imports, comments,
@@ -15,7 +15,7 @@ import logging
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from .models import Genre, LibraryEntry, MediaType, Title, normalize_title_key
+from ..models import Genre, LibraryEntry, MediaType, Title, normalize_title_key
 
 _log = logging.getLogger(__name__)
 

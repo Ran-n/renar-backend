@@ -35,12 +35,12 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..catalog.titles import find_or_create_title, find_title
 from ..config import settings
 from ..database import SessionLocal
 from ..models import EpisodeWatch, LibraryEntry, MediaType, Title, User, WatchStatus, normalize_title_key
-from ..titles import find_or_create_title, find_title
-from ..tmdb_http import POSTER_BASE, tmdb_get
+from ..tmdb.tmdb_http import POSTER_BASE, tmdb_get
+from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/import", tags=["import"])
 _log = logging.getLogger(__name__)

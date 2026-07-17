@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/16 13:35:29.823451
+Revised: 2026/07/17 18:08:58.084307
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -44,10 +44,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Match
 
-from . import site_settings
-from .config import settings
-from .database import SessionLocal
-from .models import BannedIP, Strike
+from .. import site_settings
+from ..config import settings
+from ..database import SessionLocal
+from ..models import BannedIP, Strike
 
 _log = logging.getLogger(__name__)
 

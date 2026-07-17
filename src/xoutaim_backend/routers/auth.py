@@ -12,16 +12,16 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from .. import accounts
-from ..auth import create_access_token, get_current_user, hash_password, verify_password
 from ..database import get_db
-from ..image_service import gc_image, image_row_for
-from ..image_utils import decode_b64_image, normalize_jpeg
+from ..media.image_service import gc_image, image_row_for
+from ..media.image_utils import decode_b64_image, normalize_jpeg
 from ..models import InviteCode, LoginEvent, User, utcnow
-from ..premium import FREE_PROGRESS_STYLES, FREE_THEMES
 from ..schemas import PasswordChange, ProfileUpdate, RegistrationStatus, Token, UserCreate, UserOut
-from ..security import check_login_allowed, client_ip, note_login_failure, note_login_success
 from ..site_settings import get_site_settings
+from ..users import accounts
+from ..users.auth import create_access_token, get_current_user, hash_password, verify_password
+from ..users.premium import FREE_PROGRESS_STYLES, FREE_THEMES
+from ..users.security import check_login_allowed, client_ip, note_login_failure, note_login_success
 
 _log = logging.getLogger(__name__)
 

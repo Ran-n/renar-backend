@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..models import BannedIP
-from ..security import load_active_temp_bans, permaban, strike_and_maybe_ban
+from ..users.security import load_active_temp_bans, permaban, strike_and_maybe_ban
 
 router = APIRouter(prefix="/svc", tags=["svc"])
 _log = logging.getLogger(__name__)

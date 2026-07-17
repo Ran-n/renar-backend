@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 00:00:00.000000
-Revised: 2026/07/16 09:54:32.468468
+Revised: 2026/07/17 00:00:00.000000
 
 Shared image-normalization helpers used by routers/auth.py and routers/media.py.
 
@@ -18,7 +18,7 @@ import logging
 from fastapi import HTTPException, status
 from PIL import Image as PILImage
 
-from .schemas import CropBox
+from ..schemas import CropBox
 
 _log = logging.getLogger(__name__)
 

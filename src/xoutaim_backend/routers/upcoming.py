@@ -14,10 +14,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
 from ..database import get_db
 from ..models import Episode, LibraryEntry, MediaType, Title, User, WatchStatus
-from ..tmdb_store import sync_show_episodes
+from ..tmdb.tmdb_store import sync_show_episodes
+from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/upcoming", tags=["upcoming"])
 _log = logging.getLogger(__name__)

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/07/17 08:21:15.083576
+Revised: 2026/07/17 18:08:57.738916
 
 Background checker: creates notifications when tracked shows air new episodes.
 """
@@ -14,12 +14,12 @@ from datetime import date, timedelta
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from . import site_settings
-from .config import settings
-from .database import SessionLocal
-from .models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus
-from .tmdb_http import tmdb_get
-from .tmdb_store import ENDED_STATUSES, store_details, sync_show_episodes
+from .. import site_settings
+from ..config import settings
+from ..database import SessionLocal
+from ..models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus
+from ..tmdb.tmdb_http import tmdb_get
+from ..tmdb.tmdb_store import ENDED_STATUSES, store_details, sync_show_episodes
 
 _log = logging.getLogger(__name__)
 

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 03:02:57.798569
-Revised: 2026/07/12 03:03:33.030303
+Revised: 2026/07/17 00:00:00.000000
 
 Account deletion: the one purge path, shared by self-service
 (DELETE /auth/me) and the admin panel's delete-user action.
@@ -18,8 +18,8 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from .image_service import gc_image
-from .models import (
+from ..media.image_service import gc_image
+from ..models import (
     Comment,
     CommentLike,
     CommentReport,

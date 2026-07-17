@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.878175
-Revised: 2026/07/16 09:54:30.402782
+Revised: 2026/07/17 00:00:00.000000
 
 Cached external images (TMDB posters/stills, Open Library covers).
 
@@ -19,8 +19,8 @@ from pathlib import Path
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..models import ExternalImage
 from .image_service import image_row_for
-from .models import ExternalImage
 from .storage import image_path
 
 _log = logging.getLogger(__name__)

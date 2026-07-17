@@ -11,10 +11,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, require_premium
+from ..catalog.titles import WITH_TITLE_GENRES, find_or_create_title, find_title
 from ..database import get_db
-from ..image_service import gc_image, image_row_for
-from ..image_utils import decode_b64_image, normalize_jpeg
+from ..media.image_service import gc_image, image_row_for
+from ..media.image_utils import decode_b64_image, normalize_jpeg
 from ..models import (
     Episode,
     EpisodeCustomStill,
@@ -37,8 +37,8 @@ from ..schemas import (
     LibraryEntryUpdate,
     RewatchCreate,
 )
-from ..titles import WITH_TITLE_GENRES, find_or_create_title, find_title
-from ..tmdb_store import localized_titles, refresh_title_details, warm_title_translations
+from ..tmdb.tmdb_store import localized_titles, refresh_title_details, warm_title_translations
+from ..users.auth import get_current_user, require_premium
 from .tmdb import fetch_poster_bytes
 
 router = APIRouter(prefix="/media", tags=["media"])

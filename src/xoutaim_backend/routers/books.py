@@ -15,11 +15,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
 from ..database import get_db
-from ..http_cache import TTLCache
-from ..image_cache import store_external_image, stored_external_image
+from ..media.http_cache import TTLCache
+from ..media.image_cache import store_external_image, stored_external_image
 from ..models import User
+from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/books", tags=["books"])
 _log = logging.getLogger(__name__)

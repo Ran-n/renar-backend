@@ -10,7 +10,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from .models import MediaType, WatchStatus
-from .premium import PALETTE, PROGRESS_STYLES, THEME_NAMES
+from .users.premium import PALETTE, PROGRESS_STYLES, THEME_NAMES
 
 
 def _password_fits_bcrypt(password: str) -> str:
