@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/07/10 18:15:03.483025
+Revised: 2026/07/16 13:37:27.231698
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -11,7 +11,17 @@ from conftest import ADMIN_BASIC as BASIC
 from conftest import PASSWORD
 
 from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import Comment, CommentLike, CommentReport, LibraryEntry, LoginEvent, Notification, User
+from xoutaim_backend.models import (
+    Comment,
+    CommentLike,
+    CommentReport,
+    InviteCode,
+    LibraryEntry,
+    LoginEvent,
+    Notification,
+    SiteSettings,
+    User,
+)
 
 
 def test_admin_unavailable_until_configured(client):
@@ -289,3 +299,208 @@ def test_admin_delete_user_removes_filed_reports(client, admin_enabled, alice, b
         assert db.query(Comment).count() == 1  # alice's comment stays
     finally:
         db.close()
+
+
+# ---------- site settings ----------
+
+
+def test_admin_settings_page_renders(client, admin_enabled):
+    r = client.get("/admin/settings", auth=BASIC)
+    assert r.status_code == 200
+    assert "Site Settings" in r.text
+    assert "registration_open" in r.text
+
+
+def test_admin_settings_page_requires_auth(client, admin_enabled):
+    assert client.get("/admin/settings").status_code == 401
+
+
+def test_admin_settings_post_updates_and_persists(client, admin_enabled):
+    payload = {
+        "registration_open": "1",
+        "rate_limit_per_minute": "500",
+        "flood_ban_per_minute": "1800",
+        "auth_rate_limit_per_minute": "25",
+        "register_per_hour_per_ip": "15",
+        "login_backoff_threshold": "4",
+        "login_backoff_account_threshold": "20",
+        "login_backoff_minutes": "10",
+        "probe_ban_threshold": "8",
+        "probe_window_minutes": "7",
+        "ban_minutes": "45",
+        "strike_ban_threshold": "3",
+        # invite_only omitted → False (unchecked checkbox)
+    }
+    r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        row = db.get(SiteSettings, 1)
+        assert row is not None
+        assert row.rate_limit_per_minute == 500
+        assert row.ban_minutes == 45
+        assert row.strike_ban_threshold == 3
+        assert row.invite_only is False
+        assert row.registration_open is True
+    finally:
+        db.close()
+
+
+def test_admin_settings_invite_only_toggle(client, admin_enabled):
+    payload = {
+        "registration_open": "1",
+        "invite_only": "1",
+        "rate_limit_per_minute": "600",
+        "flood_ban_per_minute": "2000",
+        "auth_rate_limit_per_minute": "30",
+        "register_per_hour_per_ip": "20",
+        "login_backoff_threshold": "5",
+        "login_backoff_account_threshold": "30",
+        "login_backoff_minutes": "15",
+        "probe_ban_threshold": "12",
+        "probe_window_minutes": "10",
+        "ban_minutes": "60",
+        "strike_ban_threshold": "5",
+    }
+    r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        row = db.get(SiteSettings, 1)
+        assert row.invite_only is True
+    finally:
+        db.close()
+
+
+# ---------- invite codes ----------
+
+
+def test_admin_invites_page_renders(client, admin_enabled):
+    r = client.get("/admin/invites", auth=BASIC)
+    assert r.status_code == 200
+    assert "Invite Codes" in r.text
+
+
+def test_admin_invites_page_requires_auth(client, admin_enabled):
+    assert client.get("/admin/invites").status_code == 401
+
+
+def test_admin_create_invite_code(client, admin_enabled):
+    r = client.post(
+        "/admin/invites/create",
+        data={"max_uses": "3"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        assert code is not None
+        assert code.max_uses == 3
+        assert code.uses == 0
+        assert code.revoked is False
+        assert code.created_by_user_id is None
+    finally:
+        db.close()
+
+
+def test_admin_create_unlimited_invite_code(client, admin_enabled):
+    r = client.post(
+        "/admin/invites/create",
+        data={"max_uses": ""},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        assert code is not None
+        assert code.max_uses is None
+    finally:
+        db.close()
+
+
+def test_admin_create_invite_rejects_zero_uses(client, admin_enabled):
+    r = client.post("/admin/invites/create", data={"max_uses": "0"}, auth=BASIC)
+    assert r.status_code == 422
+
+
+def test_admin_create_invite_appears_on_page(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    r = client.get("/admin/invites", auth=BASIC)
+    assert r.status_code == 200
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        assert code.code in r.text
+    finally:
+        db.close()
+
+
+def test_admin_revoke_invite_marks_revoked(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code_id = code.id
+        assert code.revoked is False
+    finally:
+        db.close()
+
+    r = client.post(f"/admin/invites/{code_id}/revoke", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        code = db.get(InviteCode, code_id)
+        assert code.revoked is True
+    finally:
+        db.close()
+
+
+def test_revoked_invite_cannot_register(client, admin_enabled):
+    from xoutaim_backend import site_settings
+
+    # enable invite-only via the admin panel
+    payload_settings = {
+        "registration_open": "1",
+        "invite_only": "1",
+        "rate_limit_per_minute": "600",
+        "flood_ban_per_minute": "2000",
+        "auth_rate_limit_per_minute": "30",
+        "register_per_hour_per_ip": "20",
+        "login_backoff_threshold": "5",
+        "login_backoff_account_threshold": "30",
+        "login_backoff_minutes": "15",
+        "probe_ban_threshold": "12",
+        "probe_window_minutes": "10",
+        "ban_minutes": "60",
+        "strike_ban_threshold": "5",
+    }
+    client.post("/admin/settings", data=payload_settings, auth=BASIC)
+    site_settings.invalidate()
+
+    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    db = SessionLocal()
+    try:
+        code_row = db.query(InviteCode).first()
+        code_id = code_row.id
+        code_val = code_row.code
+    finally:
+        db.close()
+
+    client.post(f"/admin/invites/{code_id}/revoke", auth=BASIC)
+
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code_val},
+    )
+    assert r.status_code == 400

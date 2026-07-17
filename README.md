@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/07/16 09:54:29.938960 )
+[//]: # (+ Revised: 	2026/07/17 09:40:41.259905 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Xoutaim Backend
@@ -57,7 +57,10 @@ API docs: http://127.0.0.1:8000/docs
 
 ## Endpoints
 
-- `POST /auth/register` — create account
+- `GET /auth/registration-status` — unauthenticated; returns `registration_open` and
+  `invite_only` so the signup screen can render the invite-code field before submission
+- `POST /auth/register` — create account (also accepts `invite_code` when
+  `site_settings.invite_only` is `true`)
 - `POST /auth/login` — get JWT token (form fields: username, password; username also accepts email)
 - `GET /auth/me` — current user; `DELETE /auth/me` — delete account (cleans up all data)
 - `PATCH /auth/profile` — update username / email / language / avatar; also sets
@@ -151,12 +154,20 @@ API docs: http://127.0.0.1:8000/docs
   - **Comment manager** (`/comments?user_id=...`) — full comment text with
     per-comment delete.
   - **Banned IPs** (`/bans`) — review and lift honeypot bans.
+  - **Site Settings** (`/settings`) — toggle registration open/invite-only and tune
+    all anti-abuse limits (rate limits, flood threshold, login backoff, probe
+    detection, ban duration/escalation, and periodic task toggles) without a restart.
+  - **Invite Codes** (`/invites`) — generate random 32-char invite codes with
+    configurable max-uses (single/5/10/25/unlimited/custom) and optional expiry;
+    revoke active codes on-page.
 
 TMDB and Open Library responses are cached in memory for 30 minutes; book covers for 24 hours.
 
-A background task checks every `EPISODE_CHECK_MINUTES` (default 360) whether any
-tracked show aired a new episode in the last 7 days, and creates a notification
-per user — skipping episodes the user already marked watched.
+Background tasks run every `EPISODE_CHECK_MINUTES` (default 360 minutes):
+episode check (new notifications for tracked shows), film release date refresh,
+and ban-strike cleanup.  Each can be paused individually from
+`<ADMIN_PATH>/settings` (`episode_check_enabled`, `film_check_enabled`,
+`bans_check_enabled`).
 
 ## Tests
 

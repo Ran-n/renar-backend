@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/07/16 09:54:31.601408
+Revised: 2026/07/16 13:35:29.169154
 """
 
 from datetime import datetime
@@ -28,8 +28,19 @@ class UserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    invite_code: str | None = None
 
     _password_len = field_validator("password")(_password_fits_bcrypt)
+
+
+class RegistrationStatus(BaseModel):
+    """Public (unauthenticated) view of the two site_settings fields the
+    signup screen needs to decide what to render. Deliberately narrow — the
+    rest of site_settings (rate limits, ban thresholds) is anti-abuse tuning
+    that must never be exposed to an unauthenticated caller."""
+
+    registration_open: bool
+    invite_only: bool
 
 
 class UserOut(BaseModel):

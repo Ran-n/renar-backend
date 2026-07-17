@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     # default /admin location automatically becomes a honeypot.
     admin_path: str = "/admin"
     # Shared secret for the frontend web server's own anti-abuse guard to
-    # push/pull banned_ips over /svc/bans (see routers/svc.py). Empty means
-    # the endpoints stay 404 to everyone, same as an unset admin panel.
+    # check/report banned_ips over /svc/bans (see routers/svc.py). Empty
+    # means the endpoints stay 404 to everyone, same as an unset admin panel.
     internal_service_secret: str = ""
 
     # anti-abuse (see security.py); the API is exposed to the open internet.

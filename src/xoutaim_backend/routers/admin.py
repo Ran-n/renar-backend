@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.529990
-Revised: 2026/07/16 09:54:30.712129
+Revised: 2026/07/17 08:07:31.379501
 
 Admin control panel, protected by HTTP Basic credentials from the .env file.
 
@@ -13,7 +13,8 @@ server-rendered management page.
 import html
 import logging
 import re
-from datetime import datetime, timedelta
+import secrets
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query
@@ -21,7 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from .. import accounts, security
+from .. import accounts, security, site_settings
 from ..auth import hash_password
 from ..auth import require_admin as _require_admin
 from ..comment_threads import resolve_root_scope
@@ -34,16 +35,19 @@ from ..models import (
     CommentReport,
     EndpointStat,
     EpisodeWatch,
+    InviteCode,
     LibraryEntry,
     LoginEvent,
     MediaType,
     RequestDay,
+    SiteSettings,
     Title,
     User,
     WatchEvent,
     WatchStatus,
     utcnow,
 )
+from ..site_settings import get_site_settings
 
 # Configurable so the panel can hide somewhere unguessable while the
 # default /admin becomes a honeypot (see security.py).
@@ -69,6 +73,10 @@ _BASE_CSS = """
     /* Gruvbox, same ramp as the app theme (frontend themes.py GRUVBOX):
        bg0..bg3 ladder, fg/fg_dim text, bright yellow/orange accents. */
     :root {
+      /* native form chrome (date/time picker popups, number spinners,
+         scrollbars) follows the OS dark palette instead of defaulting to
+         a jarring white popup against this dark theme */
+      color-scheme: dark;
       --bg: #282828;
       --surface: #3c3836;
       --surface-hi: #504945;
@@ -124,6 +132,40 @@ _BASE_CSS = """
       transition: opacity .15s;
     }
     .topbar-brand-link:hover { opacity: .75; }
+"""
+
+# Appended last in every page's <style> tag so these overrides win the
+# cascade at matching widths regardless of how the page-specific CSS above
+# orders its own `.page`/grid rules.
+_RESPONSIVE_CSS = """
+    @media (max-width: 640px) {
+      .topbar { padding: 0 1rem; gap: .6rem; }
+      .brand-sub { display: none; }
+      .page { padding: 1.1rem .85rem; }
+
+      .stats { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: .6rem; }
+      .stat { padding: .7rem .9rem; }
+      .stat-value { font-size: 1.3rem; }
+
+      .card-header { flex-wrap: wrap; row-gap: .4rem; }
+      th, td { padding: .5rem .6rem; }
+
+      .detail-head { flex-wrap: wrap; }
+      .detail-avatar, .detail-avatar-fallback { width: 48px; height: 48px; }
+      .detail-name { font-size: 1.1rem; }
+
+      .charts-grid { grid-template-columns: 1fr; }
+      .hbar-row { grid-template-columns: 68px 1fr 30px; gap: .4rem; }
+
+      .settings-grid { grid-template-columns: 1fr; }
+      .status-row { gap: .5rem; }
+
+      .gen-card { padding: 1.1rem .9rem; }
+      .gen-head { flex-wrap: wrap; }
+
+      .grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+      .tile { padding: 1.1rem .9rem; }
+    }
 """
 
 _PAGE_CSS = """
@@ -354,15 +396,13 @@ _DETAIL_CSS = """
 
 
 def _fmt_ts(ts) -> str:
+    """Day-month-year, e.g. "16 Jul 2026" — not the ISO year-first order
+    str(datetime) gives, which reads ambiguously at a glance."""
     if not ts:
         return "&mdash;"
-    s = html.escape(str(ts))
-    if "." in s:  # drop sub-second noise
-        s = s.split(".", 1)[0]
-    if " " in s:
-        date, time = s.split(" ", 1)
-        return f"{date} <span style='opacity:.75'>{time}</span>"
-    return s
+    date = html.escape(f"{ts.day} {ts:%b %Y}")
+    time = html.escape(f"{ts:%H:%M}")
+    return f"{date} <span style='opacity:.75'>{time}</span>"
 
 
 # ---- usage charts (self-contained inline SVG, no chart library) ----
@@ -619,7 +659,7 @@ def _render_users(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>User Manager &middot; xoutaim</title>
   <link rel="icon" href="{_FAVICON}">
-  <style>{_BASE_CSS}{_PAGE_CSS}</style>
+  <style>{_BASE_CSS}{_PAGE_CSS}{_RESPONSIVE_CSS}</style>
 </head>
 <body>
 
@@ -859,6 +899,40 @@ _SERVICES = [
             "</svg>"
         ),
     },
+    {
+        "name": "Site Settings",
+        "desc": "Registration mode and anti-abuse tuning",
+        "href": f"{_P}/settings",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
+            ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+            '<circle cx="12" cy="12" r="3"/>'
+            '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06'
+            "a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09"
+            "A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06"
+            "A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09"
+            "A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06"
+            "A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09"
+            "a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06"
+            "A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09"
+            'a1.65 1.65 0 0 0-1.51 1z"/>'
+            "</svg>"
+        ),
+    },
+    {
+        "name": "Invite Codes",
+        "desc": "Generate and revoke registration invite codes",
+        "href": f"{_P}/invites",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
+            ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+            '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8'
+            'a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>'
+            '<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>'
+            '<line x1="12" y1="22.08" x2="12" y2="12"/>'
+            "</svg>"
+        ),
+    },
 ]
 
 _DASHBOARD_CSS = """
@@ -907,7 +981,7 @@ def _render_dashboard() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Admin &middot; xoutaim</title>
   <link rel="icon" href="{_FAVICON}">
-  <style>{_BASE_CSS}{_DASHBOARD_CSS}</style>
+  <style>{_BASE_CSS}{_DASHBOARD_CSS}{_RESPONSIVE_CSS}</style>
 </head>
 <body>
   <header class="topbar">
@@ -1208,7 +1282,7 @@ def _render_user_detail(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{name_esc} &middot; xoutaim</title>
   <link rel="icon" href="{_FAVICON}">
-  <style>{_BASE_CSS}{_PAGE_CSS}{_DETAIL_CSS}</style>
+  <style>{_BASE_CSS}{_PAGE_CSS}{_DETAIL_CSS}{_RESPONSIVE_CSS}</style>
 </head>
 <body>
 
@@ -1369,7 +1443,7 @@ def _usage_page(title: str, icon: str, back_href: str, back_label: str, inner: s
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)} &middot; xoutaim</title>
   <link rel="icon" href="{_FAVICON}">
-  <style>{_BASE_CSS}{_PAGE_CSS}{_DETAIL_CSS}</style>
+  <style>{_BASE_CSS}{_PAGE_CSS}{_DETAIL_CSS}{_RESPONSIVE_CSS}</style>
 </head>
 <body>
 
@@ -1608,7 +1682,7 @@ def _render_comments(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comment Manager &middot; xoutaim</title>
   <link rel="icon" href="{_FAVICON}">
-  <style>{_BASE_CSS}{_PAGE_CSS}</style>
+  <style>{_BASE_CSS}{_PAGE_CSS}{_RESPONSIVE_CSS}</style>
 </head>
 <body>
 
@@ -1722,7 +1796,7 @@ def _render_bans(bans: list[BannedIP]) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Banned IPs &middot; xoutaim</title>
   <link rel="icon" href="{_FAVICON}">
-  <style>{_BASE_CSS}{_PAGE_CSS}</style>
+  <style>{_BASE_CSS}{_PAGE_CSS}{_RESPONSIVE_CSS}</style>
 </head>
 <body>
 
@@ -2006,3 +2080,730 @@ def delete_user(
     accounts.delete_account(user, db)
     _log.info("admin=%s deleted user id=%s username=%s", admin_user, user_id, username)
     return RedirectResponse(f"{_P}/users", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Site Settings page
+# ---------------------------------------------------------------------------
+
+_SETTINGS_CSS = """
+    .flash-banner {
+      display: flex; align-items: center; gap: .5rem;
+      background: rgba(184,187,38,.12); border: 1px solid rgba(184,187,38,.35); color: #b8bb26;
+      border-radius: 10px; padding: .65rem 1rem; margin-bottom: 1.25rem;
+      font-size: .82rem; font-weight: 500;
+    }
+    .status-row { display: flex; gap: .75rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .status-chip {
+      display: flex; align-items: center; gap: .55rem;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      padding: .6rem .9rem;
+    }
+    .status-chip-label { font-size: .72rem; color: var(--text-2); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .status-chip-value { font-size: .82rem; font-weight: 600; }
+
+    .settings-section {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 1.1rem 1.25rem; margin-bottom: 1.25rem;
+    }
+    .settings-title {
+      display: flex; align-items: center; gap: .5rem;
+      font-size: .82rem; font-weight: 600; color: var(--text); margin-bottom: .9rem;
+    }
+    .settings-title .icon { font-size: 1rem; line-height: 1; }
+    .settings-hint { font-size: .72rem; color: var(--text-3); margin-top: .5rem; }
+    .toggle-row {
+      display: flex; align-items: flex-start; gap: .8rem;
+      padding: .5rem 0; border-bottom: 1px solid var(--border-sub);
+    }
+    .toggle-row:last-of-type { border-bottom: none; }
+    .toggle-copy { display: flex; flex-direction: column; gap: .1rem; }
+    .toggle-label { font-size: .84rem; color: var(--text); font-weight: 500; }
+    .toggle-desc { font-size: .72rem; color: var(--text-3); }
+
+    .switch { position: relative; display: inline-block; width: 38px; height: 21px; flex-shrink: 0; margin-top: .1rem; }
+    .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+    .switch-slider {
+      position: absolute; inset: 0; background: var(--border-sub); border: 1px solid var(--border);
+      border-radius: 999px; transition: background .15s, border-color .15s; pointer-events: none;
+    }
+    .switch-slider::before {
+      content: ""; position: absolute; height: 15px; width: 15px; left: 2px; top: 2px;
+      background: var(--text-2); border-radius: 50%; transition: transform .15s, background .15s;
+    }
+    .switch input:checked + .switch-slider { background: rgba(250,189,47,.22); border-color: var(--accent); }
+    .switch input:checked + .switch-slider::before { transform: translateX(17px); background: var(--accent); }
+    .switch input:focus-visible + .switch-slider { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .settings-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: .5rem .75rem; margin-bottom: .9rem;
+    }
+    .settings-field { display: flex; flex-direction: column; gap: .3rem; }
+    .settings-field label {
+      font-size: .72rem; color: var(--text-2); font-weight: 500;
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    .settings-field input[type=number] {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      border-radius: 7px; padding: .35rem .6rem; font-size: .82rem; font-family: inherit;
+      width: 100%;
+    }
+    .settings-field input[type=number]:focus { outline: none; border-color: var(--accent); }
+    .settings-save {
+      background: var(--accent); border: 1px solid var(--accent); color: var(--bg);
+      border-radius: 7px; padding: .5rem 1.3rem; font-size: .82rem; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+    }
+    .settings-save:hover { filter: brightness(1.08); }
+"""
+
+
+def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
+    def checked(val: bool) -> str:
+        return " checked" if val else ""
+
+    def nv(val: int) -> str:
+        return html.escape(str(val))
+
+    def toggle(name: str, field_id: str, value: bool, label: str, desc: str) -> str:
+        return f"""
+        <div class="toggle-row">
+          <label class="switch">
+            <input type="checkbox" name="{name}" id="{field_id}" value="1"{checked(value)}>
+            <span class="switch-slider"></span>
+          </label>
+          <div class="toggle-copy">
+            <span class="toggle-label">{label}</span>
+            <span class="toggle-desc">{desc}</span>
+          </div>
+        </div>"""
+
+    flash = (
+        '<div class="flash-banner">&#x2713; Settings saved &mdash; new values take effect immediately.</div>'
+        if saved
+        else ""
+    )
+    reg_dot = "#b8bb26" if ss.registration_open else "#fb4934"
+    invite_dot = "#fabd2f" if ss.invite_only else "#928374"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Site Settings &middot; xoutaim</title>
+  <link rel="icon" href="{_FAVICON}">
+  <style>{_BASE_CSS}{_PAGE_CSS}{_SETTINGS_CSS}{_RESPONSIVE_CSS}</style>
+</head>
+<body>
+
+  <header class="topbar">
+    <a class="topbar-brand-link" href="{_P}">
+      <div class="logo">&#x2699;</div>
+      <div class="brand">
+        <span class="brand-name">Site Settings</span>
+        <span class="brand-sub">xoutaim</span>
+      </div>
+    </a>
+    <div class="topbar-fill"></div>
+    <a class="admin-pill" href="{_P}">Admin</a>
+  </header>
+
+  <div class="page">
+    {flash}
+
+    <div class="status-row">
+      <div class="status-chip">
+        <span class="status-dot" style="background:{reg_dot}"></span>
+        <span class="status-chip-label">Registration</span>
+        <span class="status-chip-value">{"Open" if ss.registration_open else "Closed"}</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-dot" style="background:{invite_dot}"></span>
+        <span class="status-chip-label">Invite only</span>
+        <span class="status-chip-value">{"On" if ss.invite_only else "Off"}</span>
+      </div>
+    </div>
+
+    <form method="post" action="{_P}/settings">
+      <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x1F6AA;</span>Registration</div>
+        {
+        toggle(
+            "registration_open",
+            "reg_open",
+            ss.registration_open,
+            "Registration open",
+            "New accounts can be created at all. Off closes signups completely.",
+        )
+    }
+        {
+        toggle(
+            "invite_only",
+            "invite_only",
+            ss.invite_only,
+            "Invite only",
+            "Require a valid invite code to register (see the Invite Codes page).",
+        )
+    }
+        <p class="settings-hint">
+          When <em>invite only</em> is on, <em>registration open</em> must also be on &mdash;
+          otherwise registration is closed entirely regardless of invite codes.
+        </p>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x1F30A;</span>Rate limits &amp; flood protection</div>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <label for="rate_lpm">General req / IP / min (soft throttle)</label>
+            <input type="number" id="rate_lpm" name="rate_limit_per_minute"
+                   value="{nv(ss.rate_limit_per_minute)}" min="1" max="100000" required>
+          </div>
+          <div class="settings-field">
+            <label for="flood_lpm">Flood ban threshold / IP / min</label>
+            <input type="number" id="flood_lpm" name="flood_ban_per_minute"
+                   value="{nv(ss.flood_ban_per_minute)}" min="1" max="100000" required>
+          </div>
+          <div class="settings-field">
+            <label for="auth_lpm">Auth req / IP / min (login + register)</label>
+            <input type="number" id="auth_lpm" name="auth_rate_limit_per_minute"
+                   value="{nv(ss.auth_rate_limit_per_minute)}" min="1" max="10000" required>
+          </div>
+          <div class="settings-field">
+            <label for="reg_lph">New accounts / IP / hour</label>
+            <input type="number" id="reg_lph" name="register_per_hour_per_ip"
+                   value="{nv(ss.register_per_hour_per_ip)}" min="1" max="10000" required>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x23F3;</span>Login backoff</div>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <label for="bo_thresh">Failures per (account, IP) before backoff</label>
+            <input type="number" id="bo_thresh" name="login_backoff_threshold"
+                   value="{nv(ss.login_backoff_threshold)}" min="1" max="1000" required>
+          </div>
+          <div class="settings-field">
+            <label for="bo_acct">Failures per account (all IPs) before backoff</label>
+            <input type="number" id="bo_acct" name="login_backoff_account_threshold"
+                   value="{nv(ss.login_backoff_account_threshold)}" min="1" max="10000" required>
+          </div>
+          <div class="settings-field">
+            <label for="bo_min">Backoff duration (minutes)</label>
+            <input type="number" id="bo_min" name="login_backoff_minutes"
+                   value="{nv(ss.login_backoff_minutes)}" min="1" max="10080" required>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x1F50D;</span>Probe detection &amp; temp bans</div>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <label for="probe_thresh">Unknown paths before temp ban</label>
+            <input type="number" id="probe_thresh" name="probe_ban_threshold"
+                   value="{nv(ss.probe_ban_threshold)}" min="1" max="1000" required>
+          </div>
+          <div class="settings-field">
+            <label for="probe_win">Probe detection window (minutes)</label>
+            <input type="number" id="probe_win" name="probe_window_minutes"
+                   value="{nv(ss.probe_window_minutes)}" min="1" max="1440" required>
+          </div>
+          <div class="settings-field">
+            <label for="ban_min">First-offense ban duration (minutes)</label>
+            <input type="number" id="ban_min" name="ban_minutes"
+                   value="{nv(ss.ban_minutes)}" min="1" max="1440" required>
+          </div>
+          <div class="settings-field">
+            <label for="strike_thresh">Offenses before permanent ban</label>
+            <input type="number" id="strike_thresh" name="strike_ban_threshold"
+                   value="{nv(ss.strike_ban_threshold)}" min="1" max="100" required>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x23F1;</span>Periodic background tasks</div>
+        {
+        toggle(
+            "episode_check_enabled",
+            "episode_check_enabled",
+            ss.episode_check_enabled,
+            "Episode check",
+            "Poll TMDB for new episodes on tracked shows and sync episode history.",
+        )
+    }
+        {
+        toggle(
+            "film_check_enabled",
+            "film_check_enabled",
+            ss.film_check_enabled,
+            "Film check",
+            "Poll TMDB for upcoming release dates on tracked want-to-watch films.",
+        )
+    }
+        {
+        toggle(
+            "bans_check_enabled",
+            "bans_check_enabled",
+            ss.bans_check_enabled,
+            "Bans check",
+            "Periodically drop strike rows nobody has touched in 30 days.",
+        )
+    }
+      </div>
+
+      <button class="settings-save" type="submit">Save all settings</button>
+    </form>
+
+  </div>
+
+</body>
+</html>"""
+
+
+@router.get("/settings", response_class=HTMLResponse, include_in_schema=False)
+def admin_settings(
+    saved: bool = Query(default=False),
+    _: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    return _render_site_settings(get_site_settings(db), saved=saved)
+
+
+@router.post("/settings", include_in_schema=False)
+def save_settings(
+    registration_open: str | None = Form(default=None),
+    invite_only: str | None = Form(default=None),
+    rate_limit_per_minute: int = Form(...),
+    flood_ban_per_minute: int = Form(...),
+    auth_rate_limit_per_minute: int = Form(...),
+    register_per_hour_per_ip: int = Form(...),
+    login_backoff_threshold: int = Form(...),
+    login_backoff_account_threshold: int = Form(...),
+    login_backoff_minutes: int = Form(...),
+    probe_ban_threshold: int = Form(...),
+    probe_window_minutes: int = Form(...),
+    ban_minutes: int = Form(...),
+    strike_ban_threshold: int = Form(...),
+    episode_check_enabled: str | None = Form(default=None),
+    film_check_enabled: str | None = Form(default=None),
+    bans_check_enabled: str | None = Form(default=None),
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    ss = get_site_settings(db)
+    ss.registration_open = registration_open == "1"
+    ss.invite_only = invite_only == "1"
+    ss.rate_limit_per_minute = rate_limit_per_minute
+    ss.flood_ban_per_minute = flood_ban_per_minute
+    ss.auth_rate_limit_per_minute = auth_rate_limit_per_minute
+    ss.register_per_hour_per_ip = register_per_hour_per_ip
+    ss.login_backoff_threshold = login_backoff_threshold
+    ss.login_backoff_account_threshold = login_backoff_account_threshold
+    ss.login_backoff_minutes = login_backoff_minutes
+    ss.probe_ban_threshold = probe_ban_threshold
+    ss.probe_window_minutes = probe_window_minutes
+    ss.ban_minutes = ban_minutes
+    ss.strike_ban_threshold = strike_ban_threshold
+    ss.episode_check_enabled = episode_check_enabled == "1"
+    ss.film_check_enabled = film_check_enabled == "1"
+    ss.bans_check_enabled = bans_check_enabled == "1"
+    db.commit()
+    site_settings.invalidate()
+    _log.info(
+        "admin=%s updated site settings (invite_only=%s registration_open=%s)",
+        admin_user,
+        ss.invite_only,
+        ss.registration_open,
+    )
+    return RedirectResponse(f"{_P}/settings?saved=1", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Invite Codes page
+# ---------------------------------------------------------------------------
+
+
+_INVITES_CSS = """
+    .status-pill {
+      display: inline-flex; align-items: center; gap: .3rem;
+      font-size: .68rem; font-weight: 600; letter-spacing: .02em;
+      border-radius: 9999px; padding: 2px 9px; white-space: nowrap;
+    }
+    .code-cell { display: flex; align-items: center; gap: .5rem; font-family: monospace; }
+    .btn-copy {
+      background: transparent; border: 1px solid var(--border); color: var(--text-3);
+      border-radius: 6px; padding: 1px 8px; font-size: .68rem; font-family: inherit;
+    }
+    .btn-copy:hover { color: var(--text-2); border-color: var(--text-3); }
+    .uses-cell { display: flex; align-items: center; gap: .5rem; }
+    .uses-track { background: var(--border-sub); border-radius: 5px; height: 6px; width: 60px; overflow: hidden; }
+    .uses-fill { height: 100%; border-radius: 5px; }
+
+    /* Generate-invite card */
+    .gen-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; padding: 1.5rem; margin-bottom: 1.25rem;
+    }
+    .gen-head { display: flex; align-items: flex-start; gap: .9rem; margin-bottom: 1.4rem; }
+    .gen-icon {
+      width: 42px; height: 42px; border-radius: 11px; flex-shrink: 0;
+      background: rgba(250,189,47,.14); color: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .gen-icon svg { width: 22px; height: 22px; }
+    .gen-title { font-size: 1rem; font-weight: 700; color: var(--text); letter-spacing: -.01em; }
+    .gen-sub { font-size: .78rem; color: var(--text-2); margin-top: .15rem; line-height: 1.4; }
+
+    .gen-field { margin-bottom: 1.1rem; }
+    .gen-label {
+      display: block; font-size: .7rem; font-weight: 600; color: var(--text-2);
+      text-transform: uppercase; letter-spacing: .05em; margin-bottom: .55rem;
+    }
+    .chip-group { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+    .chip {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text-2);
+      border-radius: 9999px; padding: .4rem 1rem; font-size: .8rem; font-weight: 500;
+      font-family: inherit; cursor: pointer; transition: all .12s;
+    }
+    .chip:hover { border-color: var(--text-3); color: var(--text); }
+    .chip.active {
+      background: rgba(250,189,47,.16); border-color: var(--accent); color: var(--accent); font-weight: 600;
+    }
+    .gen-custom-input {
+      background: var(--bg); border: 1px solid var(--accent); color: var(--text);
+      border-radius: 8px; padding: .45rem .7rem; font-size: .85rem; font-family: inherit;
+      margin-top: .6rem; width: 100%; max-width: 260px;
+    }
+    .gen-custom-input:focus { outline: none; box-shadow: 0 0 0 2px rgba(250,189,47,.25); }
+    .gen-custom-input[hidden] { display: none; }
+
+    .gen-submit {
+      display: inline-flex; align-items: center; gap: .5rem;
+      background: var(--accent); border: 1px solid var(--accent); color: var(--bg);
+      border-radius: 9px; padding: .6rem 1.4rem; font-size: .85rem; font-weight: 700;
+      font-family: inherit; cursor: pointer; margin-top: .3rem;
+    }
+    .gen-submit:hover { filter: brightness(1.08); }
+    .gen-submit svg { width: 16px; height: 16px; }
+
+    .just-generated {
+      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+      background: rgba(184,187,38,.1); border: 1px solid rgba(184,187,38,.35);
+      border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1.25rem;
+    }
+    .just-generated-label {
+      font-size: .72rem; color: #b8bb26; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .just-generated-code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 1.15rem; font-weight: 600; color: var(--text); letter-spacing: .02em;
+    }
+"""
+
+_INVITE_STATUS = {
+    "active": ("Active", "#b8bb26"),
+    "exhausted": ("Exhausted", "#fe8019"),
+    "expired": ("Expired", "#fb4934"),
+    "revoked": ("Revoked", "#928374"),
+}
+
+
+def _invite_state(c: InviteCode, now: datetime) -> str:
+    if c.revoked:
+        return "revoked"
+    if c.expires_at is not None and c.expires_at <= now:
+        return "expired"
+    if c.max_uses is not None and c.uses >= c.max_uses:
+        return "exhausted"
+    return "active"
+
+
+def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
+    now = utcnow()
+    default_expires = (now + timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M")
+    counts = dict.fromkeys(_INVITE_STATUS, 0)
+    rows = ""
+    for c in sorted(codes, key=lambda c: c.created_at, reverse=True):
+        state = _invite_state(c, now)
+        counts[state] += 1
+        label, color = _INVITE_STATUS[state]
+        code_esc = html.escape(c.code)
+        created_by = html.escape(c.created_by.username) if c.created_by else "&mdash;"
+        expires = _fmt_ts(c.expires_at) if c.expires_at else "&mdash;"
+        if c.max_uses is None:
+            uses_cell = f'<div class="uses-cell"><span>{c.uses} / &infin;</span></div>'
+        else:
+            pct = min(100, int(c.uses / c.max_uses * 100))
+            uses_cell = (
+                f'<div class="uses-cell"><span>{c.uses} / {c.max_uses}</span>'
+                f'<div class="uses-track"><div class="uses-fill" style="width:{pct}%;background:{color}"></div></div>'
+                f"</div>"
+            )
+        revoke_btn = ""
+        if state not in ("revoked", "expired"):
+            revoke_btn = (
+                f'<form method="post" action="{_P}/invites/{c.id}/revoke"'
+                f" onsubmit=\"return confirm('Revoke invite [{code_esc}]?')\""
+                f' style="display:contents">'
+                f'<button class="btn-sm btn-purge" type="submit">Revoke</button>'
+                f"</form>"
+            )
+        rows += f"""
+        <tr>
+          <td class="td-label"><div class="code-cell"><span>{code_esc}</span>
+            <button class="btn-copy" type="button" data-code="{code_esc}">Copy</button></div></td>
+          <td><span class="status-pill" style="color:{color};background:{color}22">{label}</span></td>
+          <td class="td-count">{uses_cell}</td>
+          <td class="td-ts">{expires}</td>
+          <td class="td-ts">{_fmt_ts(c.created_at)}</td>
+          <td class="td-email">{created_by}</td>
+          <td><div class="td-actions">{revoke_btn}</div></td>
+        </tr>"""
+
+    empty_row = '<tr><td colspan="7" class="empty">No invite codes yet</td></tr>' if not rows else ""
+    stats = "".join(_stat_tile(_INVITE_STATUS[state][0], counts[state], small=True) for state in _INVITE_STATUS)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invite Codes &middot; xoutaim</title>
+  <link rel="icon" href="{_FAVICON}">
+  <style>{_BASE_CSS}{_PAGE_CSS}{_SETTINGS_CSS}{_INVITES_CSS}{_RESPONSIVE_CSS}</style>
+</head>
+<body>
+
+  <header class="topbar">
+    <a class="topbar-brand-link" href="{_P}">
+      <div class="logo">&#x1F4E6;</div>
+      <div class="brand">
+        <span class="brand-name">Invite Codes</span>
+        <span class="brand-sub">xoutaim</span>
+      </div>
+    </a>
+    <div class="topbar-fill"></div>
+    <a class="admin-pill" href="{_P}">Admin</a>
+  </header>
+
+  <div class="page">
+    {flash}
+
+    <div class="stats">{stats}</div>
+
+    <div class="gen-card">
+      <div class="gen-head">
+        <div class="gen-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8
+                     a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+            <line x1="12" y1="22.08" x2="12" y2="12"/>
+          </svg>
+        </div>
+        <div>
+          <div class="gen-title">Generate invite code</div>
+          <div class="gen-sub">Create a link that lets someone register while invite-only mode is on.</div>
+        </div>
+      </div>
+
+      <form method="post" action="{_P}/invites/create" id="invite-form">
+        <div class="gen-field">
+          <label class="gen-label">Uses</label>
+          <div class="chip-group" data-for="max_uses">
+            <button type="button" class="chip active" data-value="1">Single use</button>
+            <button type="button" class="chip" data-value="5">5 uses</button>
+            <button type="button" class="chip" data-value="10">10 uses</button>
+            <button type="button" class="chip" data-value="25">25 uses</button>
+            <button type="button" class="chip" data-value="">Unlimited</button>
+            <button type="button" class="chip" data-custom="1">Custom&hellip;</button>
+          </div>
+          <input class="gen-custom-input" type="number" id="max_uses" name="max_uses"
+                 value="1" min="1" max="10000" hidden>
+        </div>
+
+        <div class="gen-field">
+          <label class="gen-label">Expires</label>
+          <div class="chip-group" data-for="expires_at">
+            <button type="button" class="chip active" data-hours="24">24 hours</button>
+            <button type="button" class="chip" data-hours="168">7 days</button>
+            <button type="button" class="chip" data-hours="720">30 days</button>
+            <button type="button" class="chip" data-hours="">Never</button>
+            <button type="button" class="chip" data-custom="1">Custom&hellip;</button>
+          </div>
+          <input class="gen-custom-input" type="datetime-local" id="expires_at" name="expires_at"
+                 value="{default_expires}" hidden>
+        </div>
+
+        <button class="gen-submit" type="submit">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          Generate invite code
+        </button>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">All invite codes</h2>
+        <span class="pill">{len(codes)} total</span>
+      </div>
+      <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Code</th>
+            <th>Status</th>
+            <th>Uses</th>
+            <th>Expires</th>
+            <th>Created</th>
+            <th>Created by</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows}{empty_row}
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    document.querySelectorAll('.btn-copy').forEach(function (btn) {{
+      btn.addEventListener('click', function () {{
+        navigator.clipboard.writeText(btn.dataset.code).then(function () {{
+          var orig = btn.textContent;
+          btn.textContent = 'Copied';
+          setTimeout(function () {{ btn.textContent = orig; }}, 1200);
+        }});
+      }});
+    }});
+
+    // Chip groups: clicking a preset sets the paired hidden input's value;
+    // "Custom..." instead reveals that input for direct editing.
+    document.querySelectorAll('.chip-group').forEach(function (group) {{
+      var input = document.getElementById(group.dataset.for);
+      var chips = group.querySelectorAll('.chip');
+      chips.forEach(function (chip) {{
+        chip.addEventListener('click', function () {{
+          chips.forEach(function (c) {{ c.classList.remove('active'); }});
+          if (chip.dataset.custom) {{
+            chip.classList.add('active');
+            input.hidden = false;
+            input.value = '';
+            input.focus();
+            return;
+          }}
+          input.hidden = true;
+          if (input.type === 'datetime-local') {{
+            if (chip.dataset.hours) {{
+              var d = new Date(Date.now() + Number(chip.dataset.hours) * 3600000);
+              d.setSeconds(0, 0);
+              input.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+            }} else {{
+              input.value = '';
+            }}
+          }} else {{
+            input.value = chip.dataset.value;
+          }}
+          chip.classList.add('active');
+        }});
+      }});
+    }});
+  </script>
+</body>
+</html>"""
+
+
+@router.get("/invites", response_class=HTMLResponse, include_in_schema=False)
+def list_invites(
+    generated: str | None = Query(default=None),
+    _: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    codes = db.query(InviteCode).options(joinedload(InviteCode.created_by)).all()
+    flash = ""
+    if generated:
+        code_esc = html.escape(generated)
+        flash = (
+            '<div class="just-generated">'
+            '<span class="just-generated-label">&#x2713; Generated</span>'
+            f'<span class="just-generated-code">{code_esc}</span>'
+            f'<button class="btn-copy" type="button" data-code="{code_esc}">Copy</button>'
+            "</div>"
+        )
+    return _render_invites(codes, flash=flash)
+
+
+@router.post("/invites/create", include_in_schema=False)
+def create_invite(
+    # FastAPI coerces an empty submitted value to this default only when the
+    # field type is Optional — a plain `str` default is NOT applied for an
+    # empty string, it only fills a truly missing field. That's exactly the
+    # behavior "" (unlimited) vs "5" needs here.
+    max_uses: str | None = Form(default=None),  # empty/missing = unlimited uses
+    expires_at: str | None = Form(default=None),
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    parsed_max_uses: int | None = None
+    if max_uses:
+        try:
+            parsed_max_uses = int(max_uses)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="max_uses must be a whole number") from exc
+        if parsed_max_uses < 1:
+            raise HTTPException(status_code=422, detail="max_uses must be at least 1")
+    parsed_expires: datetime | None = None
+    if expires_at:
+        try:
+            parsed_expires = datetime.fromisoformat(expires_at).replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid expires_at format") from exc
+    code = InviteCode(
+        code=secrets.token_urlsafe(10),
+        created_by_user_id=None,
+        max_uses=parsed_max_uses,
+        uses=0,
+        expires_at=parsed_expires,
+        revoked=False,
+    )
+    db.add(code)
+    db.commit()
+    _log.info(
+        "admin=%s generated invite code=%s max_uses=%s expires=%s",
+        admin_user,
+        code.code,
+        parsed_max_uses,
+        parsed_expires,
+    )
+    return RedirectResponse(f"{_P}/invites?generated={quote(code.code)}", status_code=303)
+
+
+@router.post("/invites/{code_id}/revoke", include_in_schema=False)
+def revoke_invite(
+    code_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    code = db.get(InviteCode, code_id)
+    if not code:
+        raise HTTPException(status_code=404, detail="Invite code not found")
+    code.revoked = True
+    db.commit()
+    _log.info("admin=%s revoked invite code id=%s code=%s", admin_user, code_id, code.code)
+    return RedirectResponse(f"{_P}/invites", status_code=303)

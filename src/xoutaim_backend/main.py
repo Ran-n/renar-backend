@@ -2,12 +2,16 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/14 22:48:11.599312
+Revised: 2026/07/16 22:44:34.716294
 """
 
 import asyncio
 import logging
+import tomllib
 from contextlib import asynccontextmanager, suppress
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +50,21 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 _log = logging.getLogger(__name__)
 
 
+def backend_version() -> str:
+    """Installed package version; falls back to pyproject.toml for source checkouts."""
+    try:
+        return _pkg_version("xoutaim-backend")
+    except PackageNotFoundError:
+        pass
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    try:
+        with pyproject.open("rb") as f:
+            return tomllib.load(f)["project"]["version"]
+    except (OSError, KeyError):
+        _log.warning("backend version unknown: no dist metadata or pyproject.toml")
+        return "unknown"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # As a reload worker, die with the reloader instead of becoming a
@@ -67,16 +86,20 @@ async def lifespan(app: FastAPI):
 # map every endpoint, so it stays off unless ENABLE_DOCS=true in .env.
 app = FastAPI(
     title="Xoutaim API",
-    version="0.1.0",
+    version=backend_version(),
     lifespan=lifespan,
     openapi_url="/openapi.json" if settings.enable_docs else None,
 )
 
+# UsageTrackingMiddleware added (and therefore wrapped) before AbuseGuard,
+# so AbuseGuard sits outside it: a banned/flooded request is rejected
+# before ever reaching UsageTracking, instead of reaching it and being
+# filtered out there via scope["route"] (still unset for short-circuited
+# requests, so a route that slips past AbuseGuard some other way is still
+# never mis-recorded).
+app.add_middleware(UsageTrackingMiddleware)
 if settings.abuse_guard_enabled:
     app.add_middleware(AbuseGuardMiddleware)
-# Outermost of the app middlewares so it only records requests the router
-# actually dispatched (it reads scope["route"], unset for short-circuited ones).
-app.add_middleware(UsageTrackingMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(OriginCheckMiddleware)
 app.add_middleware(

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/16 09:54:29.868949 )
+[//]: # (+ Revised: 	2026/07/17 09:40:41.076734 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-07-17
+
+### Added
+
+- `site_settings` singleton table: DB-backed runtime settings for all
+  anti-abuse tunables and registration flags, editable live from
+  `<ADMIN_PATH>/settings` (no restart needed) — see `docs/anti-abuse.md`
+  and `src/xoutaim_backend/site_settings.py`
+- Admin panel: **Site Settings** tile and page (`GET/POST <ADMIN_PATH>/settings`)
+  with toggle controls for registration mode and number inputs for every
+  rate-limit/ban threshold
+- Admin panel: **Invite Codes** tile and page (`GET/POST <ADMIN_PATH>/invites`);
+  generates 32-char random codes with configurable max-uses (1/5/10/25/unlimited/custom)
+  and optional expiry; revoke-on-page action marks a code `revoked = true`
+- `invite_codes` table: per-code use counting with `FOR UPDATE` serialization
+  on concurrent registrations
+- `POST /auth/register`: invite-code validation when `site_settings.invite_only`
+  is `true` — rejects missing, revoked, expired, or fully-used codes;
+  increments `uses` in the same transaction as user creation
+- `GET /auth/registration-status` — unauthenticated; returns `registration_open`
+  and `invite_only` so the signup screen can decide whether to render an
+  invite-code field before the user submits
+- `RegistrationStatus` schema (narrow public view of two `site_settings` fields)
+- Periodic-task toggles in `site_settings`: `episode_check_enabled`,
+  `film_check_enabled`, `bans_check_enabled` — admin can pause any background
+  task without code changes; `notifier.py` and `security.py` check these
+  before each run
+- `backend_version()` in `main.py`: reads installed package metadata on startup,
+  falls back to `pyproject.toml` for source checkouts; `app.version` is now
+  live rather than a hardcoded string
+- `UsageTrackingMiddleware` is now added before `AbuseGuardMiddleware` so
+  banned/flooded requests never reach usage tracking (previously reversed)
+- Responsive CSS (`_RESPONSIVE_CSS`) and `color-scheme: dark` applied to all
+  admin panel pages; native form chrome (date pickers, scrollbars) follows
+  the OS dark palette
+- `_fmt_ts` reformatted to day-month-year ("16 Jul 2026 HH:MM") for readability
+- Migration `b9c3e1f84a2d`: create `site_settings` and `invite_codes` tables
+- Migration `ae65f1be8d32`: make `invite_codes.max_uses` nullable (unlimited-use codes)
+- Migration `c1e6a4f92d38`: add `episode_check_enabled`, `film_check_enabled`,
+  `bans_check_enabled` columns to `site_settings`
+
+### Changed
+
+- Anti-abuse tunables (`rate_limit_per_minute`, `flood_ban_per_minute`,
+  `auth_rate_limit_per_minute`, `register_per_hour_per_ip`,
+  `login_backoff_threshold`, `login_backoff_account_threshold`,
+  `login_backoff_minutes`, `probe_ban_threshold`, `probe_window_minutes`,
+  `ban_minutes`, `strike_ban_threshold`) and registration flags
+  (`registration_open`) moved from `.env`-only to the `site_settings` DB row;
+  `.env` values are now **seed defaults** for fresh deployments only
+- `REGISTRATION_OPEN` removed from `.env.example` (handled via admin panel now)
+- Rate-limit/ban env vars removed from `.env.example`; replaced with a comment
+  pointing to `<ADMIN_PATH>/settings`
+- `/svc/bans` docstring clarifies the periodic refresh semantics: only
+  permabans are merged on the long-interval re-pull (not temp bans)
+- `docs/environment-variables.md`: anti-abuse tunables marked as seed-default-only
+- `docs/anti-abuse.md`: DB-backed runtime settings and invite-only registration
+  sections added; temp-ban vs permaban periodic-sync rationale expanded
+- Registration rejection log lines now include which field clashed
+  (username vs email) and the existing user's id
+
+### Fixed
+
+- `invite_codes.max_uses` created as `NOT NULL` in migration `b9c3e1f84a2d`
+  then immediately corrected to nullable in `ae65f1be8d32`; the model has no
+  Python-side default so callers that pass explicit `None` (unlimited) are
+  not silently overridden at flush time
+
+## [0.2.0] - 2026-07-16
 
 ### Added
 

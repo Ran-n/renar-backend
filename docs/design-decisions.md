@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/16 09:54:30.164984 )
+[//]: # (+ Revised: 	2026/07/17 09:40:41.335669 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -124,6 +124,53 @@ verify the trigger got it right, not called from request-time code).
 Adding a second ranking metric means writing its own trigger, not just a
 Python callable — more upfront cost than the derive-at-read-time default,
 justified here by how often `/stats` and `/stats/ranking` are hit.
+
+### `site_settings`: a singleton row for runtime-tunable settings
+
+All twelve anti-abuse tunables and the two registration flags (`registration_open`,
+`invite_only`) live in a `site_settings` singleton row (`id` always `1`,
+`CHECK`-constrained, same pattern as `app_counters`) so the admin panel can change
+them without a server restart or an `.env` edit.
+
+`src/xoutaim_backend/site_settings.py` exposes three callables:
+
+- `get_site_settings(db)` — reads or creates the row; on first call it seeds
+  it from the corresponding `config.py` / `.env` defaults so existing deployments
+  keep their tuned values (upsert-on-read bootstrap, never an explicit `INSERT`
+  at startup).
+- `current()` — 5-second TTL in-process cache used by `AbuseGuardMiddleware`
+  (which runs on every request) to avoid a DB hit per request.  The admin POST
+  handler calls `invalidate()` after committing so the new values take effect
+  within the TTL, not just after it expires.
+- Defensive fallback: if the `site_settings` table doesn't exist yet (migration
+  not run, fresh checkout) `current()` falls back to the config defaults and
+  retries on the next call — the same pattern `security.py` uses for
+  `_load_permabans`.
+
+**Why a singleton, not individual settings rows:** the whole table is read as one
+object on every call — an `id → value` key/value store would still do one read
+(WHERE id IN (...)), but a typed ORM model gets IDE support, migration-tracked
+schema, and column-level constraints for free.  The `id = 1` check constraint
+prevents accidental second rows from misuse of the upsert path.
+
+### Invite-only registration
+
+When `site_settings.invite_only` is `true`, `POST /auth/register` requires a
+valid `invite_code`.  Validity: not revoked, `uses < max_uses` (or `max_uses IS
+NULL` for unlimited), and `expires_at` is `NULL` or in the future.
+
+The `FOR UPDATE` lock on the `invite_codes` row before reading `uses` serializes
+concurrent registrations with the same code — without it two simultaneous signups
+could both read `uses = 0`, both pass `< max_uses = 1`, and both succeed,
+producing two users from a single-use invite.  The use increment and the new user
+row commit in the same transaction, so a crash can never consume a slot without
+creating the user.
+
+`max_uses IS NULL` means unlimited uses (a "join us" link).  The original
+migration (`b9c3e1f84a2d`) created `max_uses` as `NOT NULL`; a follow-up
+(`ae65f1be8d32`) immediately made it nullable.  The model has **no Python-side
+default** for `max_uses` — a `default=1` would silently override an explicit
+`None` at flush time, so every caller passes the value explicitly.
 
 ### `app_counters.total_users`: the same pattern, for a different reason
 

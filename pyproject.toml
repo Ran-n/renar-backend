@@ -1,6 +1,6 @@
 [project]
 name = "xoutaim-backend"
-version = "0.2.0"
+version = "0.3.0"
 description = "FastAPI backend for Xoutaim — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]

@@ -2,15 +2,28 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.984505
-Revised: 2026/07/12 03:03:33.399341
+Revised: 2026/07/16 13:37:27.159098
 
 Auth endpoints: register, login, me, profile, password change, account delete.
 """
 
+import secrets
+from datetime import UTC, datetime, timedelta
+
 from conftest import PASSWORD, login, register
 
 from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import Comment, CommentReport, EpisodeWatch, LibraryEntry, LoginEvent, User, WatchEvent
+from xoutaim_backend.models import (
+    Comment,
+    CommentReport,
+    EpisodeWatch,
+    InviteCode,
+    LibraryEntry,
+    LoginEvent,
+    SiteSettings,
+    User,
+    WatchEvent,
+)
 
 # ---------- register ----------
 
@@ -66,6 +79,177 @@ def test_register_bad_email_rejected(client):
         json={"username": "alice", "email": "not-an-email", "password": PASSWORD},
     )
     assert r.status_code == 422
+
+
+# ---------- registration_open and invite_only (site_settings) ----------
+
+
+def _set_site_settings(**kwargs):
+    """Directly write site_settings fields for test setup."""
+    db = SessionLocal()
+    try:
+        row = db.get(SiteSettings, 1)
+        if row is None:
+            row = SiteSettings(id=1, registration_open=True, invite_only=False)
+            db.add(row)
+        for k, v in kwargs.items():
+            setattr(row, k, v)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _make_invite(max_uses=1, uses=0, revoked=False, expires_at=None) -> str:
+    code = secrets.token_urlsafe(10)
+    db = SessionLocal()
+    try:
+        db.add(
+            InviteCode(
+                code=code,
+                created_by_user_id=None,
+                max_uses=max_uses,
+                uses=uses,
+                expires_at=expires_at,
+                revoked=revoked,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+    return code
+
+
+def test_registration_status_defaults(client):
+    r = client.get("/auth/registration-status")
+    assert r.status_code == 200
+    assert r.json() == {"registration_open": True, "invite_only": False}
+
+
+def test_registration_status_reflects_invite_only(client):
+    _set_site_settings(invite_only=True, registration_open=False)
+    r = client.get("/auth/registration-status")
+    assert r.status_code == 200
+    assert r.json() == {"registration_open": False, "invite_only": True}
+
+
+def test_registration_closed_returns_403(client):
+    _set_site_settings(registration_open=False)
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+    )
+    assert r.status_code == 403
+
+
+def test_invite_only_missing_code_returns_400(client):
+    _set_site_settings(invite_only=True, registration_open=True)
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+    )
+    assert r.status_code == 400
+    assert "invite code" in r.json()["detail"].lower()
+
+
+def test_invite_only_invalid_code_returns_400(client):
+    _set_site_settings(invite_only=True, registration_open=True)
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": "bogus"},
+    )
+    assert r.status_code == 400
+    assert "invalid" in r.json()["detail"].lower()
+
+
+def test_invite_only_revoked_code_returns_400(client):
+    code = _make_invite(revoked=True)
+    _set_site_settings(invite_only=True, registration_open=True)
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+    )
+    assert r.status_code == 400
+    assert "invalid" in r.json()["detail"].lower()
+
+
+def test_invite_only_expired_code_returns_400(client):
+    past = datetime.now(UTC) - timedelta(hours=1)
+    code = _make_invite(expires_at=past)
+    _set_site_settings(invite_only=True, registration_open=True)
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+    )
+    assert r.status_code == 400
+    assert "expired" in r.json()["detail"].lower()
+
+
+def test_invite_only_exhausted_code_returns_400(client):
+    code = _make_invite(max_uses=1, uses=1)
+    _set_site_settings(invite_only=True, registration_open=True)
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+    )
+    assert r.status_code == 400
+    assert "used" in r.json()["detail"].lower()
+
+
+def test_invite_only_valid_code_registers_and_increments_uses(client):
+    code = _make_invite(max_uses=2)
+    _set_site_settings(invite_only=True, registration_open=True)
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+    )
+    assert r.status_code == 201
+
+    db = SessionLocal()
+    try:
+        row = db.query(InviteCode).filter(InviteCode.code == code).first()
+        assert row.uses == 1
+    finally:
+        db.close()
+
+
+def test_invite_only_single_use_code_exhausted_after_one_registration(client):
+    code = _make_invite(max_uses=1)
+    _set_site_settings(invite_only=True, registration_open=True)
+    r1 = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+    )
+    assert r1.status_code == 201
+
+    r2 = client.post(
+        "/auth/register",
+        json={"username": "bob", "email": "bob@example.com", "password": PASSWORD, "invite_code": code},
+    )
+    assert r2.status_code == 400
+
+
+def test_invite_only_unlimited_code_never_exhausts(client):
+    code = _make_invite(max_uses=None)
+    _set_site_settings(invite_only=True, registration_open=True)
+    for username in ("alice", "bob", "carol"):
+        r = client.post(
+            "/auth/register",
+            json={
+                "username": username,
+                "email": f"{username}@example.com",
+                "password": PASSWORD,
+                "invite_code": code,
+            },
+        )
+        assert r.status_code == 201
+
+    db = SessionLocal()
+    try:
+        row = db.query(InviteCode).filter(InviteCode.code == code).first()
+        assert row.uses == 3
+        assert row.max_uses is None
+    finally:
+        db.close()
 
 
 # ---------- login ----------

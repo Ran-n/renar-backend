@@ -1,32 +1,44 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/16 09:19:09.907159 )
-[//]: # (+ Revised: 	2026/07/16 09:54:32.313282 )
+[//]: # (+ Revised: 	2026/07/17 09:40:41.563794 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 [//]: # ( ---------------------------------------------------------------------- )
-[//]: # (+ DRAFT — not yet published. Needs: company name, registered domain,  )
-[//]: # (+ contact email, effective date, and a legal review before this goes   )
-[//]: # (+ live or gets linked from any app store listing.                     )
+[//]: # (+ DRAFT — not yet published. Needs: effective date, hosting provider/  )
+[//]: # (+ jurisdiction, and a legal review before this goes live or gets       )
+[//]: # (+ linked from any app store listing. The app is currently named        )
+[//]: # (+ "Xoutaim" but a rename is planned — the domain/email are subdomained  )
+[//]: # (+ under the app name (xoutaim.breren.com), so a rename means updating   )
+[//]: # (+ BOTH the product-name mentions AND every xoutaim.breren.com/          )
+[//]: # (+ privacy@xoutaim.breren.com reference, not just the former.           )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Privacy Policy — Xoutaim
 
-**Status: DRAFT.** Placeholders below (`[COMPANY NAME]`, `[DOMAIN]`,
-`[CONTACT EMAIL]`, `[EFFECTIVE DATE]`, `[JURISDICTION]`) need real values
-once the umbrella domain and company name are decided (see
-`docs/backlog.md`, Infrastructure section). Have a lawyer review before
-publishing or linking this from a store listing — this draft reflects what
-the app actually does today, but isn't a substitute for legal sign-off.
+**Status: DRAFT.** Company is set (Breren); domain/contact are scoped under
+the current app name (xoutaim.breren.com, privacy@xoutaim.breren.com).
+Still open: `[EFFECTIVE DATE]`, `[HOSTING PROVIDER]`, `[JURISDICTION]` —
+fill in once hosting is chosen (see `docs/backlog.md`, Infrastructure /
+Publishing sections). Have a lawyer review before publishing or linking
+this from a store listing — this draft reflects what the app actually does
+today, but isn't a substitute for legal sign-off.
+
+**Note:** the app is currently named "Xoutaim" but a rename is planned.
+Because the domain is `xoutaim.breren.com` (app-name subdomain, not a bare
+`breren.com`), a rename means updating the product name **and** every
+domain/email reference in this document — the company (Breren) is the only
+thing that stays fixed.
 
 _Last updated: [EFFECTIVE DATE]_
 
 ## Who we are
 
 Xoutaim ("Xoutaim", "we", "us") is a personal media tracker for films, TV
-shows, books, and YouTube videos, operated by [COMPANY NAME]. This policy
-covers the Xoutaim mobile apps, web app, and backend service. If you have
-questions about this policy or your data, contact us at [CONTACT EMAIL].
+shows, books, and YouTube videos, operated by Breren. This policy covers
+the Xoutaim mobile apps, web app, and backend service. If you have
+questions about this policy or your data, contact us at
+privacy@xoutaim.breren.com.
 
 ## What we collect
 
@@ -86,7 +98,7 @@ beyond running and securing the app.
 ## How long we keep it
 
 Account and library data is kept for as long as your account exists.
-Deleting your account (in-app, or via a request to [CONTACT EMAIL]) removes
+Deleting your account (in-app, or via a request to privacy@xoutaim.breren.com) removes
 your user record and all associated library entries, images, and
 preferences. IP-based security logs (login attempts, rate-limit strikes)
 are kept only as long as needed for abuse detection and are not tied to
@@ -101,12 +113,12 @@ EU/EEA/UK), you may have the right to:
 - **Correct** inaccurate data (most of this you can already edit directly
   in your profile settings)
 - **Delete** your account and associated data — available directly in the
-  app, or by contacting [CONTACT EMAIL]
+  app, or by contacting privacy@xoutaim.breren.com
 - **Export** your data in a portable format
 - **Object to or restrict** certain processing
 
 To exercise any of these, use the in-app options where available or
-contact us at [CONTACT EMAIL]. We'll respond within the timeframe required
+contact us at privacy@xoutaim.breren.com. We'll respond within the timeframe required
 by applicable law.
 
 ## Children's privacy
@@ -115,13 +127,13 @@ Xoutaim is not directed at children under 13 (or the minimum age required
 by your local law, e.g. 16 in some EU member states), and we do not
 knowingly collect personal information from children under that age. If
 you believe a child has created an account, contact us at
-[CONTACT EMAIL] and we'll remove it.
+privacy@xoutaim.breren.com and we'll remove it.
 
 ## Data storage and security
 
 Passwords are stored as salted hashes, never in plaintext. Authentication
 uses short-lived signed tokens (JWT). Uploaded images and account data are
-stored on infrastructure operated by [COMPANY NAME] / [HOSTING PROVIDER],
+stored on infrastructure operated by Breren / [HOSTING PROVIDER],
 located in [JURISDICTION]. We use HTTPS to encrypt data in transit.
 
 No method of storage or transmission is 100% secure; we can't guarantee
@@ -144,4 +156,4 @@ we'll provide additional notice (e.g. in-app).
 ## Contact
 
 Questions, requests, or complaints about this policy or your data:
-[CONTACT EMAIL].
+privacy@xoutaim.breren.com.

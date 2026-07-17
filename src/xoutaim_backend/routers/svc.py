@@ -12,6 +12,12 @@ restart reloads both permabans and active temp bans instead of granting
 amnesty. Guarded by INTERNAL_SERVICE_SECRET, not the admin session — there is
 no browser involved. Deliberately NOT under /internal/, which is honeypot
 bait (see security.HONEYPOT_PREFIXES) that permabans real callers.
+
+GET /bans is also the frontend's steady-state path: past startup, it
+re-pulls this on a long interval (default 60 minutes — permabans never
+expire, so lag doesn't cost anything) instead of asking about individual
+IPs, keeping this frontend-initiated and the backend still unaware the
+frontend exists.
 """
 
 import hmac
