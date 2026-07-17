@@ -1,16 +1,16 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/07/17 09:40:41.259905 )
+[//]: # (+ Revised: 	2026/07/18 00:26:59.410602 )
 [//]: # ( ---------------------------------------------------------------------- )
 
-# Xoutaim Backend
+# Renar Backend
 
-FastAPI backend for Xoutaim — your personal media tracker (films, TV shows, books, YouTube videos and more).
+FastAPI backend for Renar — your personal media tracker (films, TV shows, books, YouTube videos and more).
 
 > Books and YouTube are fully implemented here (endpoints, models, imports),
 > but the current frontend hides their tabs/cards (scope narrowed to
-> tv/movies for now) — see xoutaim-frontend's README.
+> tv/movies for now) — see renar-frontend's README.
 
 ## Setup (uses [uv](https://docs.astral.sh/uv/))
 
@@ -23,7 +23,7 @@ copy .env.example .env   # then edit SECRET_KEY
 
 ```powershell
 uv run alembic upgrade head   # apply database migrations (first run and after every pull)
-uv run uvicorn xoutaim_backend.main:app --reload
+uv run uvicorn renar_backend.main:app --reload
 ```
 
 ## HTTPS
@@ -32,7 +32,7 @@ Local development runs over plain HTTP (traffic never leaves the machine /
 home network). For TLS, uvicorn supports it natively — no proxy needed:
 
 ```powershell
-uv run uvicorn xoutaim_backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem
+uv run uvicorn renar_backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem
 ```
 
 A public deployment should get certificates from the platform or Let's Encrypt.
@@ -45,7 +45,7 @@ the data model and other non-obvious architecture choices.
 
 ## Changing the schema
 
-Edit `src/xoutaim_backend/models.py`, then:
+Edit `src/renar_backend/models.py`, then:
 
 ```powershell
 uv run alembic revision --autogenerate -m "describe the change"

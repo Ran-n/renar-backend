@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 18:47:08.546471
+Revised: 2026/07/18 00:26:58.788297
 
 Admin dashboard: the tile-grid landing page at /admin (or the configured
 admin path).
@@ -165,7 +165,7 @@ def _render_dashboard() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin &middot; xoutaim</title>
+  <title>Admin &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_DASHBOARD_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -180,7 +180,7 @@ def _render_dashboard() -> str:
     </div>
     <div class="brand">
       <span class="brand-name">Admin</span>
-      <span class="brand-sub">xoutaim</span>
+      <span class="brand-sub">renar</span>
     </div>
     <div class="topbar-fill"></div>
     <span class="admin-pill">Admin</span>

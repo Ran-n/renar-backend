@@ -1,13 +1,13 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.275749 )
-[//]: # (+ Revised: 	2026/07/17 09:40:41.489259 )
+[//]: # (+ Revised: 	2026/07/18 00:26:59.839484 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Environment variables
 
 All settings live in `.env` (copy `.env.example` to start) and are read by
-`src/xoutaim_backend/config.py`. Most variables have a safe default baked
+`src/renar_backend/config.py`. Most variables have a safe default baked
 into that file, so `.env` only needs to override what you care about;
 `DATABASE_URL` is the exception and must always be set.
 
@@ -16,7 +16,7 @@ into that file, so `.env` only needs to override what you care about;
 | Variable | Default | What it does |
 |---|---|---|
 | `SECRET_KEY` | dev placeholder | Signs login tokens (JWT). Must be a long random value in any environment other than local dev — the app logs a warning at startup if you leave the default in place, since tokens signed with a known key can be forged. |
-| `DATABASE_URL` | *(required)* | SQLAlchemy Postgres connection string, e.g. `postgresql+psycopg://user:password@host:5432/xoutaim`. |
+| `DATABASE_URL` | *(required)* | SQLAlchemy Postgres connection string, e.g. `postgresql+psycopg://user:password@host:5432/renar`. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` (7 days) | How long a login session stays valid before the client must log in again. |
 | `CORS_ORIGINS` | `["http://localhost:8550", "http://127.0.0.1:8550"]` | Browser origins allowed to call the API (JSON list). Add your deployed frontend's URL here; the mobile/desktop app isn't a browser so it isn't affected by CORS. |
 
@@ -45,7 +45,7 @@ enabled and scheduled from the admin panel's Periodic Tasks page
 |---|---|---|
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | empty | HTTP Basic credentials for the admin panel. The panel returns 503 until **both** are set — there's no way to accidentally expose it with a blank password. |
 | `ADMIN_PATH` | `/admin` | URL the admin panel is served at. Renaming it to something unguessable (e.g. `/nimda`, `/panel-x7k2`) is the main defense for this endpoint — see below, the *default* `/admin` path then automatically becomes a honeypot that permabans anyone who requests it. |
-| `INTERNAL_SERVICE_SECRET` | empty | Shared secret for `/svc/bans` (see [anti-abuse.md](anti-abuse.md#sharing-bans-with-the-frontend)), which lets the xoutaim-frontend web server's own anti-abuse guard read and add to this server's `banned_ips` table. Empty means the endpoints stay 404 to everyone, same posture as an unset admin panel. Must match `XOUTAIM_INTERNAL_SECRET` in the frontend's `.env`. |
+| `INTERNAL_SERVICE_SECRET` | empty | Shared secret for `/svc/bans` (see [anti-abuse.md](anti-abuse.md#sharing-bans-with-the-frontend)), which lets the renar-frontend web server's own anti-abuse guard read and add to this server's `banned_ips` table. Empty means the endpoints stay 404 to everyone, same posture as an unset admin panel. Must match `RENAR_INTERNAL_SECRET` in the frontend's `.env`. |
 
 ## Anti-abuse
 

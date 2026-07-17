@@ -10,8 +10,8 @@ the 404/422 paths — the pieces that don't depend on real Data API access.
 
 import pytest
 
-from xoutaim_backend.config import settings
-from xoutaim_backend.routers import youtube as youtube_router
+from renar_backend.config import settings
+from renar_backend.routers import youtube as youtube_router
 
 VIDEO_ITEM = {
     "snippet": {

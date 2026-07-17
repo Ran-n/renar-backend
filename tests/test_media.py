@@ -7,8 +7,8 @@ Revised: 2026/07/16 09:54:31.767220
 Media library CRUD, filters, ownership, and community ratings.
 """
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import EpisodeWatch, Notification, WatchEvent
+from renar_backend.database import SessionLocal
+from renar_backend.models import EpisodeWatch, Notification, WatchEvent
 
 
 def _create(client, headers, **overrides) -> dict:

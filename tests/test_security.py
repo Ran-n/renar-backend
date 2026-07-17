@@ -16,11 +16,11 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from xoutaim_backend.config import settings
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import BannedIP
-from xoutaim_backend.users import security
-from xoutaim_backend.users.security import (
+from renar_backend.config import settings
+from renar_backend.database import SessionLocal
+from renar_backend.models import BannedIP
+from renar_backend.users import security
+from renar_backend.users.security import (
     AbuseGuardMiddleware,
     OriginCheckMiddleware,
     SecurityHeadersMiddleware,

@@ -1,12 +1,12 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.135465 )
-[//]: # (+ Revised: 	2026/07/17 09:40:41.412525 )
+[//]: # (+ Revised: 	2026/07/18 00:26:59.648486 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Anti-abuse system
 
-Implemented in `src/xoutaim_backend/security.py`, wired in as middleware in
+Implemented in `src/renar_backend/security.py`, wired in as middleware in
 `main.py`. This exists because the API is exposed to the open internet and
 attracts constant scanner/bot traffic, while still needing to never punish a
 real user. Everything below is tuned around one rule: **many legitimate users
@@ -128,7 +128,7 @@ from `<ADMIN_PATH>/bans`.
 
 ## Sharing bans with the frontend
 
-The API isn't the only internet-facing surface — `xoutaim-frontend`'s web
+The API isn't the only internet-facing surface — `renar-frontend`'s web
 server (`uv run web`, a Flet/FastAPI app on its own port) is exposed
 directly too, and gets scanned independently of the API. It runs its own
 scaled-down copy of this guard (`anti_abuse.py` in that repo: honeypots,
@@ -143,7 +143,7 @@ in `routers/svc.py` — the frontend has no persistence of its own at all:
   bans (`load_active_temp_bans()`). The frontend preloads this on startup so
   a restart doesn't grant amnesty to an IP either surface already banned,
   temporarily or permanently. Past startup, it also re-pulls this on a long
-  interval (default 60 minutes — `XOUTAIM_ABUSE_SYNC_INTERVAL_SECONDS` on
+  interval (default 60 minutes — `RENAR_ABUSE_SYNC_INTERVAL_SECONDS` on
   the frontend) to pick up a ban recorded only on this server (e.g. its own
   honeypot/admin bait) that the frontend was never told about directly. Only
   the permaban list is merged from that periodic refresh — temp bans are
@@ -213,7 +213,7 @@ same pattern as `app_counters`) so they can be changed from the admin panel at
 `<ADMIN_PATH>/settings` without a server restart. `abuse_guard_enabled` is the
 one deliberate exception — see "Operating it" above.
 
-`src/xoutaim_backend/site_settings.py` provides:
+`src/renar_backend/site_settings.py` provides:
 
 - `get_site_settings(db)` — reads or creates the singleton; on first call it
   seeds the row from the corresponding `config.py` / `.env` defaults so existing

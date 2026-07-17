@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from xoutaim_backend._devserver import ensure_port_free, exit_when_orphaned
-from xoutaim_backend.config import _ROOT, Settings
+from renar_backend._devserver import ensure_port_free, exit_when_orphaned
+from renar_backend.config import _ROOT, Settings
 
 # --- port-in-use probe --------------------------------------------------------
 
@@ -66,7 +66,7 @@ import time
 
 
 def child():
-    from xoutaim_backend._devserver import exit_when_orphaned
+    from renar_backend._devserver import exit_when_orphaned
     exit_when_orphaned()
     time.sleep(60)  # without the watchdog this outlives the test
 

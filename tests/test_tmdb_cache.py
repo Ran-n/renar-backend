@@ -14,12 +14,12 @@ from datetime import date, timedelta
 import pytest
 from fastapi import HTTPException, status
 
-from xoutaim_backend.config import settings
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.media.storage import image_path
-from xoutaim_backend.models import ExternalImage, Image, Notification, Title, TmdbCache
-from xoutaim_backend.social.notifier import check_new_episodes
-from xoutaim_backend.tmdb import tmdb_store
+from renar_backend.config import settings
+from renar_backend.database import SessionLocal
+from renar_backend.media.storage import image_path
+from renar_backend.models import ExternalImage, Image, Notification, Title, TmdbCache
+from renar_backend.social.notifier import check_new_episodes
+from renar_backend.tmdb import tmdb_store
 
 RAW_TV = {
     "name": "The Show",
@@ -209,7 +209,7 @@ def test_notifier_persists_status_and_skips_ended_shows(client, alice, monkeypat
 
 
 def test_image_proxy_stores_in_image_store(client, monkeypatch, db):
-    from xoutaim_backend.tmdb import tmdb_http
+    from renar_backend.tmdb import tmdb_http
 
     payload = b"x" * 600  # anything past the placeholder threshold
 

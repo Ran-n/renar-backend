@@ -16,7 +16,7 @@ import time
 import httpx
 import pytest
 
-from xoutaim_backend.routers import books as books_router
+from renar_backend.routers import books as books_router
 
 # ---------------------------------------------------------------------------
 # Helpers

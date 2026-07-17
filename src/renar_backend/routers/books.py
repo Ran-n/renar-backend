@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.719597
-Revised: 2026/07/16 09:54:30.884085
+Revised: 2026/07/18 00:26:58.708084
 
 Book catalog via Open Library (free, no API key).
 """
@@ -34,7 +34,7 @@ _cache = TTLCache(ttl_seconds=CACHE_TTL_SECONDS, max_entries=CACHE_MAX_ENTRIES)
 _http = httpx.Client(
     timeout=15,
     follow_redirects=True,  # covers.openlibrary.org 302s to archive.org
-    headers={"User-Agent": "Xoutaim/0.1 (personal media tracker)"},
+    headers={"User-Agent": "Renar/0.1 (personal media tracker)"},
     limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
 )
 

@@ -7,7 +7,7 @@ Revised: 2026/07/17 19:32:52.574391
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
 The environment overrides MUST be set before anything imports
-xoutaim_backend.config, because Settings() is instantiated at import time.
+renar_backend.config, because Settings() is instantiated at import time.
 
 Tests run against the local Postgres server (see docs on the `reska`
 scratch account), in a schema unique to this test run so concurrent runs
@@ -20,9 +20,9 @@ import tempfile
 import uuid
 from pathlib import Path
 
-_TMP = Path(tempfile.mkdtemp(prefix="xoutaim-tests-"))
+_TMP = Path(tempfile.mkdtemp(prefix="renar-tests-"))
 _PG_BASE_URL = "postgresql+psycopg://reska:reska@127.0.0.1:5432/reska"
-_SCHEMA = f"xoutaim_test_{uuid.uuid4().hex[:8]}"
+_SCHEMA = f"renar_test_{uuid.uuid4().hex[:8]}"
 os.environ["DATABASE_URL"] = f"{_PG_BASE_URL}?options=-csearch_path%3D{_SCHEMA}"
 os.environ["MEDIA_DIR"] = str(_TMP / "media")
 os.environ["SECRET_KEY"] = "test-secret-key-0123456789abcdef"
@@ -39,9 +39,9 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 
-from xoutaim_backend.config import settings  # noqa: E402
-from xoutaim_backend.database import Base, engine  # noqa: E402
-from xoutaim_backend.main import app  # noqa: E402
+from renar_backend.config import settings  # noqa: E402
+from renar_backend.database import Base, engine  # noqa: E402
+from renar_backend.main import app  # noqa: E402
 
 with create_engine(_PG_BASE_URL).begin() as _conn:
     _conn.execute(text(f'CREATE SCHEMA "{_SCHEMA}"'))
@@ -79,7 +79,7 @@ def _fresh_db():
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     engine.dispose()
-    from xoutaim_backend import site_settings, task_runs
+    from renar_backend import site_settings, task_runs
 
     task_runs._enabled_cache = None  # each test gets a fresh schema; don't leak a prior test's cache
     site_settings._cache_ts = 0.0  # same: don't serve a cached row from the just-dropped schema

@@ -12,8 +12,8 @@ from datetime import UTC, datetime, timedelta
 
 from conftest import PASSWORD, login, register
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import (
+from renar_backend.database import SessionLocal
+from renar_backend.models import (
     Comment,
     CommentReport,
     EpisodeWatch,

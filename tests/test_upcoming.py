@@ -11,8 +11,8 @@ these tests seed that data directly. Also covers the film-release poller.
 
 from datetime import date, timedelta
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.social.notifier import check_upcoming_films
+from renar_backend.database import SessionLocal
+from renar_backend.social.notifier import check_upcoming_films
 
 
 def _add(client, headers, **kwargs) -> dict:
@@ -23,7 +23,7 @@ def _add(client, headers, **kwargs) -> dict:
 
 
 def _set_title_for_entry(client, headers, item_id: int, **fields) -> None:
-    from xoutaim_backend.models import LibraryEntry
+    from renar_backend.models import LibraryEntry
 
     db = SessionLocal()
     try:

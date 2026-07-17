@@ -8,8 +8,8 @@ Shared Title resolution and normalized genres: one Genre row per name,
 linked to titles through title_genres, round-tripped as list[str].
 """
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import Genre, Title
+from renar_backend.database import SessionLocal
+from renar_backend.models import Genre, Title
 
 
 def _create(client, headers, **overrides) -> dict:

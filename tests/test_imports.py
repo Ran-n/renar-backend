@@ -12,9 +12,9 @@ import csv
 import io
 import zipfile
 
-import xoutaim_backend.routers.imports as imports_mod
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import EpisodeWatch, LibraryEntry, Title
+import renar_backend.routers.imports as imports_mod
+from renar_backend.database import SessionLocal
+from renar_backend.models import EpisodeWatch, LibraryEntry, Title
 
 
 def _csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/17 19:45:57.192199 )
+[//]: # (+ Revised: 	2026/07/18 01:26:50.207588 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -17,6 +17,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Admin panel: `trust_proxy_headers`/`exempt_ips` are now live-editable from
   `<ADMIN_PATH>/settings` (Network & exemptions section), backed by the
   `site_settings` DB row instead of requiring an `.env` edit + restart
+
+### Changed
+
+- Project renamed from Xoutaim to Renar: package `xoutaim_backend` →
+  `renar_backend`, PyPI/project name `xoutaim-backend` → `renar-backend`,
+  `INTERNAL_SERVICE_SECRET` counterpart env var on the frontend
+  `XOUTAIM_INTERNAL_SECRET` → `RENAR_INTERNAL_SECRET`. Subdomain decided as
+  `renar.breren.com` (see `docs/backlog.md`, Infrastructure section)
 
 ### Fixed
 
@@ -59,7 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Consolidated `DEFAULT_FILM_RUNTIME` / `DEFAULT_EPISODE_RUNTIME`, previously duplicated
-  in `db_triggers.py` and `routers/stats.py`, into a single `src/xoutaim_backend/constants.py`
+  in `db_triggers.py` and `routers/stats.py`, into a single `src/renar_backend/constants.py`
   source of truth; `routers/social.py` now imports from there directly instead of via
   `routers/stats.py`
 - Admin Invite Codes page (`routers/admin/`): revoked status pill now uses a distinct
@@ -124,7 +132,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `site_settings` singleton table: DB-backed runtime settings for all
   anti-abuse tunables and registration flags, editable live from
   `<ADMIN_PATH>/settings` (no restart needed) — see `docs/anti-abuse.md`
-  and `src/xoutaim_backend/site_settings.py`
+  and `src/renar_backend/site_settings.py`
 - Admin panel: **Site Settings** tile and page (`GET/POST <ADMIN_PATH>/settings`)
   with toggle controls for registration mode and number inputs for every
   rate-limit/ban threshold

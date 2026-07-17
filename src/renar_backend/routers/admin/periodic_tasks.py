@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 18:08:58.440732
+Revised: 2026/07/18 00:26:59.018518
 
 Admin periodic-tasks page: cards grouped by media type (TV Shows, Films,
 Security), one card per background task, each with its own enable toggle,
@@ -154,7 +154,7 @@ def _render_periodic_tasks(runs: dict) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Periodic Tasks &middot; xoutaim</title>
+  <title>Periodic Tasks &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_PAGE_CSS}{_TASKS_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -165,7 +165,7 @@ def _render_periodic_tasks(runs: dict) -> str:
       <div class="logo">&#x23F1;</div>
       <div class="brand">
         <span class="brand-name">Periodic Tasks</span>
-        <span class="brand-sub">xoutaim</span>
+        <span class="brand-sub">renar</span>
       </div>
     </a>
     <div class="topbar-fill"></div>

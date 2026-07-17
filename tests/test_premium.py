@@ -15,9 +15,9 @@ from datetime import timedelta
 from conftest import ADMIN_BASIC as BASIC
 from PIL import Image as PILImage
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import Image, Title, User, utcnow
-from xoutaim_backend.users.premium import PALETTE
+from renar_backend.database import SessionLocal
+from renar_backend.models import Image, Title, User, utcnow
+from renar_backend.users.premium import PALETTE
 
 COLOR = PALETTE[0]
 COLOR2 = PALETTE[1]

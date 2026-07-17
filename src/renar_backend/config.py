@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Repo root in the src layout (src/xoutaim_backend/config.py -> two up).
+# Repo root in the src layout (src/renar_backend/config.py -> two up).
 # Anchoring here instead of the CWD keeps `.env` and a relative MEDIA_DIR
 # working no matter which directory the server was launched from; a
 # non-editable install should set both explicitly (absolute) anyway.

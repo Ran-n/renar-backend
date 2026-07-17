@@ -1,7 +1,7 @@
 [project]
-name = "xoutaim-backend"
+name = "renar-backend"
 version = "0.4.0"
-description = "FastAPI backend for Xoutaim — your personal media tracker."
+description = "FastAPI backend for Renar — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]
 license-files = ["LICENSE"]
@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.scripts]
-be = "xoutaim_backend.__main__:run"
+be = "renar_backend.__main__:run"
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -33,7 +33,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/xoutaim_backend"]
+packages = ["src/renar_backend"]
 
 [tool.pytest.ini_options]
 filterwarnings = [
