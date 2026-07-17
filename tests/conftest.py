@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/07/17 17:57:26.543661
+Revised: 2026/07/17 19:32:52.574391
 
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
@@ -79,9 +79,10 @@ def _fresh_db():
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     engine.dispose()
-    from xoutaim_backend import task_runs
+    from xoutaim_backend import site_settings, task_runs
 
     task_runs._enabled_cache = None  # each test gets a fresh schema; don't leak a prior test's cache
+    site_settings._cache_ts = 0.0  # same: don't serve a cached row from the just-dropped schema
     yield
 
 

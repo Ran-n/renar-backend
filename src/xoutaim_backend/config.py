@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/07/17 18:47:08.268328
+Revised: 2026/07/17 19:32:52.093726
 """
 
 from pathlib import Path
@@ -50,7 +50,17 @@ class Settings(BaseSettings):
     # Limits are per IP, and one IP can be a whole office or CGNAT pool of
     # legitimate users — so limits are generous, throttling (429 + Retry-After)
     # is the normal response, and bans are reserved for unambiguous scanners.
-    abuse_guard_enabled: bool = True  # tests turn this off (single-IP traffic)
+    #
+    # `abuse_guard_enabled` gates whether AbuseGuardMiddleware is installed on
+    # the app at all (see main.py) — a boot-time decision. Tests turn this off
+    # (single-IP traffic); toggling it in production means an `.env` edit +
+    # restart, not an admin-panel action.
+    #
+    # Everything else below is only a seed default + DB-unreachable fallback:
+    # site_settings.get_site_settings() copies these into the `site_settings`
+    # DB row on first read, and the admin panel (<ADMIN_PATH>/settings) owns
+    # the live value from then on — editable without a restart or `.env` edit.
+    abuse_guard_enabled: bool = True
     enable_docs: bool = False  # /docs + /openapi.json advertise the API surface to scanners
     registration_open: bool = True
     trust_proxy_headers: bool = False  # true ONLY behind a reverse proxy/CDN (X-Forwarded-For)

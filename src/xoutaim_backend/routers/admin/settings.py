@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 18:47:08.614216
+Revised: 2026/07/17 19:32:52.480946
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
@@ -97,6 +97,15 @@ _SETTINGS_CSS = """
       width: 100%;
     }
     .settings-field input[type=number]:focus { outline: none; border-color: var(--accent); }
+    .settings-field input[type=text] {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      border-radius: 7px; padding: .35rem .6rem; font-size: .82rem; font-family: inherit;
+      width: 100%;
+    }
+    .settings-field input[type=text]:focus { outline: none; border-color: var(--accent); }
+    .settings-warning {
+      font-size: .72rem; color: #fb4934; margin-top: .5rem;
+    }
     .settings-save {
       background: var(--accent); border: 1px solid var(--accent); color: var(--bg);
       border-radius: 7px; padding: .5rem 1.3rem; font-size: .82rem; font-weight: 600;
@@ -112,6 +121,9 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
 
     def nv(val: int) -> str:
         return html.escape(str(val))
+
+    def sv(val: str) -> str:
+        return html.escape(val)
 
     def toggle(name: str, field_id: str, value: bool, label: str, desc: str) -> str:
         return f"""
@@ -274,6 +286,35 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
       </div>
 
       <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x1F310;</span>Network &amp; exemptions</div>
+        {
+        toggle(
+            "trust_proxy_headers",
+            "trust_proxy",
+            ss.trust_proxy_headers,
+            "Trust X-Forwarded-For",
+            "Only turn this on when there's an actual reverse proxy/CDN in front of this server.",
+        )
+    }
+        <p class="settings-warning">
+          &#x26A0; Without a real proxy, that header is entirely client-supplied &mdash;
+          turning this on lets anyone spoof their IP to dodge every limit above,
+          or get an innocent IP (the proxy's own) banned.
+        </p>
+        <div class="settings-grid" style="margin-top:.9rem">
+          <div class="settings-field" style="grid-column: 1 / -1">
+            <label for="exempt_ips">Exempt IPs (comma-separated)</label>
+            <input type="text" id="exempt_ips" name="exempt_ips"
+                   value="{sv(", ".join(ss.exempt_ips))}" placeholder="127.0.0.1, ::1">
+          </div>
+        </div>
+        <p class="settings-hint">
+          These IPs skip rate limiting, probing detection, and bans entirely &mdash;
+          reserve this for monitoring or local tooling, never a shared/public IP.
+        </p>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-title"><span class="icon">&#x23F1;</span>Periodic background tasks</div>
         <p class="settings-hint">
           Episode check, episode history sync, film release check, and strike
@@ -315,6 +356,8 @@ def save_settings(
     probe_window_minutes: int = Form(...),
     ban_minutes: int = Form(...),
     strike_ban_threshold: int = Form(...),
+    trust_proxy_headers: str | None = Form(default=None),
+    exempt_ips: str = Form(default=""),
     admin_user: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
@@ -332,6 +375,8 @@ def save_settings(
     ss.probe_window_minutes = probe_window_minutes
     ss.ban_minutes = ban_minutes
     ss.strike_ban_threshold = strike_ban_threshold
+    ss.trust_proxy_headers = trust_proxy_headers == "1"
+    ss.exempt_ips = [ip.strip() for ip in exempt_ips.split(",") if ip.strip()]
     db.commit()
     _site_settings_mod.invalidate()
     _log.info(
