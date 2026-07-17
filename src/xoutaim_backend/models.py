@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/16 09:54:30.554703
+Revised: 2026/07/16 13:30:58.689263
 """
 
 import enum
@@ -215,6 +215,65 @@ class AppCounters(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     total_users: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class SiteSettings(Base):
+    """Singleton row (id is always 1) holding admin-tunable runtime settings.
+
+    Anti-abuse limits and registration flags live here so they can be changed
+    from the admin panel without a server restart or an `.env` edit. Values
+    are seeded from config.py defaults on the first read (upsert-on-read in
+    site_settings.get_site_settings), then owned by the database.
+    """
+
+    __tablename__ = "site_settings"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_site_settings_singleton"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invite_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    registration_open: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    auth_rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=30)
+    register_per_hour_per_ip: Mapped[int] = mapped_column(Integer, default=20)
+    rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=600)
+    flood_ban_per_minute: Mapped[int] = mapped_column(Integer, default=2000)
+    login_backoff_threshold: Mapped[int] = mapped_column(Integer, default=5)
+    login_backoff_account_threshold: Mapped[int] = mapped_column(Integer, default=30)
+    login_backoff_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    probe_ban_threshold: Mapped[int] = mapped_column(Integer, default=12)
+    probe_window_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    ban_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    strike_ban_threshold: Mapped[int] = mapped_column(Integer, default=5)
+    episode_check_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    film_check_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    bans_check_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+
+class InviteCode(Base):
+    """Admin-generated registration token for invite-only mode.
+
+    A code is valid when: not revoked, (max_uses is None or uses < max_uses),
+    and (expires_at is None or expires_at > utcnow()). max_uses is None for
+    an unlimited-use code (e.g. a public "join us" link).
+
+    created_by_user_id is None when generated from the admin panel;
+    the field is here for future user-generated referral codes.
+    """
+
+    __tablename__ = "invite_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    # No Python-side default: every caller (admin panel, tests) passes this
+    # explicitly, and a default=1 here would silently override an explicit
+    # None (unlimited) at flush time.
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    uses: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_user_id])
 
 
 class LoginEvent(Base):

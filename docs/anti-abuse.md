@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.135465 )
-[//]: # (+ Revised: 	2026/07/12 17:25:56.318363 )
+[//]: # (+ Revised: 	2026/07/17 09:40:41.412525 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Anti-abuse system
@@ -142,7 +142,13 @@ in `routers/svc.py` — the frontend has no persistence of its own at all:
 - `GET /svc/bans` — returns both permabanned IPs and currently-active temp
   bans (`load_active_temp_bans()`). The frontend preloads this on startup so
   a restart doesn't grant amnesty to an IP either surface already banned,
-  temporarily or permanently.
+  temporarily or permanently. Past startup, it also re-pulls this on a long
+  interval (default 60 minutes — `XOUTAIM_ABUSE_SYNC_INTERVAL_SECONDS` on
+  the frontend) to pick up a ban recorded only on this server (e.g. its own
+  honeypot/admin bait) that the frontend was never told about directly. Only
+  the permaban list is merged from that periodic refresh — temp bans are
+  intentionally left out of it (see below) — and it's frontend-initiated,
+  so this server never needs to know the frontend exists.
 - `POST /svc/bans` — the frontend calls this the moment its own guard decides
   to permaban an IP (honeypot hit — zero false-positive risk, so this always
   goes straight to a permaban), so that IP is blocked here too if it ever
@@ -153,6 +159,13 @@ in `routers/svc.py` — the frontend has no persistence of its own at all:
   offenses double it (capped at 24h), and hitting `STRIKE_BAN_THRESHOLD`
   converts it to a permaban — automatically, via the same `strikes` row an
   API-side offense against the same IP would use.
+
+Temp bans made on one surface but not the other are deliberately *not*
+chased down by the periodic refresh: they already expire on their own
+(60 min default, doubling per repeat offense), so a delayed sync could
+easily arrive after the ban's already lapsed — not worth the extra
+complexity. Permabans have no such expiry, so lag there costs nothing;
+that's why only they're worth syncing periodically.
 
 Both `/svc/bans` and `/svc/strikes` require the `X-Internal-Secret` header to
 match `INTERNAL_SERVICE_SECRET` exactly (constant-time compare); a
@@ -183,3 +196,44 @@ as this server's: a scanner just re-earns them within seconds of a restart.
 - All tunables are environment variables — see
   [environment-variables.md](environment-variables.md) for the full list of
   defaults.
+
+## DB-backed runtime settings
+
+The twelve anti-abuse tunables and the two registration flags (`registration_open`,
+`invite_only`) are stored in a `site_settings` singleton row (id always 1,
+same pattern as `app_counters`) so they can be changed from the admin panel at
+`<ADMIN_PATH>/settings` without a server restart.
+
+`src/xoutaim_backend/site_settings.py` provides:
+
+- `get_site_settings(db)` — reads or creates the singleton; on first call it
+  seeds the row from the corresponding `config.py` / `.env` defaults so existing
+  deployments keep their tuned values.
+- `current()` — 5-second TTL in-process cache used by `AbuseGuardMiddleware`
+  (which runs on every request) to avoid a DB hit per request.  The admin POST
+  handler calls `invalidate()` after committing so the new values propagate
+  within the TTL, not just after it.
+- Defensive fallback: if the `site_settings` table doesn't exist (migration not
+  run, fresh checkout) `current()` falls back to the config defaults and retries
+  on the next call rather than crashing every request.
+
+## Invite-only registration
+
+When `site_settings.invite_only` is `true`, every `POST /auth/register` request
+must include a valid `invite_code` field.  A code is valid when:
+
+- it exists in the `invite_codes` table,
+- it is not revoked (`revoked = false`),
+- `uses < max_uses`, and
+- `expires_at` is `NULL` or in the future.
+
+On a successful registration the code's `uses` counter is incremented in the
+**same transaction** as the new user row, so a crash or race can never consume a
+code without creating the user, or create a user without consuming the code.
+
+Codes are generated from the admin panel at `<ADMIN_PATH>/invites` (max uses and
+optional expiry configurable per code).  The revoke button on that page marks a
+code as `revoked = true`; already-used slots are not refunded.
+
+`invite_only` and `registration_open` are independent: if `registration_open` is
+`false`, registration is closed entirely regardless of any invite code.

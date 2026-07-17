@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 17:01:06.338846
-Revised: 2026/07/12 17:22:33.325226
+Revised: 2026/07/16 13:43:22.558615
 
 The /svc/bans and /svc/strikes endpoints the frontend's own anti-abuse guard
 uses to share this server's persisted ban/strike state.
@@ -12,10 +12,10 @@ import time
 
 import pytest
 
-from xoutaim_backend import security
+from xoutaim_backend import security, site_settings
 from xoutaim_backend.config import settings
 from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import BannedIP, Strike
+from xoutaim_backend.models import BannedIP, SiteSettings, Strike
 
 SECRET = "test-internal-secret"
 
@@ -98,6 +98,14 @@ def test_strike_shows_up_in_temp_bans_list(client):
 
 def test_repeated_strikes_escalate_to_permaban(client, monkeypatch):
     monkeypatch.setattr(settings, "strike_ban_threshold", 3)
+    with SessionLocal() as db:
+        row = db.get(SiteSettings, 1)
+        if row is None:
+            row = SiteSettings(id=1)
+            db.add(row)
+        row.strike_ban_threshold = 3
+        db.commit()
+    site_settings.invalidate()
     ip = "198.51.100.7"
     for _ in range(2):
         r = client.post(

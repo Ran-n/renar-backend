@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.275749 )
-[//]: # (+ Revised: 	2026/07/13 13:42:10.397105 )
+[//]: # (+ Revised: 	2026/07/17 09:40:41.489259 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Environment variables
@@ -47,26 +47,31 @@ into that file, so `.env` only needs to override what you care about;
 ## Anti-abuse
 
 See [anti-abuse.md](anti-abuse.md) for the full explanation of *why* these
-values are what they are. Quick reference:
+values are what they are.  Most of the tunables below **have moved to the
+database** (see [anti-abuse.md — DB-backed settings](anti-abuse.md#db-backed-runtime-settings))
+and are now controlled from the admin panel at `{ADMIN_PATH}/settings` without
+a restart.  The `.env` values in this section are only used as **seed defaults**
+when the `site_settings` row is first created (i.e. on a fresh deployment); from
+that point on the database owns them.  Quick reference:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ABUSE_GUARD_ENABLED` | `true` | Master switch for all rate limiting/banning. Tests turn it off since test traffic all comes from one IP. |
-| `ENABLE_DOCS` | `false` | Serves `/docs` and `/openapi.json` when `true`. Leave off in any internet-facing deployment — it hands a full API map to scanners. |
-| `REGISTRATION_OPEN` | `true` | Set `false` to stop new signups without touching anything else. |
-| `TRUST_PROXY_HEADERS` | `false` | Set `true` **only** when running behind a reverse proxy/CDN (nginx, Caddy, Cloudflare) — it makes the app trust `X-Forwarded-For` for the real client IP. Leave `false` otherwise; that header is client-controlled and trusting it without a proxy lets anyone spoof their IP to dodge rate limits. |
-| `EXEMPT_IPS` | `["127.0.0.1", "::1"]` | IPs (JSON list) that skip rate limiting/banning entirely — for monitoring or local tooling. |
-| `RATE_LIMIT_PER_MINUTE` | `600` | Soft per-IP ceiling. Over it: `429` + `Retry-After`, never a ban. |
-| `FLOOD_BAN_PER_MINUTE` | `2000` | Hard ceiling far above normal traffic. Over it: temporary ban. |
-| `AUTH_RATE_LIMIT_PER_MINUTE` | `30` | Requests per IP per minute to `/auth/login` and `/auth/register` (throttle only). |
-| `REGISTER_PER_HOUR_PER_IP` | `20` | New accounts per IP per hour (throttle only). |
-| `LOGIN_BACKOFF_THRESHOLD` | `5` | Failed logins for one (account, IP) pair before that pair gets a cooldown. |
-| `LOGIN_BACKOFF_ACCOUNT_THRESHOLD` | `30` | Failed logins for one account across *all* IPs before the account itself gets a cooldown (blunts distributed credential stuffing). |
-| `LOGIN_BACKOFF_MINUTES` | `15` | Length of the login cooldown. |
-| `PROBE_BAN_THRESHOLD` | `12` | Requests to paths that match no route at all, within the window below, before a temporary ban. |
-| `PROBE_WINDOW_MINUTES` | `10` | Rolling window for probe counting. |
-| `BAN_MINUTES` | `60` | First-offense temporary ban length; doubles for each repeat offense within 24h of the last one, capped at 24h. |
-| `STRIKE_BAN_THRESHOLD` | `5` | Persisted offenses (see the `strikes` table) an IP can accumulate before a temporary ban escalates into a permanent one. Streak resets after 24h with no new offense; rows untouched for 30 days are pruned. |
+| `ABUSE_GUARD_ENABLED` | `true` | Master switch for all rate limiting/banning. Tests turn it off since test traffic all comes from one IP. **Stays in `.env`** (infrastructure flag, not runtime-tunable). |
+| `ENABLE_DOCS` | `false` | Serves `/docs` and `/openapi.json` when `true`. Leave off in any internet-facing deployment — it hands a full API map to scanners. **Stays in `.env`**. |
+| `REGISTRATION_OPEN` | `true` | **Seed default only.** The live value is in `site_settings.registration_open`, editable from `{ADMIN_PATH}/settings`. |
+| `TRUST_PROXY_HEADERS` | `false` | Set `true` **only** when running behind a reverse proxy/CDN (nginx, Caddy, Cloudflare) — it makes the app trust `X-Forwarded-For` for the real client IP. Leave `false` otherwise; that header is client-controlled and trusting it without a proxy lets anyone spoof their IP to dodge rate limits. **Stays in `.env`**. |
+| `EXEMPT_IPS` | `["127.0.0.1", "::1"]` | IPs (JSON list) that skip rate limiting/banning entirely — for monitoring or local tooling. **Stays in `.env`**. |
+| `RATE_LIMIT_PER_MINUTE` | `600` | **Seed default only.** Live value in `site_settings`. |
+| `FLOOD_BAN_PER_MINUTE` | `2000` | **Seed default only.** Live value in `site_settings`. |
+| `AUTH_RATE_LIMIT_PER_MINUTE` | `30` | **Seed default only.** Live value in `site_settings`. |
+| `REGISTER_PER_HOUR_PER_IP` | `20` | **Seed default only.** Live value in `site_settings`. |
+| `LOGIN_BACKOFF_THRESHOLD` | `5` | **Seed default only.** Live value in `site_settings`. |
+| `LOGIN_BACKOFF_ACCOUNT_THRESHOLD` | `30` | **Seed default only.** Live value in `site_settings`. |
+| `LOGIN_BACKOFF_MINUTES` | `15` | **Seed default only.** Live value in `site_settings`. |
+| `PROBE_BAN_THRESHOLD` | `12` | **Seed default only.** Live value in `site_settings`. |
+| `PROBE_WINDOW_MINUTES` | `10` | **Seed default only.** Live value in `site_settings`. |
+| `BAN_MINUTES` | `60` | **Seed default only.** Live value in `site_settings`. |
+| `STRIKE_BAN_THRESHOLD` | `5` | **Seed default only.** Live value in `site_settings`. |
 
 ## Notes
 

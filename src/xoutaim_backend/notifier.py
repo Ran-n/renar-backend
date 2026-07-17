@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/07/14 23:30:05.226775
+Revised: 2026/07/17 08:21:15.083576
 
 Background checker: creates notifications when tracked shows air new episodes.
 """
@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from . import site_settings
 from .config import settings
 from .database import SessionLocal
 from .models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus
@@ -201,19 +202,26 @@ def check_films_once() -> int:
 async def run_periodic() -> None:
     await asyncio.sleep(15)  # let the app finish booting
     while True:
-        try:
-            n = await asyncio.to_thread(check_once)
-            _log.info("episode check done: %d new notifications", n)
-        except Exception:
-            _log.exception("episode check failed")
-        try:
-            m = await asyncio.to_thread(check_films_once)
-            _log.info("film release check done: %d titles refreshed", m)
-        except Exception:
-            _log.exception("film release check failed")
-        try:
-            k = await asyncio.to_thread(sync_episode_history_once)
-            _log.info("episode history sync done: %d shows checked", k)
-        except Exception:
-            _log.exception("episode history sync failed")
+        ss = site_settings.current()
+        if not ss.episode_check_enabled:
+            _log.info("episode check skipped: disabled in site settings")
+        else:
+            try:
+                n = await asyncio.to_thread(check_once)
+                _log.info("episode check done: %d new notifications", n)
+            except Exception:
+                _log.exception("episode check failed")
+            try:
+                k = await asyncio.to_thread(sync_episode_history_once)
+                _log.info("episode history sync done: %d shows checked", k)
+            except Exception:
+                _log.exception("episode history sync failed")
+        if not ss.film_check_enabled:
+            _log.info("film check skipped: disabled in site settings")
+        else:
+            try:
+                m = await asyncio.to_thread(check_films_once)
+                _log.info("film release check done: %d titles refreshed", m)
+            except Exception:
+                _log.exception("film release check failed")
         await asyncio.sleep(settings.episode_check_minutes * 60)

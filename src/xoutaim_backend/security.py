@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/12 17:22:33.239004
+Revised: 2026/07/16 13:35:29.823451
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -44,6 +44,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Match
 
+from . import site_settings
 from .config import settings
 from .database import SessionLocal
 from .models import BannedIP, Strike
@@ -175,18 +176,19 @@ def strike_and_maybe_ban(ip: str, reason: str) -> tuple[int, float | None]:
                 strike.reason = reason
                 strike.last_offense_at = now_dt
             count = strike.count
-            if count >= settings.strike_ban_threshold:
+            ss = site_settings.current()
+            if count >= ss.strike_ban_threshold:
                 strike.banned_until = None
                 db.commit()
                 return count, None
-            duration = min(settings.ban_minutes * 2 ** (count - 1), 24 * 60)  # escalates, cap 24h
+            duration = min(ss.ban_minutes * 2 ** (count - 1), 24 * 60)  # escalates, cap 24h
             until_dt = now_dt + timedelta(minutes=duration)
             strike.banned_until = until_dt
             db.commit()
             return count, time.time() + duration * _MINUTE
     except Exception:
         _log.exception("could not persist strike for %s (falling back to a single-offense ban)", ip)
-        return 1, time.time() + settings.ban_minutes * _MINUTE
+        return 1, time.time() + site_settings.current().ban_minutes * _MINUTE
 
 
 def load_active_temp_bans() -> dict[str, float]:
@@ -213,6 +215,8 @@ def load_active_temp_bans() -> dict[str, float]:
 def _cleanup_old_strikes(now: float) -> None:
     """Drop strike rows nobody has touched in 30 days, at most once an hour."""
     global _last_strike_cleanup
+    if not site_settings.current().bans_check_enabled:
+        return
     if now - _last_strike_cleanup < _HOUR:
         return
     _last_strike_cleanup = now
@@ -249,12 +253,13 @@ def check_login_allowed(username: str, ip: str) -> None:
     if not settings.abuse_guard_enabled:
         return
     now = time.time()
-    window = settings.login_backoff_minutes * _MINUTE
+    ss = site_settings.current()
+    window = ss.login_backoff_minutes * _MINUTE
     account = _account_key(username)
 
     for tracker, key, limit in (
-        (_login_failures_by_key, f"{account}|{ip}", settings.login_backoff_threshold),
-        (_login_failures_by_account, account, settings.login_backoff_account_threshold),
+        (_login_failures_by_key, f"{account}|{ip}", ss.login_backoff_threshold),
+        (_login_failures_by_account, account, ss.login_backoff_account_threshold),
     ):
         dq = tracker[key]
         _prune(dq, now - window)
@@ -362,13 +367,14 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
 
     def _sweep(self, now: float) -> None:
         """Keep tracking dicts bounded under sustained scanning."""
+        ss = site_settings.current()
         for tracker, window in (
             (self.hits, _MINUTE),
             (self.auth_hits, _MINUTE),
             (self.register_hits, _HOUR),
-            (self.probe_hits, settings.probe_window_minutes * _MINUTE),
-            (_login_failures_by_key, settings.login_backoff_minutes * _MINUTE),
-            (_login_failures_by_account, settings.login_backoff_minutes * _MINUTE),
+            (self.probe_hits, ss.probe_window_minutes * _MINUTE),
+            (_login_failures_by_key, ss.login_backoff_minutes * _MINUTE),
+            (_login_failures_by_account, ss.login_backoff_minutes * _MINUTE),
         ):
             if len(tracker) > 10_000:
                 for key in [k for k, dq in tracker.items() if not dq or dq[-1] < now - window]:
@@ -410,14 +416,15 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
 
         counted = path not in _UNCOUNTED_PATHS
+        ss = site_settings.current()
         if counted:
             hits = self.hits[ip]
             _prune(hits, now - _MINUTE)
             hits.append(now)
-            if len(hits) > settings.flood_ban_per_minute:
-                self._ban(ip, f"flood: >{settings.flood_ban_per_minute} req/min")
+            if len(hits) > ss.flood_ban_per_minute:
+                self._ban(ip, f"flood: >{ss.flood_ban_per_minute} req/min")
                 return _too_many()
-            if len(hits) > settings.rate_limit_per_minute:
+            if len(hits) > ss.rate_limit_per_minute:
                 # over the soft limit: throttle, never ban — this can be a
                 # busy office or CGNAT pool, not necessarily an attack
                 return _too_many()
@@ -426,14 +433,14 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
             auth_hits = self.auth_hits[ip]
             _prune(auth_hits, now - _MINUTE)
             auth_hits.append(now)
-            if len(auth_hits) > settings.auth_rate_limit_per_minute:
+            if len(auth_hits) > ss.auth_rate_limit_per_minute:
                 return _too_many()
 
         if path == "/auth/register" and request.method == "POST":
             reg_hits = self.register_hits[ip]
             _prune(reg_hits, now - _HOUR)
             reg_hits.append(now)
-            if len(reg_hits) > settings.register_per_hour_per_ip:
+            if len(reg_hits) > ss.register_per_hour_per_ip:
                 return _too_many(retry_after=int(reg_hits[0] + _HOUR - now) + 1)
 
         response = await call_next(request)
@@ -445,12 +452,12 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
         # endpoint that no longer exists must not get its users banned.
         if response.status_code == 404 and _matches_no_route(request) and not _has_valid_token(request):
             probes = self.probe_hits[ip]
-            _prune(probes, now - settings.probe_window_minutes * _MINUTE)
+            _prune(probes, now - ss.probe_window_minutes * _MINUTE)
             probes.append(now)
-            if len(probes) >= settings.probe_ban_threshold:
+            if len(probes) >= ss.probe_ban_threshold:
                 self._ban(
                     ip,
-                    f"probing: {len(probes)} unknown paths in {settings.probe_window_minutes} min (last: {path})",
+                    f"probing: {len(probes)} unknown paths in {ss.probe_window_minutes} min (last: {path})",
                 )
 
         self._sweep(now)

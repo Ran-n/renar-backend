@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/07/16 09:54:30.802208
+Revised: 2026/07/16 17:15:51.973438
 """
 
 import logging
@@ -14,14 +14,14 @@ from sqlalchemy.orm import Session
 
 from .. import accounts
 from ..auth import create_access_token, get_current_user, hash_password, verify_password
-from ..config import settings
 from ..database import get_db
 from ..image_service import gc_image, image_row_for
 from ..image_utils import decode_b64_image, normalize_jpeg
-from ..models import LoginEvent, User, utcnow
+from ..models import InviteCode, LoginEvent, User, utcnow
 from ..premium import FREE_PROGRESS_STYLES, FREE_THEMES
-from ..schemas import PasswordChange, ProfileUpdate, Token, UserCreate, UserOut
+from ..schemas import PasswordChange, ProfileUpdate, RegistrationStatus, Token, UserCreate, UserOut
 from ..security import check_login_allowed, client_ip, note_login_failure, note_login_success
+from ..site_settings import get_site_settings
 
 _log = logging.getLogger(__name__)
 
@@ -32,15 +32,80 @@ BACKGROUND_MAX = (1280, 480)  # landscape banner: 8:3 aspect
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+@router.get("/registration-status", response_model=RegistrationStatus)
+def registration_status(db: Session = Depends(get_db)):
+    """Unauthenticated: lets the signup screen decide whether to render an
+    invite-code field before the user ever submits the form."""
+    ss = get_site_settings(db)
+    return RegistrationStatus(registration_open=ss.registration_open, invite_only=ss.invite_only)
+
+
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def register(data: UserCreate, db: Session = Depends(get_db)):
-    if not settings.registration_open:
+    ss = get_site_settings(db)
+    if not ss.registration_open:
+        _log.info("registration rejected: registration is closed (username=%r)", data.username)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Registration is currently closed",
         )
+
+    invite: InviteCode | None = None
+    if ss.invite_only:
+        if not data.invite_code:
+            _log.info("registration rejected: no invite code given (username=%r)", data.username)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="An invite code is required to register",
+            )
+        # FOR UPDATE: a single-use code hit by two concurrent registrations
+        # must not both pass the uses < max_uses check below — the lock
+        # serializes them so the second one sees the first's increment.
+        invite = db.query(InviteCode).filter(InviteCode.code == data.invite_code).with_for_update().first()
+        if invite is None or invite.revoked:
+            _log.info(
+                "registration rejected: invalid/revoked invite code=%r (username=%r)",
+                data.invite_code,
+                data.username,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid invite code",
+            )
+        if invite.expires_at is not None and invite.expires_at <= utcnow():
+            _log.info(
+                "registration rejected: invite code=%r expired at %s (username=%r)",
+                invite.code,
+                invite.expires_at,
+                data.username,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invite code has expired",
+            )
+        if invite.max_uses is not None and invite.uses >= invite.max_uses:
+            _log.info(
+                "registration rejected: invite code=%r fully used (%s/%s) (username=%r)",
+                invite.code,
+                invite.uses,
+                invite.max_uses,
+                data.username,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invite code has been fully used",
+            )
+
     existing = db.query(User).filter(or_(User.username == data.username, User.email == data.email)).first()
     if existing:
+        clash = "username" if existing.username == data.username else "email"
+        _log.info(
+            "registration rejected: %s already taken (username=%r email=%r, existing id=%s)",
+            clash,
+            data.username,
+            data.email,
+            existing.id,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username or email already taken",
@@ -51,9 +116,21 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
         password_hash=hash_password(data.password),
     )
     db.add(user)
+    if invite is not None:
+        invite.uses += 1
     db.commit()
     db.refresh(user)
-    _log.info("new user registered: id=%s username=%r", user.id, user.username)
+    if invite is not None:
+        _log.info(
+            "new user registered: id=%s username=%r via invite code=%r (uses=%s/%s)",
+            user.id,
+            user.username,
+            invite.code,
+            invite.uses,
+            invite.max_uses,
+        )
+    else:
+        _log.info("new user registered: id=%s username=%r", user.id, user.username)
     return user
 
 
