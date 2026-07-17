@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/17 10:19:00.957877
+Revised: 2026/07/17 10:19:00.957877
+"""
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 

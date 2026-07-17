@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/07/16 09:54:31.202311
+Revised: 2026/07/17 10:25:32.702003
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -14,12 +14,12 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
+from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import Follow, LibraryEntry, MediaType, Title, User, WatchStatus
 from ..premium import flair
 from ..schemas import LibraryEntryOut
 from ..titles import WITH_TITLE_GENRES
-from .stats import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 
 router = APIRouter(tags=["social"])
 _log = logging.getLogger(__name__)
