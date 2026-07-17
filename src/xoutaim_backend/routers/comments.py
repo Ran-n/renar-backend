@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.875365
-Revised: 2026/07/11 15:37:11.638816
+Revised: 2026/07/17 19:40:36.311593
 
 Comments on titles (global across users), with likes, nested replies and
 user reports.
@@ -17,7 +17,7 @@ from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
 from ..models import Comment, CommentLike, CommentReport, MediaType, User
 from ..schemas import CommentCreate, CommentReportCreate
-from ..social.comment_threads import ancestor_depth, resolve_root_scope
+from ..social.comment_threads import ancestor_depth, load_thread, resolve_root_scope
 from ..users.auth import get_current_user
 from ..users.premium import flair
 
@@ -30,7 +30,13 @@ MAX_REPLY_DEPTH = 8  # a reply can target any ancestor reply, so nesting is
 # blow up _comment_out into unbounded recursion / query fan-out
 
 
-def _comment_out(c: Comment, me: User, depth: int = 0) -> dict:
+def _comment_out(
+    c: Comment,
+    me: User,
+    children_by_parent: dict[int | None, list[Comment]],
+    depth: int = 0,
+) -> dict:
+    replies = children_by_parent.get(c.id, [])
     return {
         "id": c.id,
         "user_id": c.user_id,
@@ -46,7 +52,9 @@ def _comment_out(c: Comment, me: User, depth: int = 0) -> dict:
         "disliked_by_me": any(like.user_id == me.id and like.value < 0 for like in c.likes),
         "mine": c.user_id == me.id,
         "reported_by_me": any(r.user_id == me.id for r in c.reports),
-        "replies": [_comment_out(r, me, depth + 1) for r in c.replies] if depth < MAX_REPLY_DEPTH else [],
+        "replies": [_comment_out(r, me, children_by_parent, depth + 1) for r in replies]
+        if depth < MAX_REPLY_DEPTH
+        else [],
     }
 
 
@@ -72,8 +80,9 @@ def list_comments(
     target = find_title(db, media_type, tmdb_id, title)
     if target is None:  # nobody has tracked or commented on this title yet
         return []
-    comments = (
-        db.query(Comment)
+    root_ids = [
+        cid
+        for (cid,) in db.query(Comment.id)
         .filter(
             Comment.title_id == target.id,
             Comment.season == season,
@@ -83,8 +92,11 @@ def list_comments(
         .order_by(Comment.created_at.desc())
         .limit(100)
         .all()
-    )
-    return [_comment_out(c, me) for c in comments]
+    ]
+    if not root_ids:
+        return []
+    by_id, children_by_parent = load_thread(db, root_ids)
+    return [_comment_out(by_id[cid], me, children_by_parent) for cid in root_ids]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -133,7 +145,7 @@ def create_comment(
     db.add(comment)
     db.commit()
     db.refresh(comment)
-    return _comment_out(comment, me)
+    return _comment_out(comment, me, {})
 
 
 @router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)

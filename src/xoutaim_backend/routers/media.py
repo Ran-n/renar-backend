@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/07/16 09:54:31.041282
+Revised: 2026/07/17 20:11:30.431373
 """
 
 import logging
@@ -49,6 +49,13 @@ _log = logging.getLogger(__name__)
 # language for the first time; the rest warm up over subsequent requests.
 _MAX_WARMUP_PER_REQUEST = 15
 
+# default page size when the caller omits `limit` — previously an omitted
+# limit meant "return the entire library", which scaled linearly with
+# library size on every call. Matches the frontend's own page size
+# (library_view.py's _PAGE_SIZE), so callers that already paginate see no
+# behavior change.
+_DEFAULT_LIST_LIMIT = 60
+
 
 def _get_owned_item(item_id: int, user: User, db: Session) -> LibraryEntry:
     item = db.get(LibraryEntry, item_id)
@@ -70,6 +77,7 @@ def list_media(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    limit = _DEFAULT_LIST_LIMIT if limit is None else limit
     query = db.query(LibraryEntry).join(Title).options(*WITH_TITLE_GENRES).filter(LibraryEntry.user_id == user.id)
     if media_type is not None:
         query = query.filter(Title.media_type == media_type)
@@ -96,9 +104,7 @@ def list_media(
                 Title.id.in_(cached_match),
             )
         )
-    query = query.order_by(LibraryEntry.updated_at.desc())
-    if limit is not None:
-        query = query.offset(offset).limit(limit)
+    query = query.order_by(LibraryEntry.updated_at.desc()).offset(offset).limit(limit)
     entries = query.all()
     prefetch_episode_cache(db, (e.title_id for e in entries))
 
@@ -115,6 +121,48 @@ def list_media(
             background_tasks.add_task(warm_title_translations, missing_ids[:_MAX_WARMUP_PER_REQUEST], lang)
 
     return entries
+
+
+@router.get("/keys")
+def list_media_keys(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Lightweight identifiers for every entry in the user's library — just
+    enough (media_type, tmdb_id, url, title, author) to build the "already in
+    my library" membership check Explore needs. Deliberately unbounded (no
+    `limit`/`offset`, unlike list_media): that check needs the whole library
+    in one shot, but skips the WITH_TITLE_GENRES joins and full LibraryEntryOut
+    shape list_media carries per row, so it stays cheap even for a large
+    library."""
+    rows = (
+        db.query(Title.media_type, Title.tmdb_id, Title.title, Title.author, LibraryEntry.url)
+        .join(LibraryEntry, LibraryEntry.title_id == Title.id)
+        .filter(LibraryEntry.user_id == user.id)
+        .all()
+    )
+    return [
+        {"media_type": media_type.value, "tmdb_id": tmdb_id, "title": title, "author": author, "url": url}
+        for media_type, tmdb_id, title, author, url in rows
+    ]
+
+
+@router.get("/by_tmdb", response_model=LibraryEntryOut)
+def get_media_by_tmdb(
+    media_type: MediaType,
+    tmdb_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Single-item lookup by (media_type, tmdb_id) in the caller's own
+    library — for callers (e.g. the title detail page) that only need one
+    entry and shouldn't have to page through list_media to find it."""
+    title_row = find_title(db, media_type, tmdb_id, None)
+    item = (
+        db.query(LibraryEntry).filter(LibraryEntry.user_id == user.id, LibraryEntry.title_id == title_row.id).first()
+        if title_row is not None
+        else None
+    )
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return item
 
 
 @router.post("", response_model=LibraryEntryOut, status_code=status.HTTP_201_CREATED)

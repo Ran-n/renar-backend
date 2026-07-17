@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/07/16 09:54:30.067914 )
+[//]: # (+ Revised: 	2026/07/17 19:43:59.466650 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -10,13 +10,63 @@ Known gaps and follow-ups, not yet scheduled.
 
 ## Performance / responsiveness
 
-- **Reduce endpoint latency so the frontend feels snappier.** Audit the
-  hot endpoints the UI blocks on (library listing, explore, title/episode
-  detail, profile/social) for N+1 queries, missing eager loads, and
-  missing indexes; add pagination where responses are unbounded; cache
-  rarely-changing lookups (e.g. TMDB-derived metadata) instead of
-  recomputing or re-fetching per request. Frontend-side perceived-delay
-  work has its own entry in xoutaim-frontend's `docs/backlog.md`.
+- **Reduce endpoint latency so the frontend feels snappier — done.**
+  Audited the hot endpoints (library listing, explore, title/episode
+  detail, profile/social, comments) for N+1 queries, missing eager loads,
+  and missing indexes. Fixed:
+  - **Comments N+1 (the big one).** `routers/comments.py`'s `_comment_out`
+    walked `Comment.author`/`.likes`/`.reports`/`.replies` — all lazy
+    relationships — recursively per node; rendering 100 root comments with
+    replies fired on the order of hundreds to thousands of queries. Added
+    `social/comment_threads.load_thread()`: one recursive CTE to collect
+    every comment in a thread (roots + all nested replies), then three
+    `selectinload`s for author/likes/reports — fixed query count regardless
+    of thread size/depth. `_comment_out` now takes a
+    `children_by_parent` dict built from that batch instead of touching
+    `Comment.replies`.
+  - **`routers/social.py`'s `activity_feed`** wasn't eager-loading
+    `title_ref`/genres/custom poster-backdrop images, so `item.poster_url`
+    etc. lazy-loaded per row (up to 50/request). Added `WITH_TITLE_GENRES`
+    to its query, same as `list_media`/`get_stats`/`user_media` already had.
+  - **Missing composite indexes on `Notification`.** Replaced the
+    low-cardinality standalone `read` index with
+    `(user_id, read)` (backs `list_notifications`'/`unread_count`'s filter)
+    and `(user_id, created_at)` (backs the default listing order) — same
+    pattern as `LibraryEntry`'s existing composite indexes. Migration
+    `45a9dba29ff9`.
+  - `list_media`, `get_stats`, `user_media` were already using
+    `WITH_TITLE_GENRES` + `prefetch_episode_cache`, so no N+1 there.
+  - TMDB-derived metadata caching already exists (`tmdb_http.py`'s
+    in-memory cache + `tmdb_store.py`'s DB-persisted `TmdbCache`) — this
+    part of the original ask was already done, not new work.
+
+  **`list_media` had no default limit** — an omitted `limit`/`offset`
+  returned the caller's entire library unbounded. Fixed: `list_media` now
+  defaults to `_DEFAULT_LIST_LIMIT = 60` (matches the frontend's existing
+  `library_view.py` page size) when the caller doesn't pass `limit`. That
+  required auditing every frontend caller that relied on the old unbounded
+  default first (see `xoutaim-frontend`'s now-closed mirror entry) — two of
+  the four call sites were actually using `list_media` to build a
+  full-library lookup, not a paginated listing, and would have silently
+  broken (false "not in library" / false "not found") the moment a large
+  library got capped:
+  - `routers/media.py`'s new **`GET /media/keys`** — a lean, unbounded
+    `(media_type, tmdb_id, title, author, url)` projection (no
+    `WITH_TITLE_GENRES` joins, no full `LibraryEntryOut` shape) for
+    Explore's "already in my library" icon overlay, which genuinely needs
+    every entry, not a page.
+  - `routers/media.py`'s new **`GET /media/by_tmdb`** — single-item lookup
+    by `(media_type, tmdb_id)` for the title detail page, replacing a
+    linear scan over the caller's (previously unbounded) full library.
+  - The Home "continue watching" row's `list_media(status_filter=
+    "watching")` call now passes an explicit `limit=6` — the most it ever
+    renders — instead of relying on the backend handing back everything.
+
+  `get_stats` intentionally still has no `limit`/`offset` at all: it
+  aggregates totals (watch minutes, genre counts, streaks, ratings) across
+  the *entire* library to produce a single correct number, so pagination
+  doesn't apply to it the way it does to a listing endpoint — this wasn't a
+  gap, just an imprecise description in the original audit note.
 
 ## TV Time import (`routers/imports.py`)
 
@@ -85,24 +135,25 @@ Known gaps and follow-ups, not yet scheduled.
   `admin.py:962-1013`) — a distinct concept from email-ownership
   confirmation; this needs its own field(s) (e.g. `email_confirmed`), not
   reuse of that one. Fully scoped and decided; **blocked only on the
-  domain-purchase item above** (build the rest now with the send
-  stubbed/logged). Decisions:
+  subdomain being finalized** (`breren.com` is registered, but this app's
+  subdomain isn't picked yet since it's being renamed away from "xoutaim" —
+  build the rest now with the send stubbed/logged). Decisions:
 
   - **Provider: Brevo.** Free tier is 300 emails/day with no separate
     monthly cap (vs. Resend's cleaner API but 100/day *and* 3,000/month
     combined cap) — the uncapped daily headroom won over Resend's nicer
     DX for this low-volume use case. Needs `BREVO_API_KEY` added to
     `.env`/`config.py`, no account created yet.
-  - **Wait for the domain before wiring real sends.** Without a verified
-    sending domain, Brevo requires verifying a single sender mailbox
-    instead — sending "from" e.g. a personal Gmail address through a
-    third-party API commonly gets rejected/spam-foldered by Gmail's own
+  - **Wait for the subdomain name before wiring real sends.** Without a
+    verified sending (sub)domain, Brevo requires verifying a single sender
+    mailbox instead — sending "from" e.g. a personal Gmail address through
+    a third-party API commonly gets rejected/spam-foldered by Gmail's own
     DMARC enforcement, since Brevo isn't an authorized sender for
     `gmail.com`. Build everything else now (token generation, endpoints,
     gating, migration) with the send call logging the would-be email
     content instead of actually sending, so it's ready to flip on the
-    moment the umbrella domain + DNS (SPF/DKIM/DMARC) from the domain
-    backlog item are in place.
+    moment DNS (SPF/DKIM/DMARC) for the app's actual subdomain on
+    `breren.com` is in place.
   - **UX: 6-digit one-time code, entered in-app** — not a clickable link.
     xoutaim-frontend has no Android App Links / custom-URL-scheme config
     (confirmed via grep), so a link opened from the Gmail app would just
@@ -195,35 +246,13 @@ Known gaps and follow-ups, not yet scheduled.
 
 ## Infrastructure
 
-- **Buy a domain for deployment; none registered yet.** Needed before real
-  (non-local) deployment: app links, TLS on a real hostname, email sending,
-  etc. Plan:
-  - **Registrar: Cloudflare Registrar** — sells at cost (no markup), free
-    WHOIS privacy, and registering there puts the domain straight onto
-    Cloudflare's network so the free-tier reverse proxy (DDoS mitigation,
-    edge TLS/HTTPS, caching) is a checkbox away rather than a separate
-    setup step. (Domains bought elsewhere can still be proxied through
-    Cloudflare by pointing nameservers at it, but buying direct on CF
-    skips that step.)
-  - **TLD: `.com` first choice, `.app` fallback if the `.com` for the
-    chosen name is taken.** `.app` forces HTTPS at the browser level
-    (hardcoded HSTS preload) but that protection is redundant once
-    Cloudflare's proxy is in front (its "Always Use HTTPS" setting
-    covers the same gap), so it's not worth choosing `.app` over a
-    available `.com` purely for that; `.com` also reads more neutral
-    for an umbrella domain that won't be exclusively app content.
-  - **Structure: one umbrella domain, not one per project.** Register a
-    single domain under the name of a future company (not a personal
-    name — decided against `anxol`/`anxo` for this) and give each
-    project its own free subdomain under it (e.g. `xoutaim.<domain>`,
-    `logpiece.<domain>`) rather than paying for a separate domain per
-    app. Cheaper, one DNS zone/Cloudflare account to manage, and a
-    wildcard cert covers all subdomains. Company name not chosen yet.
-  - Once registered: configure Cloudflare DNS (A/CNAME records per
-    subdomain pointing at wherever each backend/frontend is hosted),
-    enable the orange-cloud proxy + "Always Use HTTPS", then update the
-    HTTPS-by-default item below to point at the real hostname instead of
-    relying on uvicorn's `--ssl-keyfile`/`--ssl-certfile` flags directly.
+- **Domain registered: `breren.com`.** Umbrella domain is bought (done, no
+  longer a backlog item). This app's subdomain isn't `xoutaim.breren.com`
+  though — the app is being renamed away from "xoutaim", so the subdomain
+  will follow whatever the new name ends up being. Cloudflare DNS
+  (A/CNAME per subdomain, orange-cloud proxy, "Always Use HTTPS") still
+  needs configuring once a subdomain name is picked; ties into the
+  HTTPS-by-default item below.
 
 - **Wire up HTTPS by default; currently opt-in only.** Caddy-based TLS
   termination was added then dropped (see git history); the current
@@ -262,15 +291,17 @@ are tracked in xoutaim-frontend's `docs/backlog.md`.
 - **Production hosting isn't chosen or set up.** No Dockerfile/compose file
   exists in either repo and nothing is deployed anywhere. Needs a host
   (Fly.io/Railway/a VPS are all viable) running a persistent Postgres
-  (sqlite is fine locally, not for production) with a backup plan, plus the
-  domain-purchase and HTTPS-by-default items above wired to point at it.
+  (sqlite is fine locally, not for production) with a backup plan, plus
+  the app's subdomain on `breren.com` (once picked) and the
+  HTTPS-by-default item above wired to point at it.
 
 - **No privacy policy or Terms of Service exist.** Both Apple and Google
   require a live, publicly hosted URL to a privacy policy at submission
   time (Google also wants ToS if the app has accounts/payments). The
   `gdpr-data` folder at the workspace root suggests GDPR is already on the
   radar — this is the point to turn that into an actual published policy
-  page, once the domain exists to host it on.
+  page, once the app's subdomain is picked to host it on (`breren.com`
+  itself is registered already).
 
 - **No data-safety audit done for store submission.** Google Play's Data
   Safety form and Apple's Privacy Nutrition Label both require enumerating
@@ -281,7 +312,8 @@ are tracked in xoutaim-frontend's `docs/backlog.md`.
 - **Account-deletion page needs a web-reachable path, not just in-app.**
   `DELETE /auth/me` already covers in-app deletion, but Google Play policy
   requires a deletion request to also be reachable *without* installing the
-  app (a simple hosted web form/page). Blocked on the domain existing.
+  app (a simple hosted web form/page). Blocked on the app's subdomain
+  being picked (`breren.com` itself is registered already).
 
 - **No payment integration wired to the app stores — and mobile can't just
   reuse a web payment flow.** `premium_until` is admin-granted only today
