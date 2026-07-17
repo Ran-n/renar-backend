@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+"""
+Authors: Ran# <ran.hash@proton.me>
+Created: 2026/07/17 10:19:09.196421
+Revised: 2026/07/17 10:19:09.196421
+"""
+
 from logging.config import fileConfig
 
 from alembic import context

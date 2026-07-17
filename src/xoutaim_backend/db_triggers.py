@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 09:54:55.646441
-Revised: 2026/07/16 09:54:55.646441
+Revised: 2026/07/17 10:25:32.558538
 
 Postgres functions/triggers that keep denormalized aggregate columns in sync
 at the database level — see docs/design-decisions.md, "users.total_watch_minutes:
@@ -26,9 +26,8 @@ consistent by Postgres itself, in one place, not hand-computed at scattered
 call sites.
 """
 
-# Mirrors DEFAULT_FILM_RUNTIME / DEFAULT_EPISODE_RUNTIME in routers/stats.py.
-_DEFAULT_FILM_RUNTIME = 110
-_DEFAULT_EPISODE_RUNTIME = 40
+from .constants import DEFAULT_EPISODE_RUNTIME as _DEFAULT_EPISODE_RUNTIME
+from .constants import DEFAULT_FILM_RUNTIME as _DEFAULT_FILM_RUNTIME
 
 # CREATE OR REPLACE (functions) / DROP IF EXISTS + CREATE (triggers, no
 # CREATE OR REPLACE TRIGGER before PG14) makes this safe to re-run — needed

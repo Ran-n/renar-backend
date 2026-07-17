@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.713668
-Revised: 2026/07/16 09:54:31.285598
+Revised: 2026/07/17 10:25:32.631165
 
 Watch-time and library statistics for the current user.
 """
@@ -17,15 +17,13 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user, require_premium
+from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import AppCounters, EpisodeWatch, LibraryEntry, MediaType, User, WatchStatus
 from ..titles import WITH_TITLE_GENRES
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 _log = logging.getLogger(__name__)
-
-DEFAULT_FILM_RUNTIME = 110  # minutes, used when runtime is unknown
-DEFAULT_EPISODE_RUNTIME = 40
 
 
 def _runtime_or_default(runtime_minutes: int | None, default: int) -> int:

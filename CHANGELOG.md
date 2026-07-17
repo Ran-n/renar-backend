@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/17 09:40:41.076734 )
+[//]: # (+ Revised: 	2026/07/17 12:35:05.862800 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- Test coverage for `routers/books.py` (`tests/test_books.py`), matching the mocking
+  approach already used for `routers/youtube.py`
+
+### Changed
+
+- Consolidated `DEFAULT_FILM_RUNTIME` / `DEFAULT_EPISODE_RUNTIME`, previously duplicated
+  in `db_triggers.py` and `routers/stats.py`, into a single `src/xoutaim_backend/constants.py`
+  source of truth; `routers/social.py` now imports from there directly instead of via
+  `routers/stats.py`
 
 ## [0.3.0] - 2026-07-17
 
