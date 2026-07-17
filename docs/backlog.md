@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/07/17 19:43:59.466650 )
+[//]: # (+ Revised: 	2026/07/18 00:26:59.571389 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -45,7 +45,7 @@ Known gaps and follow-ups, not yet scheduled.
   defaults to `_DEFAULT_LIST_LIMIT = 60` (matches the frontend's existing
   `library_view.py` page size) when the caller doesn't pass `limit`. That
   required auditing every frontend caller that relied on the old unbounded
-  default first (see `xoutaim-frontend`'s now-closed mirror entry) — two of
+  default first (see `renar-frontend`'s now-closed mirror entry) — two of
   the four call sites were actually using `list_media` to build a
   full-library lookup, not a paginated listing, and would have silently
   broken (false "not in library" / false "not found") the moment a large
@@ -93,7 +93,7 @@ Known gaps and follow-ups, not yet scheduled.
   job runs on a daemon thread. A restart mid-import loses the job (safe to
   re-run) but `/import/tvtime/status` then returns `{"stage": "Never run",
   "finished": true}` with no error — which the frontend's poll loop
-  ([import_view.py](../../xoutaim-frontend/src/xoutaim_frontend/views/import_view.py))
+  ([import_view.py](../../renar-frontend/src/renar_frontend/views/import_view.py))
   renders as "Import complete ✓" with all-zero counts.
 
 - **Minor: concurrent reconciles of the same entry are last-write-wins.**
@@ -134,10 +134,10 @@ Known gaps and follow-ups, not yet scheduled.
   `User`, but that's the existing admin-approved "verified" *badge* (see
   `admin.py:962-1013`) — a distinct concept from email-ownership
   confirmation; this needs its own field(s) (e.g. `email_confirmed`), not
-  reuse of that one. Fully scoped and decided; **blocked only on the
-  subdomain being finalized** (`breren.com` is registered, but this app's
-  subdomain isn't picked yet since it's being renamed away from "xoutaim" —
-  build the rest now with the send stubbed/logged). Decisions:
+  reuse of that one. Fully scoped and decided; sender address will be
+  `noreply@renar.breren.com` (app renamed to Renar, subdomain `renar.breren.com`
+  decided — see `renar/common` branding notes) — build the rest now with
+  the send stubbed/logged. Decisions:
 
   - **Provider: Brevo.** Free tier is 300 emails/day with no separate
     monthly cap (vs. Resend's cleaner API but 100/day *and* 3,000/month
@@ -155,7 +155,7 @@ Known gaps and follow-ups, not yet scheduled.
     moment DNS (SPF/DKIM/DMARC) for the app's actual subdomain on
     `breren.com` is in place.
   - **UX: 6-digit one-time code, entered in-app** — not a clickable link.
-    xoutaim-frontend has no Android App Links / custom-URL-scheme config
+    renar-frontend has no Android App Links / custom-URL-scheme config
     (confirmed via grep), so a link opened from the Gmail app would just
     land in a browser tab, disconnected from the installed Flet APK. A
     code sidesteps that deep-linking work entirely.
@@ -247,12 +247,9 @@ Known gaps and follow-ups, not yet scheduled.
 ## Infrastructure
 
 - **Domain registered: `breren.com`.** Umbrella domain is bought (done, no
-  longer a backlog item). This app's subdomain isn't `xoutaim.breren.com`
-  though — the app is being renamed away from "xoutaim", so the subdomain
-  will follow whatever the new name ends up being. Cloudflare DNS
-  (A/CNAME per subdomain, orange-cloud proxy, "Always Use HTTPS") still
-  needs configuring once a subdomain name is picked; ties into the
-  HTTPS-by-default item below.
+  longer a backlog item). App renamed to Renar; subdomain is `renar.breren.com`.
+  Cloudflare DNS (A/CNAME per subdomain, orange-cloud proxy, "Always Use
+  HTTPS") still needs configuring; ties into the HTTPS-by-default item below.
 
 - **Wire up HTTPS by default; currently opt-in only.** Caddy-based TLS
   termination was added then dropped (see git history); the current
@@ -286,7 +283,7 @@ Known gaps and follow-ups, not yet scheduled.
 
 Not yet scheduled. Nothing here is started; capturing the shape of the work
 before picking it up. Store-specific build steps (Android/iOS/web packaging)
-are tracked in xoutaim-frontend's `docs/backlog.md`.
+are tracked in renar-frontend's `docs/backlog.md`.
 
 - **Production hosting isn't chosen or set up.** No Dockerfile/compose file
   exists in either repo and nothing is deployed anywhere. Needs a host

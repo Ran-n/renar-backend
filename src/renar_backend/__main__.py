@@ -9,7 +9,7 @@ from pathlib import Path
 
 import uvicorn
 
-from xoutaim_backend._devserver import ensure_port_free
+from renar_backend._devserver import ensure_port_free
 
 # Absolute, not "src": a relative reload dir resolves against wherever `be`
 # was launched from, and uvicorn watches a nonexistent path without
@@ -23,7 +23,7 @@ _PORT = 8000
 def run():
     ensure_port_free(_HOST, _PORT)
     uvicorn.run(
-        "xoutaim_backend.main:app",
+        "renar_backend.main:app",
         host=_HOST,
         port=_PORT,
         reload=True,

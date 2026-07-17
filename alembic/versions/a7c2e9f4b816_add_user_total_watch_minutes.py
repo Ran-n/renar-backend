@@ -17,7 +17,7 @@ checked per row); maintaining it incrementally means the ranking endpoint
 never pays for scanning the whole users table just to answer "how many are
 there".
 
-The trigger/function SQL itself is imported from xoutaim_backend.db_triggers
+The trigger/function SQL itself is imported from renar_backend.db_triggers
 rather than inlined here — deliberately not "standalone", unlike this file's
 own numeric literals below. It's also registered against each relevant
 table's own after_create event (models.py) so it exists in the schema tests
@@ -36,7 +36,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from xoutaim_backend.db_triggers import (
+from renar_backend.db_triggers import (
     USER_COUNT_TRIGGER_SQL,
     USER_COUNT_TRIGGER_TEARDOWN_SQL,
     WATCH_MINUTES_TRIGGER_SQL,

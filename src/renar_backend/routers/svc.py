@@ -2,10 +2,10 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 17:00:30.032438
-Revised: 2026/07/12 17:22:33.145708
+Revised: 2026/07/18 00:26:59.331987
 
-Machine-to-machine endpoints so the xoutaim-frontend web server's own
-anti-abuse guard (xoutaim-frontend/src/xoutaim_frontend/anti_abuse.py) can
+Machine-to-machine endpoints so the renar-frontend web server's own
+anti-abuse guard (renar-frontend/src/renar_frontend/anti_abuse.py) can
 share this server's persisted ban state instead of keeping its own: an IP
 permabanned or struck on either surface is blocked on both, and a frontend
 restart reloads both permabans and active temp bans instead of granting

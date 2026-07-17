@@ -44,7 +44,7 @@ import re
 
 from sqlalchemy import String, Text
 
-from xoutaim_backend.database import Base
+from renar_backend.database import Base
 
 # Columns that legitimately hold a number that *looks* aggregated. Each entry
 # documents why it is not derivable from (or is allowed to summarize) other

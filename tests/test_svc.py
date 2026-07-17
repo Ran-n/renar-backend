@@ -12,11 +12,11 @@ import time
 
 import pytest
 
-from xoutaim_backend import site_settings
-from xoutaim_backend.config import settings
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import BannedIP, SiteSettings, Strike
-from xoutaim_backend.users import security
+from renar_backend import site_settings
+from renar_backend.config import settings
+from renar_backend.database import SessionLocal
+from renar_backend.models import BannedIP, SiteSettings, Strike
+from renar_backend.users import security
 
 SECRET = "test-internal-secret"
 

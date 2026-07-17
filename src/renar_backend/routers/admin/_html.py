@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/18 00:26:59.254832
 
 Shared HTML/CSS primitives for the admin control panel.
 
@@ -578,7 +578,7 @@ def _usage_page(title: str, icon: str, back_href: str, back_label: str, inner: s
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html.escape(title)} &middot; xoutaim</title>
+  <title>{html.escape(title)} &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_PAGE_CSS}{_DETAIL_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -589,7 +589,7 @@ def _usage_page(title: str, icon: str, back_href: str, back_label: str, inner: s
       <div class="logo">{icon}</div>
       <div class="brand">
         <span class="brand-name">{html.escape(title)}</span>
-        <span class="brand-sub">xoutaim</span>
+        <span class="brand-sub">renar</span>
       </div>
     </a>
     <div class="topbar-fill"></div>

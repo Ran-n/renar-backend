@@ -38,7 +38,7 @@ PALETTE: tuple[str, ...] = (
 )
 
 
-# Mirrors the frontend's THEMES dict in xoutaim_frontend/themes.py — keep the
+# Mirrors the frontend's THEMES dict in renar_frontend/themes.py — keep the
 # two in sync. Only "gruvbox" is free; the rest require an active subscription.
 FREE_THEMES: frozenset[str] = frozenset({"gruvbox"})
 THEME_NAMES: frozenset[str] = FREE_THEMES | frozenset({

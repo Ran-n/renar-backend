@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/18 00:26:59.173812
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -234,7 +234,7 @@ def _render_user_detail(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{name_esc} &middot; xoutaim</title>
+  <title>{name_esc} &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_PAGE_CSS}{_DETAIL_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -245,7 +245,7 @@ def _render_user_detail(
       <div class="logo">&#x1F464;</div>
       <div class="brand">
         <span class="brand-name">User Detail</span>
-        <span class="brand-sub">xoutaim</span>
+        <span class="brand-sub">renar</span>
       </div>
     </a>
     <div class="topbar-fill"></div>
@@ -343,7 +343,7 @@ def _render_users(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>User Manager &middot; xoutaim</title>
+  <title>User Manager &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_PAGE_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -354,7 +354,7 @@ def _render_users(
       <div class="logo">&#x1F465;</div>
       <div class="brand">
         <span class="brand-name">User Manager</span>
-        <span class="brand-sub">xoutaim</span>
+        <span class="brand-sub">renar</span>
       </div>
     </a>
     <div class="topbar-fill"></div>

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/17 09:40:41.335669 )
+[//]: # (+ Revised: 	2026/07/18 00:26:59.749038 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -132,7 +132,7 @@ All twelve anti-abuse tunables and the two registration flags (`registration_ope
 `CHECK`-constrained, same pattern as `app_counters`) so the admin panel can change
 them without a server restart or an `.env` edit.
 
-`src/xoutaim_backend/site_settings.py` exposes three callables:
+`src/renar_backend/site_settings.py` exposes three callables:
 
 - `get_site_settings(db)` — reads or creates the row; on first call it seeds
   it from the corresponding `config.py` / `.env` defaults so existing deployments
@@ -415,7 +415,7 @@ typos. The two trackers cover both attack shapes without either failure mode.
 
 ### `/svc/bans` + `/svc/strikes` share ban/strike state with the frontend, not a separate DB for it
 
-`xoutaim-frontend`'s own web server (`uv run web`) is internet-facing and
+`renar-frontend`'s own web server (`uv run web`) is internet-facing and
 gets scanned independently of this API — the guard here has no visibility
 into traffic that never reaches it. Rather than give that process its own
 Postgres access, its scaled-down anti-abuse guard (frontend `anti_abuse.py`)
@@ -710,7 +710,7 @@ while letting the panel's own forms carry a real `Origin`.
 
 ### `GET /` exposes `app.version` unauthenticated, no admin role for it
 
-`{"status": "ok", "message": "Connection to Xoutaim OK", "version":
+`{"status": "ok", "message": "Connection to Renar OK", "version":
 app.version}` is served with no auth, doubling as both the reachability
 check (e.g. a phone confirming a LAN server address) and the version
 source the frontend's Profile → About screen reads.
@@ -777,7 +777,7 @@ a new moderation action never touches settings. Intra-feature helpers
 
 ### Grouping flat root-level files into subpackages
 
-The 22 peer files at `src/xoutaim_backend/` were regrouped into five
+The 22 peer files at `src/renar_backend/` were regrouped into five
 domain subpackages. Files at the root that are cross-cutting
 (`models.py`, `schemas.py`, `config.py`, `database.py`, `site_settings.py`,
 `db_triggers.py`, `constants.py`) stay at root level.

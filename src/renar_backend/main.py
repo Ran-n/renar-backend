@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/17 18:47:08.337880
+Revised: 2026/07/18 00:26:58.614713
 """
 
 import asyncio
@@ -53,7 +53,7 @@ _log = logging.getLogger(__name__)
 def backend_version() -> str:
     """Installed package version; falls back to pyproject.toml for source checkouts."""
     try:
-        return _pkg_version("xoutaim-backend")
+        return _pkg_version("renar-backend")
     except PackageNotFoundError:
         pass
     pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
 # openapi_url=None also kills /docs and /redoc — scanners use the schema to
 # map every endpoint, so it stays off unless ENABLE_DOCS=true in .env.
 app = FastAPI(
-    title="Xoutaim API",
+    title="Renar API",
     version=backend_version(),
     lifespan=lifespan,
     openapi_url="/openapi.json" if settings.enable_docs else None,
@@ -133,7 +133,7 @@ app.include_router(svc.router)
 def home():
     # Lets a browser (e.g. a phone checking the server address) confirm
     # the API is reachable instead of getting a bare 404.
-    return {"status": "ok", "message": "Connection to Xoutaim OK", "version": app.version}
+    return {"status": "ok", "message": "Connection to Renar OK", "version": app.version}
 
 
 @app.get("/health")

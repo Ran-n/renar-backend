@@ -10,9 +10,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from xoutaim_backend import models  # noqa: F401  (registers all tables on Base.metadata)
-from xoutaim_backend.config import settings
-from xoutaim_backend.database import Base
+from renar_backend import models  # noqa: F401  (registers all tables on Base.metadata)
+from renar_backend.config import settings
+from renar_backend.database import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

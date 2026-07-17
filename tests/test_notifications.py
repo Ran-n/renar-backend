@@ -9,9 +9,9 @@ Notification center + the new-episode checker (with an injected TMDB fetch).
 
 from datetime import date, timedelta
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import Notification
-from xoutaim_backend.social.notifier import check_new_episodes
+from renar_backend.database import SessionLocal
+from renar_backend.models import Notification
+from renar_backend.social.notifier import check_new_episodes
 
 
 def _seed_notification(user_id: int, **overrides) -> int:

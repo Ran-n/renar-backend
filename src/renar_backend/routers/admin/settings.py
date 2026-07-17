@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 20:02:06.486462
+Revised: 2026/07/18 00:26:59.097325
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
@@ -150,7 +150,7 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Site Settings &middot; xoutaim</title>
+  <title>Site Settings &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_PAGE_CSS}{_SETTINGS_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -161,7 +161,7 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
       <div class="logo">&#x2699;</div>
       <div class="brand">
         <span class="brand-name">Site Settings</span>
-        <span class="brand-sub">xoutaim</span>
+        <span class="brand-sub">renar</span>
       </div>
     </a>
     <div class="topbar-fill"></div>

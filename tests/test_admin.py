@@ -10,8 +10,8 @@ Admin panel: HTTP Basic gate and the user-delete action.
 from conftest import ADMIN_BASIC as BASIC
 from conftest import PASSWORD
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import (
+from renar_backend.database import SessionLocal
+from renar_backend.models import (
     Comment,
     CommentLike,
     CommentReport,
@@ -426,7 +426,7 @@ def test_admin_periodic_tasks_toggle_persists(client, admin_enabled):
 def test_admin_periodic_tasks_toggle_is_atomized(client, admin_enabled):
     """Disabling episode_check must not disable episode_history_sync — the
     whole point of splitting them into separate task_keys."""
-    from xoutaim_backend import task_runs
+    from renar_backend import task_runs
 
     client.post(
         "/admin/periodic-tasks/toggle",
@@ -459,8 +459,8 @@ def test_admin_periodic_tasks_toggle_requires_auth(client, admin_enabled):
 
 
 def test_admin_periodic_tasks_shows_recorded_run(client, admin_enabled):
-    from xoutaim_backend import task_runs
-    from xoutaim_backend.models import utcnow
+    from renar_backend import task_runs
+    from renar_backend.models import utcnow
 
     task_runs.record_run("episode_check", utcnow(), "ok", "3 new notifications")
     r = client.get("/admin/periodic-tasks", auth=BASIC)
@@ -469,8 +469,8 @@ def test_admin_periodic_tasks_shows_recorded_run(client, admin_enabled):
 
 
 def test_admin_periodic_tasks_shows_error_status(client, admin_enabled):
-    from xoutaim_backend import task_runs
-    from xoutaim_backend.models import utcnow
+    from renar_backend import task_runs
+    from renar_backend.models import utcnow
 
     task_runs.record_run("strike_cleanup", utcnow(), "error", "db timeout")
     r = client.get("/admin/periodic-tasks", auth=BASIC)
@@ -500,7 +500,7 @@ def test_admin_periodic_tasks_interval_persists(client, admin_enabled):
 def test_admin_periodic_tasks_interval_is_atomized(client, admin_enabled):
     """Rescheduling episode_check must not reschedule episode_history_sync —
     each task keeps its own interval, same as its own enable flag."""
-    from xoutaim_backend import task_runs
+    from renar_backend import task_runs
 
     client.post(
         "/admin/periodic-tasks/interval",
@@ -707,7 +707,7 @@ def test_admin_delete_invite_missing_returns_404(client, admin_enabled):
 
 
 def test_revoked_invite_cannot_register(client, admin_enabled):
-    from xoutaim_backend import site_settings
+    from renar_backend import site_settings
 
     # enable invite-only via the admin panel
     payload_settings = {

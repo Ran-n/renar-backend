@@ -11,9 +11,9 @@ cache season_tmdb() uses) on the first request that needs it.
 
 from datetime import date, timedelta
 
-from xoutaim_backend.tmdb import tmdb_store
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import Episode, LibraryEntry
+from renar_backend.tmdb import tmdb_store
+from renar_backend.database import SessionLocal
+from renar_backend.models import Episode, LibraryEntry
 
 
 def _add(client, headers, **kwargs) -> dict:

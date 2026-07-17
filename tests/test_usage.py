@@ -11,8 +11,8 @@ per-endpoint drill-down, and the per-user library drill-down.
 from conftest import ADMIN_BASIC as BASIC
 from conftest import register
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import EndpointStat, RequestDay
+from renar_backend.database import SessionLocal
+from renar_backend.models import EndpointStat, RequestDay
 
 
 def _stats():

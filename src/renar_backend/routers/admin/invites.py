@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/18 00:26:58.864620
 
 Admin invite-codes page: list, generate, revoke, restore, and delete
 registration invite codes.
@@ -215,7 +215,7 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Invite Codes &middot; xoutaim</title>
+  <title>Invite Codes &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_PAGE_CSS}{_SETTINGS_CSS}{_INVITES_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -226,7 +226,7 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
       <div class="logo">&#x1F4E6;</div>
       <div class="brand">
         <span class="brand-name">Invite Codes</span>
-        <span class="brand-sub">xoutaim</span>
+        <span class="brand-sub">renar</span>
       </div>
     </a>
     <div class="topbar-fill"></div>

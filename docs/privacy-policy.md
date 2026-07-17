@@ -1,44 +1,34 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/16 09:19:09.907159 )
-[//]: # (+ Revised: 	2026/07/17 09:40:41.563794 )
+[//]: # (+ Revised: 	2026/07/18 00:26:59.495452 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ DRAFT — not yet published. Needs: effective date, hosting provider/  )
 [//]: # (+ jurisdiction, and a legal review before this goes live or gets       )
-[//]: # (+ linked from any app store listing. The app is currently named        )
-[//]: # (+ "Xoutaim" but a rename is planned — the domain/email are subdomained  )
-[//]: # (+ under the app name (xoutaim.breren.com), so a rename means updating   )
-[//]: # (+ BOTH the product-name mentions AND every xoutaim.breren.com/          )
-[//]: # (+ privacy@xoutaim.breren.com reference, not just the former.           )
+[//]: # (+ linked from any app store listing.                                   )
 [//]: # ( ---------------------------------------------------------------------- )
 
-# Privacy Policy — Xoutaim
+# Privacy Policy — Renar
 
 **Status: DRAFT.** Company is set (Breren); domain/contact are scoped under
-the current app name (xoutaim.breren.com, privacy@xoutaim.breren.com).
+the app name (renar.breren.com, privacy@renar.breren.com).
 Still open: `[EFFECTIVE DATE]`, `[HOSTING PROVIDER]`, `[JURISDICTION]` —
 fill in once hosting is chosen (see `docs/backlog.md`, Infrastructure /
 Publishing sections). Have a lawyer review before publishing or linking
 this from a store listing — this draft reflects what the app actually does
 today, but isn't a substitute for legal sign-off.
 
-**Note:** the app is currently named "Xoutaim" but a rename is planned.
-Because the domain is `xoutaim.breren.com` (app-name subdomain, not a bare
-`breren.com`), a rename means updating the product name **and** every
-domain/email reference in this document — the company (Breren) is the only
-thing that stays fixed.
-
 _Last updated: [EFFECTIVE DATE]_
 
 ## Who we are
 
-Xoutaim ("Xoutaim", "we", "us") is a personal media tracker for films, TV
+Renar ("Renar", "we", "us") is a personal media tracker for films, TV
 shows, books, and YouTube videos, operated by Breren. This policy covers
-the Xoutaim mobile apps, web app, and backend service. If you have
+the Renar mobile apps, web app, and backend service. If you have
 questions about this policy or your data, contact us at
-privacy@xoutaim.breren.com.
+privacy@renar.breren.com.
 
 ## What we collect
 
@@ -65,12 +55,12 @@ anyone.
 
 **What we don't collect.** We don't use advertising SDKs, third-party
 analytics/tracking pixels, or sell your data to anyone. There is no ad
-network integrated into Xoutaim.
+network integrated into Renar.
 
 ## Third-party services we use to fetch content metadata
 
 To show posters, titles, episode lists, and other metadata for the movies,
-shows, and videos you track, Xoutaim queries:
+shows, and videos you track, Renar queries:
 
 - **The Movie Database (TMDB)**
 - **TheVDB (TVDB)** — used only as a fallback to resolve titles TMDB can't
@@ -98,7 +88,7 @@ beyond running and securing the app.
 ## How long we keep it
 
 Account and library data is kept for as long as your account exists.
-Deleting your account (in-app, or via a request to privacy@xoutaim.breren.com) removes
+Deleting your account (in-app, or via a request to privacy@renar.breren.com) removes
 your user record and all associated library entries, images, and
 preferences. IP-based security logs (login attempts, rate-limit strikes)
 are kept only as long as needed for abuse detection and are not tied to
@@ -113,21 +103,21 @@ EU/EEA/UK), you may have the right to:
 - **Correct** inaccurate data (most of this you can already edit directly
   in your profile settings)
 - **Delete** your account and associated data — available directly in the
-  app, or by contacting privacy@xoutaim.breren.com
+  app, or by contacting privacy@renar.breren.com
 - **Export** your data in a portable format
 - **Object to or restrict** certain processing
 
 To exercise any of these, use the in-app options where available or
-contact us at privacy@xoutaim.breren.com. We'll respond within the timeframe required
+contact us at privacy@renar.breren.com. We'll respond within the timeframe required
 by applicable law.
 
 ## Children's privacy
 
-Xoutaim is not directed at children under 13 (or the minimum age required
+Renar is not directed at children under 13 (or the minimum age required
 by your local law, e.g. 16 in some EU member states), and we do not
 knowingly collect personal information from children under that age. If
 you believe a child has created an account, contact us at
-privacy@xoutaim.breren.com and we'll remove it.
+privacy@renar.breren.com and we'll remove it.
 
 ## Data storage and security
 
@@ -156,4 +146,4 @@ we'll provide additional notice (e.g. in-app).
 ## Contact
 
 Questions, requests, or complaints about this policy or your data:
-privacy@xoutaim.breren.com.
+privacy@renar.breren.com.

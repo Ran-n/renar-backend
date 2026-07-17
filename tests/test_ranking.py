@@ -14,9 +14,9 @@ from datetime import timedelta
 
 from sqlalchemy.exc import IntegrityError
 
-from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.models import AppCounters, LibraryEntry, MediaType, Title, User, WatchStatus, utcnow
-from xoutaim_backend.routers.stats import _total_watch_minutes_by_user
+from renar_backend.database import SessionLocal
+from renar_backend.models import AppCounters, LibraryEntry, MediaType, Title, User, WatchStatus, utcnow
+from renar_backend.routers.stats import _total_watch_minutes_by_user
 
 
 def _set_premium(user_id: int, days: int = 30) -> None:

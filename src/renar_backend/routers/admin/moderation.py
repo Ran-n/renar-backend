@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/18 00:26:58.941010
 
 Admin moderation: comment review/deletion and banned-IP management.
 """
@@ -101,7 +101,7 @@ def _render_comments(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Comment Manager &middot; xoutaim</title>
+  <title>Comment Manager &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_PAGE_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -112,7 +112,7 @@ def _render_comments(
       <div class="logo">&#x1F4AC;</div>
       <div class="brand">
         <span class="brand-name">Comment Manager</span>
-        <span class="brand-sub">xoutaim</span>
+        <span class="brand-sub">renar</span>
       </div>
     </a>
     <div class="topbar-fill"></div>
@@ -177,7 +177,7 @@ def _render_bans(bans: list[BannedIP]) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Banned IPs &middot; xoutaim</title>
+  <title>Banned IPs &middot; renar</title>
   <link rel="icon" href="{_FAVICON}">
   <style>{_BASE_CSS}{_PAGE_CSS}{_RESPONSIVE_CSS}</style>
 </head>
@@ -195,7 +195,7 @@ def _render_bans(bans: list[BannedIP]) -> str:
       </div>
       <div class="brand">
         <span class="brand-name">Banned IPs</span>
-        <span class="brand-sub">xoutaim</span>
+        <span class="brand-sub">renar</span>
       </div>
     </a>
     <div class="topbar-fill"></div>
