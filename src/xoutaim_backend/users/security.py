@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/17 18:08:58.084307
+Revised: 2026/07/17 18:47:08.824851
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -44,10 +44,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Match
 
-from .. import site_settings
+from .. import site_settings, task_runs
 from ..config import settings
 from ..database import SessionLocal
-from ..models import BannedIP, Strike
+from ..models import BannedIP, Strike, utcnow
 
 _log = logging.getLogger(__name__)
 
@@ -213,20 +213,25 @@ def load_active_temp_bans() -> dict[str, float]:
 
 
 def _cleanup_old_strikes(now: float) -> None:
-    """Drop strike rows nobody has touched in 30 days, at most once an hour."""
+    """Drop strike rows nobody has touched in 30 days, at most once per the
+    admin-configurable interval (task_runs, default 60 minutes)."""
     global _last_strike_cleanup
-    if not site_settings.current().bans_check_enabled:
+    if not task_runs.is_enabled("strike_cleanup"):
         return
-    if now - _last_strike_cleanup < _HOUR:
+    interval_seconds = task_runs.get_interval_minutes("strike_cleanup") * _MINUTE
+    if now - _last_strike_cleanup < interval_seconds:
         return
     _last_strike_cleanup = now
+    started = utcnow()
     cutoff = datetime.now(UTC) - timedelta(days=30)
     try:
         with SessionLocal() as db:
-            db.query(Strike).filter(Strike.last_offense_at < cutoff).delete(synchronize_session=False)
+            deleted = db.query(Strike).filter(Strike.last_offense_at < cutoff).delete(synchronize_session=False)
             db.commit()
+        task_runs.record_run("strike_cleanup", started, "ok", f"{deleted} strikes dropped")
     except Exception:
         _log.exception("could not clean up old strikes")
+        task_runs.record_run("strike_cleanup", started, "error", "cleanup failed, see server logs")
 
 
 # ---------------------------------------------------------------------------

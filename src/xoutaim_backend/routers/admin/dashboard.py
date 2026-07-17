@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 14:51:18.283467
+Revised: 2026/07/17 18:47:08.546471
 
 Admin dashboard: the tile-grid landing page at /admin (or the configured
 admin path).
@@ -130,6 +130,18 @@ _SERVICES = [
             ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
             '<rect x="1" y="4" width="22" height="16" rx="2" ry="2"/>'
             '<line x1="1" y1="10" x2="23" y2="10"/>'
+            "</svg>"
+        ),
+    },
+    {
+        "name": "Periodic Tasks",
+        "desc": "Enable, schedule, and monitor background pollers",
+        "href": f"{_P}/periodic-tasks",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
+            ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+            '<circle cx="12" cy="12" r="10"/>'
+            '<polyline points="12 6 12 12 16 14"/>'
             "</svg>"
         ),
     },

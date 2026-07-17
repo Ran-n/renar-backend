@@ -2,10 +2,11 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 14:51:05.505729
+Revised: 2026/07/17 18:47:08.614216
 
 Admin site-settings page: view and save registration mode, rate limits, and
-periodic-task toggles.
+abuse thresholds. Periodic-task toggles/intervals live on their own page
+(routers/admin/periodic_tasks.py).
 """
 
 import html
@@ -274,33 +275,11 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
 
       <div class="settings-section">
         <div class="settings-title"><span class="icon">&#x23F1;</span>Periodic background tasks</div>
-        {
-        toggle(
-            "episode_check_enabled",
-            "episode_check_enabled",
-            ss.episode_check_enabled,
-            "Episode check",
-            "Poll TMDB for new episodes on tracked shows and sync episode history.",
-        )
-    }
-        {
-        toggle(
-            "film_check_enabled",
-            "film_check_enabled",
-            ss.film_check_enabled,
-            "Film check",
-            "Poll TMDB for upcoming release dates on tracked want-to-watch films.",
-        )
-    }
-        {
-        toggle(
-            "bans_check_enabled",
-            "bans_check_enabled",
-            ss.bans_check_enabled,
-            "Bans check",
-            "Periodically drop strike rows nobody has touched in 30 days.",
-        )
-    }
+        <p class="settings-hint">
+          Episode check, episode history sync, film release check, and strike
+          cleanup each have their own enable switch and poll interval on the
+          <a href="{_P}/periodic-tasks">Periodic Tasks</a> page.
+        </p>
       </div>
 
       <button class="settings-save" type="submit">Save all settings</button>
@@ -336,9 +315,6 @@ def save_settings(
     probe_window_minutes: int = Form(...),
     ban_minutes: int = Form(...),
     strike_ban_threshold: int = Form(...),
-    episode_check_enabled: str | None = Form(default=None),
-    film_check_enabled: str | None = Form(default=None),
-    bans_check_enabled: str | None = Form(default=None),
     admin_user: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
@@ -356,9 +332,6 @@ def save_settings(
     ss.probe_window_minutes = probe_window_minutes
     ss.ban_minutes = ban_minutes
     ss.strike_ban_threshold = strike_ban_threshold
-    ss.episode_check_enabled = episode_check_enabled == "1"
-    ss.film_check_enabled = film_check_enabled == "1"
-    ss.bans_check_enabled = bans_check_enabled == "1"
     db.commit()
     _site_settings_mod.invalidate()
     _log.info(

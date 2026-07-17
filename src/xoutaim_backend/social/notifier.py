@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/07/17 18:08:57.738916
+Revised: 2026/07/17 18:47:08.752394
 
 Background checker: creates notifications when tracked shows air new episodes.
 """
@@ -14,10 +14,9 @@ from datetime import date, timedelta
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from .. import site_settings
-from ..config import settings
+from .. import task_runs
 from ..database import SessionLocal
-from ..models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus
+from ..models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus, utcnow
 from ..tmdb.tmdb_http import tmdb_get
 from ..tmdb.tmdb_store import ENDED_STATUSES, store_details, sync_show_episodes
 
@@ -199,29 +198,62 @@ def check_films_once() -> int:
         db.close()
 
 
-async def run_periodic() -> None:
+async def _episode_check_loop() -> None:
     await asyncio.sleep(15)  # let the app finish booting
     while True:
-        ss = site_settings.current()
-        if not ss.episode_check_enabled:
-            _log.info("episode check skipped: disabled in site settings")
+        if not task_runs.is_enabled("episode_check"):
+            _log.info("episode check skipped: disabled")
         else:
+            started = utcnow()
             try:
                 n = await asyncio.to_thread(check_once)
                 _log.info("episode check done: %d new notifications", n)
+                task_runs.record_run("episode_check", started, "ok", f"{n} new notifications")
             except Exception:
                 _log.exception("episode check failed")
+                task_runs.record_run("episode_check", started, "error", "check failed, see server logs")
+        await asyncio.sleep(task_runs.get_interval_minutes("episode_check") * 60)
+
+
+async def _episode_history_sync_loop() -> None:
+    await asyncio.sleep(15)
+    while True:
+        if not task_runs.is_enabled("episode_history_sync"):
+            _log.info("episode history sync skipped: disabled")
+        else:
+            started = utcnow()
             try:
                 k = await asyncio.to_thread(sync_episode_history_once)
                 _log.info("episode history sync done: %d shows checked", k)
+                task_runs.record_run("episode_history_sync", started, "ok", f"{k} shows checked")
             except Exception:
                 _log.exception("episode history sync failed")
-        if not ss.film_check_enabled:
-            _log.info("film check skipped: disabled in site settings")
+                task_runs.record_run("episode_history_sync", started, "error", "sync failed, see server logs")
+        await asyncio.sleep(task_runs.get_interval_minutes("episode_history_sync") * 60)
+
+
+async def _film_check_loop() -> None:
+    await asyncio.sleep(15)
+    while True:
+        if not task_runs.is_enabled("film_check"):
+            _log.info("film check skipped: disabled")
         else:
+            started = utcnow()
             try:
                 m = await asyncio.to_thread(check_films_once)
                 _log.info("film release check done: %d titles refreshed", m)
+                task_runs.record_run("film_check", started, "ok", f"{m} titles refreshed")
             except Exception:
                 _log.exception("film release check failed")
-        await asyncio.sleep(settings.episode_check_minutes * 60)
+                task_runs.record_run("film_check", started, "error", "check failed, see server logs")
+        await asyncio.sleep(task_runs.get_interval_minutes("film_check") * 60)
+
+
+def start_periodic_tasks() -> list[asyncio.Task]:
+    """Launch the three independent per-task loops; each is paused/rescheduled
+    without affecting the others (see task_runs.py / admin Periodic Tasks page)."""
+    return [
+        asyncio.create_task(_episode_check_loop()),
+        asyncio.create_task(_episode_history_sync_loop()),
+        asyncio.create_task(_film_check_loop()),
+    ]

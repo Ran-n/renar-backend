@@ -163,11 +163,10 @@ API docs: http://127.0.0.1:8000/docs
 
 TMDB and Open Library responses are cached in memory for 30 minutes; book covers for 24 hours.
 
-Background tasks run every `EPISODE_CHECK_MINUTES` (default 360 minutes):
-episode check (new notifications for tracked shows), film release date refresh,
-and ban-strike cleanup.  Each can be paused individually from
-`<ADMIN_PATH>/settings` (`episode_check_enabled`, `film_check_enabled`,
-`bans_check_enabled`).
+Background tasks (episode check, episode history sync, film release date
+refresh, ban-strike cleanup) each run on their own schedule and can be
+independently enabled/disabled and rescheduled from
+`<ADMIN_PATH>/periodic-tasks`.
 
 ## Tests
 

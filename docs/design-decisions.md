@@ -563,8 +563,8 @@ next poller run.
 **Why:** the periodic pollers already exist for the notifier; letting
 `/upcoming` read their output instead of re-fetching TMDB moves the cost
 off the request path entirely, at the trade-off that a just-added title's
-upcoming entry can lag by up to one poll interval (`episode_check_minutes`,
-default 6h) before it first appears.
+upcoming entry can lag by up to one poll interval (per-task, admin-configurable
+from `<ADMIN_PATH>/periodic-tasks`; 6h by default) before it first appears.
 
 ### `/upcoming/history` backfills a per-episode table lazily, on request
 
@@ -745,3 +745,51 @@ orphaned worker once answered every request on :8000 with day-old code
 through any number of "restarts"; the two guards make that impossible
 from both ends (a zombie can't be joined by a new server, and workers
 can't outlive their reloader).
+
+---
+
+## Package structure (Common Closure Principle)
+
+### Splitting `routers/admin.py` into `routers/admin/`
+
+The original `routers/admin.py` was a 126 KB, 3 039-line god-file. It was
+split into a package with domain-cohesive submodules:
+
+| submodule | responsibility |
+|---|---|
+| `_html.py` | CSS constants, chart helpers, shared HTML utilities |
+| `dashboard.py` | landing page (service-tile grid) |
+| `users.py` | user list/detail/library + all user-action POSTs |
+| `analytics.py` | site-wide usage stats and per-endpoint caller breakdown |
+| `moderation.py` | comment review/deletion and banned-IP management |
+| `settings.py` | site settings read/write |
+| `invites.py` | invite-code generation and lifecycle |
+
+`__init__.py` aggregates the six sub-routers under `APIRouter(prefix=_P)`
+and is the sole public surface; `main.py` still calls
+`app.include_router(admin.router)` unchanged.
+
+**CCP rationale:** each submodule corresponds to a feature that changes
+independently. Editing invite logic never touches the chart helpers; adding
+a new moderation action never touches settings. Intra-feature helpers
+(render functions, CSS) co-locate with the routes that use them.
+
+### Grouping flat root-level files into subpackages
+
+The 22 peer files at `src/xoutaim_backend/` were regrouped into five
+domain subpackages. Files at the root that are cross-cutting
+(`models.py`, `schemas.py`, `config.py`, `database.py`, `site_settings.py`,
+`db_triggers.py`, `constants.py`) stay at root level.
+
+| subpackage | moved files | closed over |
+|---|---|---|
+| `media/` | `storage.py`, `http_cache.py`, `image_service.py`, `image_cache.py`, `image_utils.py` | content-addressed store + in-memory TTL cache |
+| `tmdb/` | `tmdb_http.py`, `tmdb_store.py` | TMDB HTTP client + persistent payload cache |
+| `users/` | `auth.py`, `security.py`, `premium.py`, `usage.py`, `accounts.py` | auth, middleware, premium rules, account lifecycle |
+| `social/` | `comment_threads.py`, `notifier.py` | comment tree traversal + background episode checker |
+| `catalog/` | `titles.py` | global Title resolution and genre management |
+
+**CCP rationale:** files within each group change together — a change to
+the image store pipeline touches `storage`, `image_service` and
+`image_cache` but never `tmdb_store` or `auth`. Grouping by what-changes-
+together keeps diffs local to one package.
