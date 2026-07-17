@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.200759
-Revised: 2026/07/16 09:54:30.478211
+Revised: 2026/07/17 00:00:00.000000
 
 DB-side helpers for the content-addressed image store.
 
@@ -21,7 +21,7 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .models import EpisodeCustomStill, ExternalImage, Image, LibraryEntry, User
+from ..models import EpisodeCustomStill, ExternalImage, Image, LibraryEntry, User
 from .storage import delete_image, store_image
 
 _log = logging.getLogger(__name__)

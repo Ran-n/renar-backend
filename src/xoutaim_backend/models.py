@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/16 13:30:58.689263
+Revised: 2026/07/17 18:08:57.036333
 """
 
 import enum
@@ -255,8 +255,10 @@ class InviteCode(Base):
     and (expires_at is None or expires_at > utcnow()). max_uses is None for
     an unlimited-use code (e.g. a public "join us" link).
 
-    created_by_user_id is None when generated from the admin panel;
-    the field is here for future user-generated referral codes.
+    created_by_user_id is None when generated from the admin panel (that auth
+    is a single env-configured HTTP Basic credential, not a users.id row);
+    the field is here for future user-generated referral codes. In that case
+    created_by_admin instead carries the HTTP Basic admin's plain username.
     """
 
     __tablename__ = "invite_codes"
@@ -264,6 +266,7 @@ class InviteCode(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_by_admin: Mapped[str | None] = mapped_column(String(150), nullable=True)
     # No Python-side default: every caller (admin panel, tests) passes this
     # explicitly, and a default=1 here would silently override an explicit
     # None (unlimited) at flush time.

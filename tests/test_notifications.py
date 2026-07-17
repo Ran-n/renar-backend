@@ -11,7 +11,7 @@ from datetime import date, timedelta
 
 from xoutaim_backend.database import SessionLocal
 from xoutaim_backend.models import Notification
-from xoutaim_backend.notifier import check_new_episodes
+from xoutaim_backend.social.notifier import check_new_episodes
 
 
 def _seed_notification(user_id: int, **overrides) -> int:

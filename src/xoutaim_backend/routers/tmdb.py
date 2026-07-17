@@ -19,12 +19,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
 from ..database import get_db
-from ..image_cache import store_external_image, stored_external_image
+from ..media.image_cache import store_external_image, stored_external_image
 from ..models import MediaType, User
-from ..tmdb_http import BACKDROP_BASE, IMAGE_BASE, POSTER_BASE, TMDB_KIND, http_client, tmdb_get
-from ..tmdb_store import TMDB_LOCALE, cached_tmdb
+from ..tmdb.tmdb_http import BACKDROP_BASE, IMAGE_BASE, POSTER_BASE, TMDB_KIND, http_client, tmdb_get
+from ..tmdb.tmdb_store import TMDB_LOCALE, cached_tmdb
+from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/tmdb", tags=["tmdb"])
 _log = logging.getLogger(__name__)

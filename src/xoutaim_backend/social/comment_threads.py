@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 20:00:00.000000
-Revised: 2026/07/12 20:00:00.000000
+Revised: 2026/07/17 00:00:00.000000
 
 Thread-root resolution for comments. Only a root comment (parent_id is
 NULL) stores title_id/season/episode; a reply's scope is the thread it
@@ -14,7 +14,7 @@ every row (see docs/design-decisions.md, "Comment replies").
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from .models import Comment
+from ..models import Comment
 
 
 def ancestor_depth(db: Session, comment: Comment) -> int:

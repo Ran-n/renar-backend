@@ -13,7 +13,7 @@ import re
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
 
-from ..storage import image_path
+from ..media.storage import image_path
 
 router = APIRouter(prefix="/images", tags=["images"])
 _log = logging.getLogger(__name__)

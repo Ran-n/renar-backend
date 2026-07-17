@@ -13,13 +13,13 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
-from ..comment_threads import ancestor_depth, resolve_root_scope
+from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
 from ..models import Comment, CommentLike, CommentReport, MediaType, User
-from ..premium import flair
 from ..schemas import CommentCreate, CommentReportCreate
-from ..titles import find_or_create_title, find_title
+from ..social.comment_threads import ancestor_depth, resolve_root_scope
+from ..users.auth import get_current_user
+from ..users.premium import flair
 
 router = APIRouter(prefix="/comments", tags=["comments"])
 _log = logging.getLogger(__name__)

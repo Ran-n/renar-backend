@@ -12,10 +12,11 @@ import time
 
 import pytest
 
-from xoutaim_backend import security, site_settings
+from xoutaim_backend import site_settings
 from xoutaim_backend.config import settings
 from xoutaim_backend.database import SessionLocal
 from xoutaim_backend.models import BannedIP, SiteSettings, Strike
+from xoutaim_backend.users import security
 
 SECRET = "test-internal-secret"
 

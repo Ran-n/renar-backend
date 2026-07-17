@@ -16,11 +16,11 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, require_premium
 from ..database import get_db
 from ..models import User
-from ..premium import PALETTE
 from ..schemas import PremiumStyleUpdate, UserOut
+from ..users.auth import get_current_user, require_premium
+from ..users.premium import PALETTE
 
 router = APIRouter(prefix="/premium", tags=["premium"])
 _log = logging.getLogger(__name__)

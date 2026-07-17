@@ -11,7 +11,7 @@ cache season_tmdb() uses) on the first request that needs it.
 
 from datetime import date, timedelta
 
-from xoutaim_backend import tmdb_store
+from xoutaim_backend.tmdb import tmdb_store
 from xoutaim_backend.database import SessionLocal
 from xoutaim_backend.models import Episode, LibraryEntry
 

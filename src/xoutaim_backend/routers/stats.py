@@ -16,11 +16,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, require_premium
+from ..catalog.titles import WITH_TITLE_GENRES
 from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import AppCounters, EpisodeWatch, LibraryEntry, MediaType, User, WatchStatus
-from ..titles import WITH_TITLE_GENRES
+from ..users.auth import get_current_user, require_premium
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 _log = logging.getLogger(__name__)

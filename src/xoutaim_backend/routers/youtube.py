@@ -15,10 +15,10 @@ import re
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ..auth import get_current_user
 from ..config import settings
-from ..http_cache import TTLCache
+from ..media.http_cache import TTLCache
 from ..models import User
+from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/youtube", tags=["youtube"])
 _log = logging.getLogger(__name__)

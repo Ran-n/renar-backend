@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.008319
-Revised: 2026/07/16 09:54:30.246212
+Revised: 2026/07/17 00:00:00.000000
 """
 
 import logging
@@ -15,9 +15,9 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from .config import settings
-from .database import get_db
-from .models import User, utcnow
+from ..config import settings
+from ..database import get_db
+from ..models import User, utcnow
 
 _log = logging.getLogger(__name__)
 

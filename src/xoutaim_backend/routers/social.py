@@ -13,13 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..catalog.titles import WITH_TITLE_GENRES
 from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import Follow, LibraryEntry, MediaType, Title, User, WatchStatus
-from ..premium import flair
 from ..schemas import LibraryEntryOut
-from ..titles import WITH_TITLE_GENRES
+from ..users.auth import get_current_user
+from ..users.premium import flair
 
 router = APIRouter(tags=["social"])
 _log = logging.getLogger(__name__)

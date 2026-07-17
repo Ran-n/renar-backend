@@ -16,7 +16,6 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import notifier
 from ._devserver import exit_when_orphaned
 from .config import settings
 from .routers import (
@@ -36,8 +35,9 @@ from .routers import (
     upcoming,
     youtube,
 )
-from .security import AbuseGuardMiddleware, OriginCheckMiddleware, SecurityHeadersMiddleware
-from .usage import UsageTrackingMiddleware
+from .social import notifier
+from .users.security import AbuseGuardMiddleware, OriginCheckMiddleware, SecurityHeadersMiddleware
+from .users.usage import UsageTrackingMiddleware
 
 # Schema is managed by Alembic — run `alembic upgrade head` before starting.
 

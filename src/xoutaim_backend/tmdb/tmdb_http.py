@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.357680
-Revised: 2026/07/16 09:54:31.683423
+Revised: 2026/07/17 00:00:00.000000
 
 HTTP layer for TMDB: pooled client, auth, and the short-lived in-memory
 cache. Lives below the router so the notifier and tmdb_store can call TMDB
@@ -18,8 +18,8 @@ import logging
 import httpx
 from fastapi import HTTPException, status
 
-from .config import settings
-from .http_cache import TTLCache
+from ..config import settings
+from ..media.http_cache import TTLCache
 
 _log = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ these tests seed that data directly. Also covers the film-release poller.
 from datetime import date, timedelta
 
 from xoutaim_backend.database import SessionLocal
-from xoutaim_backend.notifier import check_upcoming_films
+from xoutaim_backend.social.notifier import check_upcoming_films
 
 
 def _add(client, headers, **kwargs) -> dict:
