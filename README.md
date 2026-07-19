@@ -1,16 +1,12 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/07/18 00:26:59.410602 )
+[//]: # (+ Revised: 	2026/07/19 04:17:42.060159 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Renar Backend
 
-FastAPI backend for Renar — your personal media tracker (films, TV shows, books, YouTube videos and more).
-
-> Books and YouTube are fully implemented here (endpoints, models, imports),
-> but the current frontend hides their tabs/cards (scope narrowed to
-> tv/movies for now) — see renar-frontend's README.
+FastAPI backend for Renar — your personal media tracker (films and TV shows).
 
 ## Setup (uses [uv](https://docs.astral.sh/uv/))
 
@@ -73,7 +69,7 @@ API docs: http://127.0.0.1:8000/docs
   `search`, `favorites_only`; `limit`/`offset` for pagination; optional `lang`
   returns localized title display names from cached TMDB translations,
   warming missing translations in the background)
-- `POST /media` — save a film / tv_show / book / youtube item
+- `POST /media` — save a film / tv_show item
 - `GET /media/{id}` / `PATCH /media/{id}` / `DELETE /media/{id}`
 - `GET /media/ratings?tmdb_id=...|title=...` — community average rating for a title
 - `POST /media/{id}/rewatch` — log a rewatch of a whole item or one episode
@@ -95,10 +91,6 @@ API docs: http://127.0.0.1:8000/docs
   (curated source for the premium poster picker grid)
 - `GET /tmdb/credits?media_type=...&tmdb_id=...` — cast/crew for a title
 - `GET /tmdb/image/{size}/{filename}` — TMDB poster proxy served from our origin
-- `GET /books/search?query=...` — Open Library proxy for auto-filling title, author,
-  year, page count and cover (free, no API key)
-- `GET /books/trending` — Open Library daily trending feed
-- `GET /books/cover/{cover_id}` — cached/redirect-safe cover image proxy
 - `GET /stats` — watch time, films/episodes watched, shows completed, favorites, top genres
 - `GET /stats/ranking/metrics` — premium: list of available leaderboard metrics
 - `GET /stats/ranking?metric=...` — premium: percentile rank on one metric
@@ -121,10 +113,6 @@ API docs: http://127.0.0.1:8000/docs
   `DELETE /{id}`, `POST /check_now`) — new-episode notifications for tracked shows
 - `GET /upcoming` (+ `/history`) — countdown feed: next episodes and film premieres
   for tracked titles, plus a history of past ones
-- `GET /youtube/resolve?url=...` — title/channel/thumbnail for a YouTube URL (oEmbed, no key)
-- `GET /youtube/search_channels`, `GET /youtube/trending_channels`,
-  `GET /youtube/channel_videos`, `GET /youtube/video_info` — YouTube Data API proxy
-  for Explore's YouTube feed (requires `YOUTUBE_API_KEY` in `.env`)
 - `POST /import/tvtime` + `GET /import/tvtime/status` — import a TV Time GDPR export zip
   (runs in the background; the status endpoint reports progress)
 - `GET /images/{hash}` — content-addressed stored files (avatars, profile
@@ -161,11 +149,11 @@ API docs: http://127.0.0.1:8000/docs
     configurable max-uses (single/5/10/25/unlimited/custom) and optional expiry;
     revoke active codes on-page.
 
-TMDB and Open Library responses are cached in memory for 30 minutes; book covers for 24 hours.
+TMDB responses are cached in memory for 6 hours.
 
 Background tasks (episode check, episode history sync, film release date
-refresh, ban-strike cleanup) each run on their own schedule and can be
-independently enabled/disabled and rescheduled from
+refresh, TMDB metadata resync, ban-strike cleanup) each run on their own
+schedule and can be independently enabled/disabled and rescheduled from
 `<ADMIN_PATH>/periodic-tasks`.
 
 ## Tests

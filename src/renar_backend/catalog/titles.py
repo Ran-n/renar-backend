@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/18 19:33:27.239607
 
 Shared Title resolution: every place that addresses a global title by
 (media_type, tmdb_id-or-title text) — library adds, imports, comments,
@@ -80,8 +80,6 @@ def find_or_create_title(
     runtime_minutes: int | None = None,
     total_episodes: int | None = None,
     genres: list[str] | None = None,
-    author: str | None = None,
-    page_count: int | None = None,
 ) -> Title:
     """Find the shared Title, creating it (with its genre links) if no one
     has tracked or commented on it yet. Race-safe: a concurrent insert of
@@ -99,8 +97,6 @@ def find_or_create_title(
         poster_url=poster_url,
         runtime_minutes=runtime_minutes,
         total_episodes=total_episodes,
-        author=author,
-        page_count=page_count,
         genre_rows=resolve_genres(db, genres),
     )
     db.add(new_title)

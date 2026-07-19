@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/07/16 09:54:31.367093
+Revised: 2026/07/19 03:49:23.178596
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -17,11 +17,11 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..media.image_cache import store_external_image, stored_external_image
-from ..models import MediaType, User
+from ..models import LibraryEntry, MediaType, Title, User
 from ..tmdb.tmdb_http import BACKDROP_BASE, IMAGE_BASE, POSTER_BASE, TMDB_KIND, http_client, tmdb_get
 from ..tmdb.tmdb_store import TMDB_LOCALE, cached_tmdb
 from ..users.auth import get_current_user
@@ -35,7 +35,32 @@ def _locale_params(language: str) -> dict | None:
     return {"language": locale} if locale else None
 
 
-def _map_results(raw: list[dict], limit: int = 20) -> list[dict]:
+def _poster_overrides(db: Session, user: User, media_type: str, tmdb_ids: set[int]) -> dict[int, str]:
+    """tmdb_id -> custom poster URL for this premium user's library entries.
+
+    Explore/Search/Trending otherwise build poster_url straight from TMDB's
+    own poster_path, so a premium user's custom poster (set from the
+    library/detail view, stored on LibraryEntry.custom_poster_image_id and
+    never written back to the shared Title row) never showed up there.
+    """
+    if not user.is_premium or not tmdb_ids:
+        return {}
+    entries = (
+        db.query(LibraryEntry)
+        .join(Title, LibraryEntry.title_id == Title.id)
+        .filter(
+            LibraryEntry.user_id == user.id,
+            Title.media_type == MediaType(media_type),
+            Title.tmdb_id.in_(tmdb_ids),
+            LibraryEntry.custom_poster_image_id.isnot(None),
+        )
+        .options(joinedload(LibraryEntry.title_ref), joinedload(LibraryEntry.custom_poster_image))
+        .all()
+    )
+    return {e.title_ref.tmdb_id: e.custom_poster_url for e in entries}
+
+
+def _map_results(raw: list[dict], limit: int = 20, poster_overrides: dict[int, str] | None = None) -> list[dict]:
     results = []
     for r in raw[:limit]:
         # movies use title/release_date, tv uses name/first_air_date
@@ -43,11 +68,15 @@ def _map_results(raw: list[dict], limit: int = 20) -> list[dict]:
         date = r.get("release_date") or r.get("first_air_date") or ""
         if not title:
             continue
+        tmdb_id = r["id"]
+        poster_url = f"{POSTER_BASE}{r['poster_path']}" if r.get("poster_path") else None
+        if poster_overrides:
+            poster_url = poster_overrides.get(tmdb_id, poster_url)
         results.append({
-            "tmdb_id": r["id"],
+            "tmdb_id": tmdb_id,
             "title": title,
             "year": int(date[:4]) if len(date) >= 4 and date[:4].isdigit() else None,
-            "poster_url": f"{POSTER_BASE}{r['poster_path']}" if r.get("poster_path") else None,
+            "poster_url": poster_url,
             "overview": (r.get("overview") or "")[:300],
             "vote_average": round(r.get("vote_average") or 0, 1),
         })
@@ -59,33 +88,42 @@ def search_tmdb(
     query: str = Query(min_length=1, max_length=200),
     media_type: str = Query(pattern="^(film|tv_show)$"),
     language: str = Query(default="en", pattern="^(en|gl|pt|es|eo)$"),
+    db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     data = tmdb_get(
         f"/search/{TMDB_KIND[media_type]}",
         {"query": query, "include_adult": "false", **(_locale_params(language) or {})},
     )
-    return _map_results(data.get("results", []), limit=10)
+    results = data.get("results", [])[:10]
+    overrides = _poster_overrides(db, user, media_type, {r["id"] for r in results})
+    return _map_results(results, limit=10, poster_overrides=overrides)
 
 
 @router.get("/trending")
 def trending_tmdb(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     language: str = Query(default="en", pattern="^(en|gl|pt|es|eo)$"),
+    db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     data = tmdb_get(f"/trending/{TMDB_KIND[media_type]}/week", _locale_params(language))
-    return _map_results(data.get("results", []))
+    results = data.get("results", [])[:20]
+    overrides = _poster_overrides(db, user, media_type, {r["id"] for r in results})
+    return _map_results(results, poster_overrides=overrides)
 
 
 @router.get("/popular")
 def popular_tmdb(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     language: str = Query(default="en", pattern="^(en|gl|pt|es|eo)$"),
+    db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     data = tmdb_get(f"/{TMDB_KIND[media_type]}/popular", _locale_params(language))
-    return _map_results(data.get("results", []))
+    results = data.get("results", [])[:20]
+    overrides = _poster_overrides(db, user, media_type, {r["id"] for r in results})
+    return _map_results(results, poster_overrides=overrides)
 
 
 def _map_details(media_type: str, tmdb_id: int, data: dict) -> dict:
@@ -153,7 +191,11 @@ def details_tmdb(
     return _map_details(media_type, tmdb_id, data)
 
 
-ALLOWED_IMAGE_SIZES = {"w92", "w154", "w185", "w300", "w342", "w500", "w780", "original"}
+ALLOWED_IMAGE_SIZES = {"w92", "w154", "w185", "w300", "w342", "w500", "w780", "w1280", "original"}
+# w1280 is backdrop/still-only upstream (not a poster bucket) but TMDB 404s on
+# an unknown size regardless of image kind, so it's safe to allow globally —
+# posters simply never request it. Used by the tap-to-zoom backdrop dialog
+# (`open_zoom_dialog` in the frontend), which needs a size bigger than w780.
 # TMDB image paths are immutable (a given /size/file never changes), so
 # cached copies are kept forever: bytes in the content-addressed store,
 # identity in the external_images table (each image fetched at most once).
@@ -162,12 +204,19 @@ _CTYPES = {".png": "image/png", ".webp": "image/webp"}
 
 
 @router.get("/image/{size}/{filename}")
-def image_proxy(size: str, filename: str, db: Session = Depends(get_db)):
+def image_proxy(size: str, filename: str):
     """Serve TMDB posters/backdrops from our origin.
 
     Browsers sometimes cannot load image.tmdb.org directly (ISP blocks,
     filtering extensions), and <img> tags cannot send auth headers — so this
     endpoint is public but restricted to TMDB image files only.
+
+    Deliberately does not take `db` via `Depends(get_db)`: that would keep a
+    pooled connection checked out for the entire request, including the
+    outbound TMDB fetch below (tens to hundreds of ms). A grid view loading
+    dozens of never-before-seen posters at once would then be bottlenecked by
+    the DB pool size (5 + 10 overflow) rather than actual network/CPU work.
+    Each of the two short DB touches below opens and closes its own session.
     """
     if (
         size not in ALLOWED_IMAGE_SIZES
@@ -179,7 +228,9 @@ def image_proxy(size: str, filename: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     ctype = _CTYPES.get(Path(filename).suffix, "image/jpeg")
-    cached = stored_external_image(db, "tmdb", f"{size}/{filename}")
+    key = f"{size}/{filename}"
+    with SessionLocal() as db:
+        cached = stored_external_image(db, "tmdb", key)
     if cached is not None:
         return FileResponse(cached, media_type=ctype, headers=_IMMUTABLE)
 
@@ -190,7 +241,8 @@ def image_proxy(size: str, filename: str, db: Session = Depends(get_db)):
     if resp.status_code != 200:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
-    store_external_image(db, "tmdb", f"{size}/{filename}", resp.content)
+    with SessionLocal() as db:
+        store_external_image(db, "tmdb", key, resp.content)
     return Response(resp.content, media_type=ctype, headers=_IMMUTABLE)
 
 
@@ -251,7 +303,7 @@ def alternate_episode_stills(
     return [
         {
             "preview_url": f"{IMAGE_BASE}/w300{s['file_path']}",
-            "url": f"{IMAGE_BASE}/w780{s['file_path']}",
+            "url": f"{IMAGE_BASE}/original{s['file_path']}",
         }
         for s in data.get("stills", [])[:40]
         if s.get("file_path")
@@ -323,7 +375,7 @@ def season_tmdb(
             "air_date": e.get("air_date"),
             "runtime": e.get("runtime"),
             "overview": e.get("overview") or "",
-            "still_url": (f"{IMAGE_BASE}/w342{e['still_path']}" if e.get("still_path") else None),
+            "still_url": (f"{IMAGE_BASE}/w300{e['still_path']}" if e.get("still_path") else None),
             "guest_stars": [
                 {
                     "name": g["name"],

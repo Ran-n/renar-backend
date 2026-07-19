@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/17 18:08:57.390257
+Revised: 2026/07/18 22:40:40.061899
 
 Periodic-task tracking: each background task (see TASKS) is independently
 enabled, independently scheduled, and reports its own run status — one
@@ -73,6 +73,15 @@ TASKS: list[TaskSpec] = [
         "Drop abuse-strike rows nobody has touched in 30 days.",
         "Security",
         60,
+    ),
+    TaskSpec(
+        "tmdb_metadata_resync",
+        "TMDB metadata resync",
+        "Refresh poster/backdrop/details for every tracked title, so a poster TMDB "
+        "later changes upstream eventually reaches us — unlike episode_check and "
+        "film_check, this covers completed/dropped/ended titles too.",
+        "General",
+        2880,
     ),
 ]
 

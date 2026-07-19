@@ -2,13 +2,16 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/07/17 18:47:08.752394
+Revised: 2026/07/19 00:47:00.433853
 
-Background checker: creates notifications when tracked shows air new episodes.
+Background checkers: new-episode notifications, film release-date refresh,
+episode history backfill, and periodic TMDB metadata resync for every
+tracked title (see task_runs.py for the shared enable/interval mechanism).
 """
 
 import asyncio
 import logging
+import time
 from datetime import date, timedelta
 
 from sqlalchemy import or_
@@ -115,7 +118,13 @@ def check_new_episodes(db: Session, fetch=fetch_show) -> int:
                 )
             )
             created += 1
-    db.commit()
+        # commit per show instead of batching the whole scan into one
+        # transaction — otherwise this loop holds tmdb_cache row locks for
+        # every title it has touched so far, and can deadlock against the
+        # other background loops (film_check, tmdb_metadata_resync, ...)
+        # updating the same rows in a different order (see also
+        # resync_tmdb_metadata / check_upcoming_films below).
+        db.commit()
     return created
 
 
@@ -146,7 +155,10 @@ def check_upcoming_films(db: Session, fetch=fetch_film) -> int:
             continue
         store_details(db, title, data)
         refreshed += 1
-    db.commit()
+        # commit per title, not once for the whole scan — see the comment
+        # in check_new_episodes on why a long-held transaction here
+        # deadlocks against the other tmdb_cache writers.
+        db.commit()
     return refreshed
 
 
@@ -172,6 +184,48 @@ def sync_episode_history(db: Session) -> int:
         except Exception:
             _log.exception("episode history sync failed for title %s", title.id)
     return len(titles)
+
+
+def resync_tmdb_metadata(db: Session, fetch_show=fetch_show, fetch_film=fetch_film, pace_seconds: float = 0.05) -> int:
+    """Refresh poster/backdrop/details for every tracked title, no matter its
+    watch status. check_new_episodes/check_upcoming_films both permanently
+    stop polling a title once it's dropped/ended/released — so if TMDB later
+    swaps a title's official poster, a completed or dropped title would never
+    pick it up. This is the only job that revisits those too. Returns the
+    number of titles successfully refreshed."""
+    titles = (
+        db.query(Title)
+        .join(LibraryEntry, LibraryEntry.title_id == Title.id)
+        .filter(Title.tmdb_id.isnot(None))
+        .distinct()
+        .all()
+    )
+    refreshed = 0
+    for title in titles:
+        fetch = fetch_show if title.media_type == MediaType.tv_show else fetch_film
+        try:
+            data = fetch(title.tmdb_id)
+        except Exception as exc:
+            _log.warning("TMDB resync fetch failed for title %s (tmdb %s): %s", title.id, title.tmdb_id, exc)
+            continue
+        store_details(db, title, data)
+        refreshed += 1
+        # commit per title, not once for the whole scan — see the comment
+        # in check_new_episodes on why a long-held transaction here
+        # deadlocks against the other tmdb_cache writers. Committing before
+        # the pacing sleep also means the row lock isn't held across it.
+        db.commit()
+        if pace_seconds:
+            time.sleep(pace_seconds)  # spread requests instead of bursting TMDB (no rate limiting in tmdb_http.py)
+    return refreshed
+
+
+def resync_tmdb_metadata_once() -> int:
+    db = SessionLocal()
+    try:
+        return resync_tmdb_metadata(db)
+    finally:
+        db.close()
 
 
 def sync_episode_history_once() -> int:
@@ -249,11 +303,29 @@ async def _film_check_loop() -> None:
         await asyncio.sleep(task_runs.get_interval_minutes("film_check") * 60)
 
 
+async def _tmdb_metadata_resync_loop() -> None:
+    await asyncio.sleep(15)
+    while True:
+        if not task_runs.is_enabled("tmdb_metadata_resync"):
+            _log.info("TMDB metadata resync skipped: disabled")
+        else:
+            started = utcnow()
+            try:
+                n = await asyncio.to_thread(resync_tmdb_metadata_once)
+                _log.info("TMDB metadata resync done: %d titles refreshed", n)
+                task_runs.record_run("tmdb_metadata_resync", started, "ok", f"{n} titles refreshed")
+            except Exception:
+                _log.exception("TMDB metadata resync failed")
+                task_runs.record_run("tmdb_metadata_resync", started, "error", "resync failed, see server logs")
+        await asyncio.sleep(task_runs.get_interval_minutes("tmdb_metadata_resync") * 60)
+
+
 def start_periodic_tasks() -> list[asyncio.Task]:
-    """Launch the three independent per-task loops; each is paused/rescheduled
+    """Launch the four independent per-task loops; each is paused/rescheduled
     without affecting the others (see task_runs.py / admin Periodic Tasks page)."""
     return [
         asyncio.create_task(_episode_check_loop()),
         asyncio.create_task(_episode_history_sync_loop()),
         asyncio.create_task(_film_check_loop()),
+        asyncio.create_task(_tmdb_metadata_resync_loop()),
     ]

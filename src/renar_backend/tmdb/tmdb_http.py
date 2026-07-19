@@ -8,8 +8,11 @@ HTTP layer for TMDB: pooled client, auth, and the short-lived in-memory
 cache. Lives below the router so the notifier and tmdb_store can call TMDB
 without importing router modules (no import cycles).
 
-Read-only TMDB responses are cached in memory (30 min TTL) to keep the
-Explore feeds and season lists fast and to stay well inside rate limits.
+Read-only TMDB responses are cached in memory (6h TTL) to keep the Explore
+feeds and season lists fast and to stay well inside rate limits. Trending/
+popular/search results don't meaningfully change within a day on TMDB's
+side, so a short TTL only bought staleness protection nobody needed while
+forcing a live round trip on every first request after an idle spell.
 Longer-lived persistence for tracked titles is tmdb_store's job.
 """
 
@@ -31,7 +34,7 @@ BACKDROP_BASE = f"{IMAGE_BASE}/w780"
 # our media_type -> TMDB path segment
 TMDB_KIND = {"film": "movie", "tv_show": "tv"}
 
-CACHE_TTL_SECONDS = 30 * 60
+CACHE_TTL_SECONDS = 6 * 60 * 60
 CACHE_MAX_ENTRIES = 2048  # ~a few MB worst case; entries are small JSON dicts
 _cache = TTLCache(ttl_seconds=CACHE_TTL_SECONDS, max_entries=CACHE_MAX_ENTRIES)
 

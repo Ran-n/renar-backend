@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.713668
-Revised: 2026/07/17 10:25:32.631165
+Revised: 2026/07/18 19:33:27.366485
 
 Watch-time and library statistics for the current user.
 """
@@ -79,9 +79,6 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
     episodes_watched = 0
     shows_completed = 0
     shows_watching = 0
-    youtube_watched = 0
-    books_read = 0
-    pages_read = 0
     favorites = 0
     genre_counter: Counter[str] = Counter()
     ratings: list[int] = []
@@ -110,12 +107,6 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
             episodes_watched += eps
             episodes_per_item[item.id] = eps
             tv_minutes += eps * _runtime_or_default(item.runtime_minutes, DEFAULT_EPISODE_RUNTIME)
-        elif item.media_type == MediaType.youtube:
-            if item.status == WatchStatus.completed:
-                youtube_watched += 1
-        elif item.media_type == MediaType.book and item.status == WatchStatus.completed:
-            books_read += 1
-            pages_read += item.page_count or 0
 
     # ----- time-based stats from per-episode history -----
     now = datetime.now(UTC)
@@ -163,9 +154,6 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         "episodes_watched": episodes_watched,
         "shows_completed": shows_completed,
         "shows_watching": shows_watching,
-        "youtube_watched": youtube_watched,
-        "books_read": books_read,
-        "pages_read": pages_read,
         "total_items": len(items),
         "favorites": favorites,
         "avg_rating": round(sum(ratings) / len(ratings), 1) if ratings else None,

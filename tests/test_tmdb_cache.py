@@ -2,22 +2,26 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.246595
-Revised: 2026/07/10 18:19:21.393239
+Revised: 2026/07/19 03:50:40.385946
 
 TMDB write-through cache: persistence for tracked titles, freshness
 window, offline fallback, typed Title columns, notifier integration and
 the image proxy's content-addressed storage.
 """
 
+import base64
+import io
 from datetime import date, timedelta
 
 import pytest
 from fastapi import HTTPException, status
+from PIL import Image as PILImage
 
 from renar_backend.config import settings
 from renar_backend.database import SessionLocal
 from renar_backend.media.storage import image_path
-from renar_backend.models import ExternalImage, Image, Notification, Title, TmdbCache
+from renar_backend.models import ExternalImage, Image, Notification, Title, TmdbCache, User, utcnow
+from renar_backend.routers import tmdb as tmdb_router
 from renar_backend.social.notifier import check_new_episodes
 from renar_backend.tmdb import tmdb_store
 
@@ -234,3 +238,63 @@ def test_image_proxy_stores_in_image_store(client, monkeypatch, db):
     r = client.get("/tmdb/image/w342/poster.jpg")
     assert r.status_code == 200
     assert r.content == payload
+
+
+def _set_premium(user_id: int) -> None:
+    db = SessionLocal()
+    try:
+        db.get(User, user_id).premium_until = utcnow() + timedelta(days=30)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _png_b64() -> str:
+    img = PILImage.new("RGB", (20, 30), (200, 30, 30))
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return base64.b64encode(out.getvalue()).decode()
+
+
+def test_trending_shows_premium_users_custom_poster(client, alice, monkeypatch):
+    """A premium user's custom poster (set on their LibraryEntry) must win
+    over the shared TMDB poster in Explore/Trending — not just on the
+    library/detail views — since the shared Title row is never updated."""
+    user, headers = alice
+    item = add_show(client, headers, monkeypatch, tmdb_id=100)
+    _set_premium(user["id"])
+    r = client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
+    assert r.status_code == 200
+    custom_poster_url = r.json()["custom_poster_url"]
+    assert custom_poster_url
+
+    monkeypatch.setattr(
+        tmdb_router,
+        "tmdb_get",
+        lambda path, params=None: {"results": [{"id": 100, "name": "The Show", "poster_path": "/stale.jpg"}]},
+    )
+    r = client.get("/tmdb/trending", params={"media_type": "tv_show", "language": "en"}, headers=headers)
+    assert r.status_code == 200
+    result = next(x for x in r.json() if x["tmdb_id"] == 100)
+    assert result["poster_url"] == custom_poster_url
+
+
+def test_trending_ignores_custom_poster_without_premium(client, alice, monkeypatch, db):
+    """A lapsed/non-premium user must see the shared TMDB poster, matching
+    LibraryEntry.poster_url's own premium gate."""
+    user, headers = alice
+    item = add_show(client, headers, monkeypatch, tmdb_id=101)
+    _set_premium(user["id"])
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
+    db.get(User, user["id"]).premium_until = utcnow() - timedelta(days=1)
+    db.commit()
+
+    monkeypatch.setattr(
+        tmdb_router,
+        "tmdb_get",
+        lambda path, params=None: {"results": [{"id": 101, "name": "The Show", "poster_path": "/fresh.jpg"}]},
+    )
+    r = client.get("/tmdb/trending", params={"media_type": "tv_show", "language": "en"}, headers=headers)
+    assert r.status_code == 200
+    result = next(x for x in r.json() if x["tmdb_id"] == 101)
+    assert result["poster_url"] == "https://image.tmdb.org/t/p/w500/fresh.jpg"

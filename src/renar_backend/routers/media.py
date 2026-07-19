@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/07/17 20:11:30.431373
+Revised: 2026/07/18 19:33:27.303178
 """
 
 import logging
@@ -126,21 +126,21 @@ def list_media(
 @router.get("/keys")
 def list_media_keys(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Lightweight identifiers for every entry in the user's library — just
-    enough (media_type, tmdb_id, url, title, author) to build the "already in
-    my library" membership check Explore needs. Deliberately unbounded (no
+    enough (media_type, tmdb_id, url, title) to build the "already in my
+    library" membership check Explore needs. Deliberately unbounded (no
     `limit`/`offset`, unlike list_media): that check needs the whole library
     in one shot, but skips the WITH_TITLE_GENRES joins and full LibraryEntryOut
     shape list_media carries per row, so it stays cheap even for a large
     library."""
     rows = (
-        db.query(Title.media_type, Title.tmdb_id, Title.title, Title.author, LibraryEntry.url)
+        db.query(Title.media_type, Title.tmdb_id, Title.title, LibraryEntry.url)
         .join(LibraryEntry, LibraryEntry.title_id == Title.id)
         .filter(LibraryEntry.user_id == user.id)
         .all()
     )
     return [
-        {"media_type": media_type.value, "tmdb_id": tmdb_id, "title": title, "author": author, "url": url}
-        for media_type, tmdb_id, title, author, url in rows
+        {"media_type": media_type.value, "tmdb_id": tmdb_id, "title": title, "url": url}
+        for media_type, tmdb_id, title, url in rows
     ]
 
 
@@ -181,8 +181,6 @@ def create_media(
         runtime_minutes=data.runtime_minutes,
         total_episodes=data.total_episodes,
         genres=data.genres,
-        author=data.author,
-        page_count=data.page_count,
     )
     # populate overview/status/etc. now that the title exists; best-effort
     # (usually served from the in-memory TMDB cache — the client was just
