@@ -2,11 +2,11 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/13 09:45:00.000000
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/18 19:33:27.430113
 
-Small in-memory TTL cache for read-only external API responses (TMDB, Open
-Library, YouTube Data API). Per-process, not persisted — tmdb_store.py is the
-place for anything that needs to survive a restart.
+Small in-memory TTL cache for read-only external API responses (TMDB).
+Per-process, not persisted — tmdb_store.py is the place for anything that
+needs to survive a restart.
 """
 
 import time

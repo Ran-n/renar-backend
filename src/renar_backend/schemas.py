@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/07/16 13:35:29.169154
+Revised: 2026/07/18 19:33:27.173385
 """
 
 from datetime import datetime
@@ -173,8 +173,6 @@ class TitleOut(BaseModel):
     total_episodes: int | None = None
     total_seasons: int | None = None
     genres: list[str] = []
-    author: str | None = None
-    page_count: int | None = None
     overview: str | None = None
     tagline: str | None = None
     show_status: str | None = None
@@ -190,8 +188,6 @@ class LibraryEntryCreate(BaseModel):
     runtime_minutes: int | None = Field(default=None, ge=0)
     total_episodes: int | None = Field(default=None, ge=0)
     genres: list[str] | None = Field(default=None, max_length=20)
-    author: str | None = Field(default=None, max_length=300)
-    page_count: int | None = Field(default=None, ge=0)
     # user-owned fields
     url: str | None = Field(default=None, max_length=500)
     status: WatchStatus = WatchStatus.want_to_watch
@@ -232,8 +228,6 @@ class LibraryEntryOut(BaseModel):
     total_episodes: int | None = None
     total_seasons: int | None = None
     genres: list[str] = []
-    author: str | None = None
-    page_count: int | None = None
     overview: str | None = None
     tagline: str | None = None
     show_status: str | None = None

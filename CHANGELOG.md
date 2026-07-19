@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/18 16:51:22.083537 )
+[//]: # (+ Revised: 	2026/07/19 04:17:42.305371 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -9,6 +9,75 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added
+
+- `resync_tmdb_metadata` / `resync_tmdb_metadata_once` in
+  `social/notifier.py`: periodic background job that re-fetches TMDB
+  poster/backdrop/details for every tracked title regardless of watch
+  status or show state — the only job that revisits completed/dropped/ended
+  titles, so TMDB poster changes eventually reach them too
+- `_tmdb_metadata_resync_loop` in `social/notifier.py`: fourth independent
+  background loop, paused/rescheduled via the same `task_runs.py`
+  enable/interval/status mechanism as the existing three; visible on the
+  admin Periodic Tasks page
+- `task_runs.py`: `TaskSpec` entry for `tmdb_metadata_resync` (label
+  "TMDB metadata resync", group "General", default 2880-minute / 48-hour
+  interval)
+- `tests/test_tmdb_resync.py`: happy-path and error-path coverage for
+  `resync_tmdb_metadata` (completed show, dropped film, fetch failure,
+  empty library)
+- `routers/tmdb.py`: `_poster_overrides` helper — for premium users,
+  splices their `LibraryEntry.custom_poster_url` into `/tmdb/search`,
+  `/tmdb/trending`, and `/tmdb/popular` results wherever the result set
+  contains a title they have in their library
+- `routers/tmdb.py`: `w1280` added to `ALLOWED_IMAGE_SIZES` for the
+  frontend's tap-to-zoom backdrop dialog
+- `alembic/versions/a3f8c1e97b52_remove_book_and_youtube_media_types.py`:
+  migration that deletes `book`/`youtube` library entries and title rows,
+  recreates the `mediatype` enum without those values, and drops the
+  `author`/`page_count` columns from `titles`
+
+### Changed
+
+- `routers/tmdb.py` `image_proxy`: no longer injects `db` via
+  `Depends(get_db)` — each of the two short DB touches now opens its own
+  `SessionLocal()` so a pooled connection is not held across the outbound
+  TMDB fetch; grid loads of unseen posters are no longer bottlenecked by
+  the DB pool size
+- `routers/tmdb.py` `alternate_episode_stills`: episode still URLs changed
+  from `w780` to `original` for full-resolution stills
+- `routers/tmdb.py` `season_tmdb`: per-episode still URLs changed from
+  `w342` to `w300`
+- `tmdb/tmdb_http.py`: in-memory TMDB cache TTL raised from 30 minutes to
+  6 hours (`CACHE_TTL_SECONDS`); trending/popular/search results don't
+  meaningfully change within a day on TMDB's side
+- `social/notifier.py` `check_new_episodes` / `check_upcoming_films`:
+  changed from one batch commit per full scan to one `db.commit()` per
+  title, to avoid holding `tmdb_cache` row locks across the entire loop and
+  deadlocking against concurrent background loops updating the same rows in
+  a different order
+- `media/http_cache.py` module docstring: removed references to Open
+  Library and YouTube Data API (no longer used)
+
+### Removed
+
+- `routers/books.py` and `routers/youtube.py` — books and YouTube media
+  type support dropped; endpoints, models, and imports removed
+- `tests/test_books.py` and `tests/test_youtube.py`
+- `models.py`: `MediaType.youtube` / `MediaType.book` enum values; `Title`
+  columns `author` / `page_count`; `LibraryEntry` properties `author` /
+  `page_count`
+- `schemas.py`: `author` / `page_count` fields from `TitleOut`,
+  `LibraryEntryCreate`, `LibraryEntryOut`
+- `catalog/titles.py` `find_or_create_title`: `author` / `page_count`
+  parameters
+- `config.py` / `.env.example`: `YOUTUBE_API_KEY` / `youtube_api_key`
+  setting (YouTube Data API v3 key no longer needed)
+- `routers/stats.py`: `youtube_watched`, `books_read`, `pages_read`
+  stat counters from `GET /stats` response
 
 ## [0.5.0] - 2026-07-18
 

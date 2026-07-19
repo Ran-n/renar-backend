@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.823858
-Revised: 2026/07/07 13:25:17.823858
+Revised: 2026/07/18 19:33:28.035486
 
 Aggregated statistics endpoint + service health routes.
 """
@@ -67,18 +67,6 @@ def test_stats_counts_tv_episodes(client, alice):
     assert s["shows_watching"] == 1
     assert s["episodes_last_7_days"] == 3
     assert s["current_streak_days"] >= 1
-
-
-def test_stats_counts_completed_book(client, alice):
-    _, headers = alice
-    client.post(
-        "/media",
-        json={"media_type": "book", "title": "Dune", "status": "completed", "page_count": 412},
-        headers=headers,
-    )
-    s = client.get("/stats", headers=headers).json()
-    assert s["books_read"] == 1
-    assert s["pages_read"] == 412
 
 
 def test_stats_only_own_items(client, alice, bob):

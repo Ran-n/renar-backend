@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/09 09:40:00.000000
-Revised: 2026/07/09 13:01:55.560775
+Revised: 2026/07/18 19:33:27.761806
 
 Per-endpoint usage tracking middleware and the admin usage dashboard, its
 per-endpoint drill-down, and the per-user library drill-down.
@@ -129,11 +129,11 @@ def test_endpoint_detail_lists_callers(client, admin_enabled, alice):
 def test_user_library_filters_by_type(client, admin_enabled, alice):
     user, headers = alice
     client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers)
-    client.post("/media", json={"media_type": "book", "title": "Dune"}, headers=headers)
+    client.post("/media", json={"media_type": "tv_show", "title": "Dune: Prophecy"}, headers=headers)
     r = client.get(f"/admin/users/{user['id']}/library?media_type=film", auth=BASIC)
     assert r.status_code == 200
     assert "Heat" in r.text
-    assert "Dune" not in r.text
+    assert "Dune: Prophecy" not in r.text
 
 
 def test_user_library_filters_by_status(client, admin_enabled, alice):

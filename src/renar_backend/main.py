@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/18 00:26:58.614713
+Revised: 2026/07/18 19:33:27.014462
 """
 
 import asyncio
@@ -21,7 +21,6 @@ from .config import settings
 from .routers import (
     admin,
     auth,
-    books,
     comments,
     images,
     imports,
@@ -33,7 +32,6 @@ from .routers import (
     svc,
     tmdb,
     upcoming,
-    youtube,
 )
 from .social import notifier
 from .users.security import AbuseGuardMiddleware, OriginCheckMiddleware, SecurityHeadersMiddleware
@@ -121,8 +119,6 @@ app.include_router(comments.router)
 app.include_router(notifications.router)
 app.include_router(images.router)
 app.include_router(upcoming.router)
-app.include_router(books.router)
-app.include_router(youtube.router)
 app.include_router(imports.router)
 app.include_router(premium.router)
 app.include_router(admin.router)

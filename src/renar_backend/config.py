@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/07/17 20:02:06.275881
+Revised: 2026/07/18 19:33:27.081377
 """
 
 from pathlib import Path
@@ -30,7 +30,6 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:8550", "http://127.0.0.1:8550"]
     tmdb_api_key: str = ""
     tvdb_api_key: str = ""  # optional: fallback lookup for TV Time import matching
-    youtube_api_key: str = ""  # YouTube Data API v3, for channel search/video listing on Explore
     media_dir: str = "./media"  # root of the content-addressed file store
     admin_username: str = ""  # admin panel stays 503 until both are set
     admin_password: str = ""

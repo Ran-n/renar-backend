@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 09:55:31.503656
-Revised: 2026/07/16 09:55:31.503656
+Revised: 2026/07/18 19:33:27.903563
 
 Watch-time leaderboard (/stats/ranking): the users.total_watch_minutes
 column maintained by a Postgres trigger (migration a7c2e9f4b816, mirrored
@@ -317,24 +317,6 @@ def test_multiple_items_sum_correctly(client, alice):
     ).json()
     client.post(f"/media/{show['id']}/episodes/bulk", json={"season": 1, "episodes": [1, 2]}, headers=headers)
     assert _watch_minutes(user["id"]) == 170 + 117 + 2 * 50
-
-
-def test_book_and_youtube_never_contribute(client, alice):
-    """Only film/tv_show count toward watch minutes, even when marked
-    completed — a completed book or video must contribute nothing."""
-    user, headers = alice
-    _set_premium(user["id"])
-    client.post(
-        "/media",
-        json={"media_type": "book", "title": "Dune", "status": "completed", "page_count": 412},
-        headers=headers,
-    )
-    client.post(
-        "/media",
-        json={"media_type": "youtube", "title": "Some Video", "status": "completed", "url": "https://youtu.be/x"},
-        headers=headers,
-    )
-    assert _watch_minutes(user["id"]) == 0
 
 
 def test_trigger_ignores_unrelated_update_on_tv_show(client, alice):

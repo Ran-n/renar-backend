@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/18 00:26:59.749038 )
+[//]: # (+ Revised: 	2026/07/19 04:17:42.140888 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -15,7 +15,7 @@ original problem. Day-to-day usage docs are in the [top-level README](../README.
 
 ### Titles vs. library entries
 
-`titles` holds the shared, catalog-sourced facts about a film/show/book/video
+`titles` holds the shared, catalog-sourced facts about a film/show
 (title, year, poster, genres, TMDB id) — one row no matter how many users
 track it. `library_entries` (formerly `media_items`) holds one user's
 personal state against a title: status, rating, notes, progress, favorite.
@@ -30,9 +30,9 @@ bulk update across every user's row instead of one write.
 
 A title's identity is its `tmdb_id` when TMDB has a match; otherwise a
 normalized `title_key` derived from the entered title. This lets manually
-entered items (YouTube videos, books without an Open Library match) still
-dedupe and share a `Title` row across users, instead of every user's manual
-entry creating its own untracked title.
+entered items (no TMDB match) still dedupe and share a `Title` row across
+users, instead of every user's manual entry creating its own untracked
+title.
 
 ### Normalized schema, enforced by a guard test
 
@@ -358,7 +358,7 @@ twice.
 
 ### Content-addressed image store (`storage.py`)
 
-Uploaded/cached images (avatars, cached posters, book covers) are stored by
+Uploaded/cached images (avatars, cached posters) are stored by
 the BLAKE3 hash of their bytes, in a git-style two-level directory fan-out
 (`media/images/<hash[:2]>/<hash[2:4]>/<hash>.jpg`).
 
@@ -499,16 +499,17 @@ on locally or point at `/docs` in a non-public environment.
 
 ## External integrations
 
-### TMDB/Open Library responses cached in memory (30 min; covers 24h)
+### TMDB responses cached in memory (6 hours)
 
 Read-only catalog responses are cached process-locally with a bounded
 entry count (`CACHE_MAX_ENTRIES`) and evict-oldest-on-full behavior, not a
 proper LRU.
 
-**Why:** TMDB and Open Library both have free-tier rate limits, and search/
-trending results don't change meaningfully minute-to-minute. A 30-minute TTL
-cuts upstream call volume dramatically for near-zero staleness cost; covers
-get a longer TTL (24h) since cover art essentially never changes.
+**Why:** TMDB has free-tier rate limits, and search/trending results don't
+change meaningfully within a day on TMDB's side. A 6-hour TTL cuts
+upstream call volume dramatically; the shorter 30-minute TTL only bought
+staleness protection nobody needed while forcing a live round trip on every
+first request after an idle spell.
 
 ### TMDB payloads persist for tracked titles (write-through, offline fallback)
 
@@ -542,6 +543,32 @@ status, so a revived show recovers on its own.
 **Why:** finished shows can never produce a notification; polling them
 wastes the TMDB budget as libraries grow. The self-healing path via
 detail views makes the rare revival case acceptable.
+
+### Periodic TMDB metadata resync covers completed/dropped titles
+
+`check_new_episodes` and `check_upcoming_films` permanently stop polling a
+title once its show ends or its film releases — so if TMDB later changes a
+title's official poster, a completed or dropped title would never pick it
+up. `resync_tmdb_metadata` (task key `tmdb_metadata_resync`, default
+48-hour interval) revisits every title with a TMDB id that any user still
+has in their library, regardless of watch status or show state. It runs as
+a fourth independent background loop (`_tmdb_metadata_resync_loop` in
+`notifier.py`) alongside the existing three, managed by the same
+`task_runs.py` enable/interval/status mechanism and visible on the admin
+Periodic Tasks page.
+
+Each title is committed individually (not batched into one transaction)
+and the job paces itself with a 50ms inter-title sleep to avoid bursting
+the TMDB API and to ensure the DB row lock isn't held across the sleep or
+across concurrent writes from the other background loops — the same
+per-title commit strategy adopted by `check_new_episodes` and
+`check_upcoming_films` in this release to prevent cross-loop deadlocks.
+
+**Why:** the image-store proxy caches a poster forever once fetched (the
+upstream path is immutable), so the only way to pick up a TMDB poster
+change is to re-read the title's metadata and update `titles.poster_url`.
+A 48h default interval is long enough to stay well inside TMDB's free
+rate limits even for large libraries.
 
 ### `/upcoming` reads pre-synced Title columns, never fetches TMDB live
 
@@ -596,12 +623,11 @@ the same trade-off `/upcoming` itself already accepted for cold titles
 
 ### External images live in the content-addressed store
 
-TMDB posters/stills and Open Library covers fetched through the proxies
-are stored as blake3-named files in the same store as user avatars, with
-the upstream identity mapped in `external_images` (source + key →
-images row). Each image is fetched from upstream at most once; identical
-bytes are stored once. The old loose per-proxy cache directories
-(`tmdb_cache/`, `book_covers/`) are gone.
+TMDB posters/stills fetched through the proxy are stored as blake3-named
+files in the same store as user avatars, with the upstream identity mapped
+in `external_images` (source + key → images row). Each image is fetched
+from upstream at most once; identical bytes are stored once. The old loose
+per-proxy cache directory (`tmdb_cache/`) is gone.
 
 **Why:** one storage system instead of three, DB-visible sizes/dedup, and
 the immutable upstream paths make "cache forever, never revalidate" safe.
@@ -680,6 +706,37 @@ to custom backdrops (`custom_backdrop_image_id` → `images`, landscape
 override types are independent: a user can mix a custom poster and a
 default backdrop, or vice versa, and clearing any one of them GCs only
 its own image file.
+
+### Premium users see their custom poster in Explore/Search/Trending
+
+The TMDB search, trending, and popular endpoints (`/tmdb/search`,
+`/tmdb/trending`, `/tmdb/popular`) previously served TMDB's own
+`poster_path` for every result, so a premium user's custom poster only
+showed up in their library and detail views — never in Explore. Now each
+of those endpoints calls `_poster_overrides(db, user, media_type, tmdb_ids)`
+to look up any custom poster for titles in the result set that the
+requesting user also has in their library, and splices the override URL in
+where available.
+
+**Why:** the custom poster is the user's personal reskin of a title; it
+should follow that title wherever they see it in the app, not just in
+views that already read from their `library_entries` row.
+
+### TMDB image proxy does not hold a DB connection across the network fetch
+
+`GET /tmdb/image/{size}/{filename}` no longer takes `db` via
+`Depends(get_db)`. A grid view loading dozens of never-before-seen posters
+at once would otherwise hold a pooled connection checked out for the
+entire request, including the outbound TMDB fetch (tens to hundreds of ms),
+bottlenecking on the pool size (5 + 10 overflow) rather than actual
+network/CPU work. Each of the two short DB touches (check cache, store
+result) now opens and closes its own `SessionLocal()` instead.
+
+`w1280` was also added to `ALLOWED_IMAGE_SIZES`. It is a backdrop/still
+bucket on TMDB's side (not used for posters), but the size is safe to
+allow globally — posters simply never request it. It is needed by the
+frontend's tap-to-zoom backdrop dialog, which requires a size larger than
+w780.
 
 ## API design
 

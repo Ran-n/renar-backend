@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/17 20:01:54.400214
+Revised: 2026/07/18 19:33:26.947063
 """
 
 import enum
@@ -49,8 +49,6 @@ def normalize_title_key(title: str) -> str:
 class MediaType(enum.StrEnum):
     film = "film"
     tv_show = "tv_show"
-    youtube = "youtube"
-    book = "book"
 
 
 class WatchStatus(enum.StrEnum):
@@ -385,7 +383,7 @@ title_genres = Table(
 
 
 class Title(Base):
-    """A movie/show/book/video, shared across every user who tracks it.
+    """A movie or show, shared across every user who tracks it.
 
     Identity is the tmdb_id when we have one; manually-entered items (or ones
     without a TMDB/catalog match) fall back to a normalized title_key. Either
@@ -427,8 +425,6 @@ class Title(Base):
     runtime_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)  # film total / tv per-episode
     total_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_seasons: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    author: Mapped[str | None] = mapped_column(String(300), nullable=True)
-    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     overview: Mapped[str | None] = mapped_column(Text, nullable=True)
     tagline: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # TMDB's production status verbatim ("Returning Series", "Ended",
@@ -524,9 +520,9 @@ def prefetch_episode_cache(db: Session, title_ids: Iterable[int | None]) -> None
 
 
 class ExternalImage(Base):
-    """Maps an external image (TMDB poster/still, Open Library cover) to a
-    row in the content-addressed image store, so all cached image bytes
-    live in one place (media/images) and identical files are stored once.
+    """Maps an external image (TMDB poster/still) to a row in the
+    content-addressed image store, so all cached image bytes live in one
+    place (media/images) and identical files are stored once.
     """
 
     __tablename__ = "external_images"
@@ -556,7 +552,7 @@ class LibraryEntry(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     title_id: Mapped[int] = mapped_column(ForeignKey("titles.id"), index=True)
-    url: Mapped[str | None] = mapped_column(String(500), nullable=True)  # personal link: youtube link etc.
+    url: Mapped[str | None] = mapped_column(String(500), nullable=True)  # optional personal link for the item
     status: Mapped[WatchStatus] = mapped_column(Enum(WatchStatus), default=WatchStatus.want_to_watch)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1-10
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -748,14 +744,6 @@ class LibraryEntry(Base):
     def genres(self) -> list[str]:
         return self.title_ref.genres
 
-    @property
-    def author(self) -> str | None:
-        return self.title_ref.author
-
-    @property
-    def page_count(self) -> int | None:
-        return self.title_ref.page_count
-
 
 class EpisodeWatch(Base):
     """One row = this episode of this (user-owned) show was watched."""
@@ -796,9 +784,9 @@ class WatchEvent(Base):
     """One row = one watch of this item (or episode), including rewatches.
 
     Unlike EpisodeWatch (at most one row per episode = "currently watched"),
-    this is an append-only log: rewatching an episode or a whole film/book
-    just adds another row here. season/episode are both null for a
-    whole-item (film/book) watch event.
+    this is an append-only log: rewatching an episode or a whole film just
+    adds another row here. season/episode are both null for a whole-item
+    (film) watch event.
     """
 
     __tablename__ = "watch_events"

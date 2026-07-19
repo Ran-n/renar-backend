@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.395578
-Revised: 2026/07/16 09:54:31.767220
+Revised: 2026/07/18 19:33:27.970634
 
 Media library CRUD, filters, ownership, and community ratings.
 """
@@ -128,15 +128,15 @@ def test_list_keys(client, alice, bob):
     _, headers = alice
     _, bob_headers = bob
     _create(client, headers, title="Heat", tmdb_id=101)
-    _create(client, headers, media_type="youtube", title="Some Video", url="https://youtu.be/abc")
+    _create(client, headers, media_type="tv_show", title="Some Show", url="https://example.com/show")
     _create(client, bob_headers, title="Alien", tmdb_id=202)  # someone else's — must not leak
 
     keys = client.get("/media/keys", headers=headers).json()
     assert {(k["media_type"], k["tmdb_id"], k["title"]) for k in keys} == {
         ("film", 101, "Heat"),
-        ("youtube", None, "Some Video"),
+        ("tv_show", None, "Some Show"),
     }
-    assert next(k for k in keys if k["media_type"] == "youtube")["url"] == "https://youtu.be/abc"
+    assert next(k for k in keys if k["title"] == "Some Show")["url"] == "https://example.com/show"
 
 
 def test_get_media_by_tmdb(client, alice):

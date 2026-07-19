@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/16 09:19:09.907159 )
-[//]: # (+ Revised: 	2026/07/18 00:26:59.495452 )
+[//]: # (+ Revised: 	2026/07/18 19:33:27.690167 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 [//]: # ( ---------------------------------------------------------------------- )
@@ -24,8 +24,8 @@ _Last updated: [EFFECTIVE DATE]_
 
 ## Who we are
 
-Renar ("Renar", "we", "us") is a personal media tracker for films, TV
-shows, books, and YouTube videos, operated by Breren. This policy covers
+Renar ("Renar", "we", "us") is a personal media tracker for films and TV
+shows, operated by Breren. This policy covers
 the Renar mobile apps, web app, and backend service. If you have
 questions about this policy or your data, contact us at
 privacy@renar.breren.com.
@@ -59,13 +59,12 @@ network integrated into Renar.
 
 ## Third-party services we use to fetch content metadata
 
-To show posters, titles, episode lists, and other metadata for the movies,
-shows, and videos you track, Renar queries:
+To show posters, titles, episode lists, and other metadata for the movies
+and shows you track, Renar queries:
 
 - **The Movie Database (TMDB)**
 - **TheVDB (TVDB)** — used only as a fallback to resolve titles TMDB can't
   match during TV Time imports
-- **YouTube Data API** — for YouTube video metadata
 
 These lookups are by title/ID, not by your personal account information —
 we don't send your email, username, or password to these services. Their
