@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 13:30:00.000000
-Revised: 2026/07/17 20:02:06.345432
+Revised: 2026/07/21 09:51:04.457016
 
 Runtime-tunable site settings backed by the `site_settings` singleton row.
 
@@ -43,6 +43,15 @@ def _make_defaults() -> SiteSettings:
         id=1,
         invite_only=False,
         registration_open=settings.registration_open,
+        turnstile_enabled=settings.turnstile_enabled,
+        email_confirmation_enabled=True,
+        premium_style_enabled=True,
+        premium_verification_enabled=True,
+        premium_background_enabled=True,
+        premium_themes_enabled=True,
+        premium_progress_style_enabled=True,
+        premium_episode_label_enabled=True,
+        premium_ranking_enabled=True,
         auth_rate_limit_per_minute=settings.auth_rate_limit_per_minute,
         register_per_hour_per_ip=settings.register_per_hour_per_ip,
         rate_limit_per_minute=settings.rate_limit_per_minute,

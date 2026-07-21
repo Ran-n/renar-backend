@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/07/18 19:33:27.239607
+Revised: 2026/07/21 09:51:02.517663
 
 Shared Title resolution: every place that addresses a global title by
 (media_type, tmdb_id-or-title text) — library adds, imports, comments,
@@ -67,6 +67,44 @@ def find_title(db: Session, media_type: MediaType, tmdb_id: int | None, title: s
     if title:
         return query.filter(Title.tmdb_id.is_(None), Title.title_key == normalize_title_key(title)).first()
     return None
+
+
+def backfill_title_tmdb_id(
+    db: Session,
+    title_row: Title,
+    tmdb_id: int,
+    *,
+    poster_url: str | None = None,
+    runtime_minutes: int | None = None,
+    total_episodes: int | None = None,
+) -> None:
+    """Fill in tmdb_id (and any metadata the row is still missing) on a Title
+    that was created without a match — e.g. a TV Time import row that
+    resolved to nothing at the time, later re-imported after a transient
+    TMDB failure clears up. Without this, a title-text match against that
+    row's existing (tmdb_id-less) Title reconciles the entry but never
+    upgrades the Title itself, so it stays degraded forever.
+
+    Race-safe like resolve_genres/find_or_create_title: a concurrent import
+    worker claiming the same tmdb_id for a *different* Title (a genuine
+    crosswalk collision, per uq_title_tmdb) is caught and skipped rather than
+    raised — the caller's row still reconciles into title_row either way.
+    """
+    if title_row.tmdb_id is not None:
+        return
+    try:
+        with db.begin_nested():
+            title_row.tmdb_id = tmdb_id
+            title_row.title_key = None
+            if poster_url and not title_row.poster_url:
+                title_row.poster_url = poster_url
+            if runtime_minutes and not title_row.runtime_minutes:
+                title_row.runtime_minutes = runtime_minutes
+            if total_episodes and not title_row.total_episodes:
+                title_row.total_episodes = total_episodes
+            db.flush()
+    except IntegrityError:
+        _log.info("tmdb_id=%s already claimed by another title; leaving %r unmatched", tmdb_id, title_row.title)
 
 
 def find_or_create_title(

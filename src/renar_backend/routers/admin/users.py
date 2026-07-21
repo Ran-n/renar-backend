@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/18 00:26:59.173812
+Revised: 2026/07/21 09:51:03.543243
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -10,7 +10,7 @@ action endpoints (ban/unban, premium, verify, edit, password, delete).
 
 import html
 import logging
-from datetime import timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -62,6 +62,11 @@ _log = logging.getLogger(__name__)
 
 _USERS_PAGE_SIZE = 200
 
+# Sentinel for a permanent grant: is_premium checks premium_until > utcnow(),
+# there's no separate boolean, so "forever" is just a date past any realistic
+# lapse. datetime.max itself doesn't round-trip through every DB driver.
+PREMIUM_FOREVER = datetime(9999, 1, 1, tzinfo=UTC)
+
 
 def _premium_pills(user: User) -> str:
     """Stored premium/verified state (shown even while lapsed — the admin
@@ -73,6 +78,16 @@ def _premium_pills(user: User) -> str:
         pills += ' <span class="pill" style="margin-left:.4rem">premium</span>'
     if user.verification_requested:
         pills += ' <span class="pill" style="margin-left:.4rem">verification requested</span>'
+    # email_confirmed backs /stats/ranking's percentile filter (see
+    # routers/stats.py._compute_ranking) — surfaced here so an admin can see
+    # at a glance why an account isn't showing up on the leaderboard.
+    if user.email_confirmed:
+        pills += ' <span class="pill" style="margin-left:.4rem">email confirmed</span>'
+    elif user.email_confirmation_grandfathered:
+        # predates the feature — exempt from the login-gate block and the
+        # cleanup deletion, but still correctly absent from the ranking pill
+        # above until it actually confirms (see migration ffffe2b24717).
+        pills += ' <span class="pill" style="margin-left:.4rem">grandfathered</span>'
     return pills
 
 
@@ -80,7 +95,9 @@ def _render_premium_actions(user: User) -> str:
     """Grant/revoke premium time and approve/revoke the verified badge."""
     uid = user.id
     name_esc = html.escape(user.username)
-    if user.is_premium:
+    if user.is_premium and user.premium_until >= PREMIUM_FOREVER:
+        premium_state = "Premium active forever"
+    elif user.is_premium:
         premium_state = f"Premium active until {_fmt_ts(user.premium_until)}"
     elif user.premium_until:
         premium_state = f"Premium lapsed {_fmt_ts(user.premium_until)}"
@@ -121,8 +138,19 @@ def _render_premium_actions(user: User) -> str:
       </div>
       <form class="action-row" method="post" action="{_P}/users/{uid}/premium">
         <label>Grant days</label>
-        <input class="action-input" type="number" name="days" min="1" max="3650" placeholder="e.g. 30" required>
+        <input class="action-input" type="number" name="days" min="1" placeholder="e.g. 30" required>
         <button class="btn-save" type="submit">Grant</button>
+      </form>
+      <form class="action-row" method="post" action="{_P}/users/{uid}/premium">
+        <label>Until date</label>
+        <input class="action-input" type="date" name="until_date" required>
+        <button class="btn-save" type="submit">Set</button>
+      </form>
+      <form class="action-row" method="post" action="{_P}/users/{uid}/premium"
+            onsubmit="return confirm('Grant permanent premium to [{name_esc}]?')">
+        <label>Forever</label>
+        <input type="hidden" name="forever" value="1">
+        <button class="btn-save" type="submit">Grant forever</button>
       </form>
       <div class="action-sep"></div>
       <div class="action-row">
@@ -829,24 +857,37 @@ def unban_user(
 @router.post("/users/{user_id}/premium", include_in_schema=False)
 def grant_premium(
     user_id: int,
-    days: int = Form(...),
+    days: int | None = Form(None),
+    until_date: date | None = Form(None),
+    forever: bool = Form(False),
     admin_user: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if not 1 <= days <= 3650:
-        raise HTTPException(status_code=422, detail="days must be between 1 and 3650")
-    # extend from whichever is later: an active subscription keeps its
-    # remaining time, a lapsed one restarts from now
-    base = user.premium_until if user.is_premium else utcnow()
-    user.premium_until = base + timedelta(days=days)
+
+    if forever:
+        user.premium_until = PREMIUM_FOREVER
+    elif until_date is not None:
+        new_until = datetime.combine(until_date, time.min, tzinfo=UTC)
+        if new_until <= utcnow():
+            raise HTTPException(status_code=422, detail="until_date must be in the future")
+        user.premium_until = new_until
+    elif days is not None:
+        if days < 1:
+            raise HTTPException(status_code=422, detail="days must be at least 1")
+        # extend from whichever is later: an active subscription keeps its
+        # remaining time, a lapsed one restarts from now
+        base = user.premium_until if user.is_premium else utcnow()
+        user.premium_until = base + timedelta(days=days)
+    else:
+        raise HTTPException(status_code=422, detail="one of days, until_date, forever is required")
+
     db.commit()
     _log.info(
-        "admin=%s granted %s premium days to user id=%s username=%s (until %s)",
+        "admin=%s granted premium to user id=%s username=%s (until %s)",
         admin_user,
-        days,
         user_id,
         user.username,
         user.premium_until.isoformat(),

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/19 04:17:42.305371 )
+[//]: # (+ Revised: 	2026/07/21 09:51:02.021539 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -39,6 +39,151 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   migration that deletes `book`/`youtube` library entries and title rows,
   recreates the `mediatype` enum without those values, and drops the
   `author`/`page_count` columns from `titles`
+- Cloudflare Turnstile captcha on registration: `users/turnstile.py`'s
+  `verify_turnstile` calls Cloudflare's siteverify endpoint from
+  `POST /auth/register`; `SiteSettings.turnstile_enabled` (migration
+  `86c66fe120eb`) lets an admin fall back to IP rate-limiting only without
+  touching `TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET_KEY`. The widget itself is
+  hosted backend-side (`new_widget_session`/`widget_html`/`set_widget_token`/
+  `get_widget_token` in `users/turnstile.py`, `GET /auth/turnstile-widget/{id}`,
+  `POST /auth/turnstile-callback/{id}`, `GET /auth/turnstile-token/{id}`)
+  since Cloudflare's widget requires a real, Cloudflare-registered hostname
+  and only the backend is reachable from both the web build and compiled
+  mobile apps; session state is an in-process dict, so this needs moving to
+  shared storage before running multiple uvicorn workers
+- `GET /auth/registration-status`: now also returns `turnstile_site_key`
+  (null when Turnstile isn't configured/enabled) and
+  `email_confirmation_enabled`, both marked `Cache-Control: no-store` so an
+  admin toggle takes effect on the very next app launch instead of whenever
+  an intermediate cache's stale entry expires
+- Registration/email-change confirmation codes: `users/email_confirmation.py`
+  generates a 6-digit, bcrypt-hashed code (15-minute TTL, 8-attempt cap) and
+  sends it via Brevo (`BREVO_API_KEY`/`EMAIL_SENDER_ADDRESS` in `.env`; unset
+  key logs the would-be email instead of sending). New `routers/auth.py`
+  endpoints: `POST /auth/confirm-email` (credential-based, not bearer-token,
+  so an account past its login grace period can still confirm),
+  `POST /auth/resend-confirmation` (throttled: 3 per 5 minutes per account),
+  and `POST /auth/change-unconfirmed-email` (fixes a typo'd registration
+  address pre-confirmation via a direct rewrite, skipping the two-step
+  old-address-approves flow that already-confirmed accounts use). `register`
+  sends a `"register"` code when `SiteSettings.email_confirmation_enabled` is
+  on; `update_profile`'s email change now goes through a two-step
+  `change_authorize`/`change_confirm` code pair instead of changing `email`
+  immediately. `login` blocks an unconfirmed, non-grandfathered account once
+  `EMAIL_CONFIRMATION_GRACE_DAYS` (7) have passed since `created_at`, with a
+  distinct `email_not_confirmed` detail string so the frontend can route to
+  a confirm screen instead of a dead end
+- `models.py`: `User.email_confirmed` (indexed — filtered on every
+  `/stats/ranking` request), `User.email_confirmation_grandfathered` (every
+  account that existed before this feature shipped, backfilled by migration
+  `ffffe2b24717` so an established user base isn't locked out on day one —
+  see that migration's docstring for the exact bug it fixes in `ee151fb9d02c`'s
+  original no-grandfathering design), `User.pending_email` (set while a
+  two-step email change is awaiting confirmation); `SiteSettings.
+  email_confirmation_enabled` (migration `4220e67045f7`); new
+  `EmailConfirmationCode` model/table (migration `ee151fb9d02c`) storing
+  `code_hash`, `purpose` (`register`/`change_authorize`/`change_confirm`),
+  `attempts`, `expires_at`, `consumed_at`
+- `db_triggers.py`: `app_counters.total_users` now counts only
+  `email_confirmed` users, so a hand-registered throwaway account can't pad
+  the `/stats/ranking` denominator or "ahead of me" count past a captcha
+  alone — a second trigger (`trg_users_email_confirmed`) watches `UPDATE`s
+  that flip the flag in either direction, since the email-change flow can
+  flip a confirmed user back to unconfirmed until the new address verifies
+- `task_runs.py`: `TaskSpec` entry for `email_confirmation_cleanup`
+  (label "Email confirmation cleanup", group "Security", default
+  360-minute interval); `social/notifier.py`'s
+  `_email_confirmation_cleanup_loop` (fifth independent background loop)
+  calls `users/email_confirmation.py`'s `cleanup_unconfirmed_accounts`,
+  which deletes `email_confirmed=False`, non-grandfathered accounts older
+  than 14 days via `users/accounts.py`'s `delete_account`, so a
+  never-confirmed signup doesn't squat a username/email forever
+- Personal-data export (GDPR Art. 20): `users/export.py`'s `build_export`
+  reads every account, library, comment, and follow/follower row for a user
+  directly off the ORM (deliberately not reusing the `*_out` API schemas, so
+  the export stays complete and stable as the API surface evolves) into a
+  zipped `data.json`. `users/export_queue.py` runs builds on a single
+  background worker thread with a priority heap — premium requests dequeue
+  ahead of free ones (compute-priority perk only; the export itself stays
+  free for every account per GDPR Art. 20) — and mirrors live progress into
+  the durable `ExportJob` row (migration `a4d6e1b8c2f7`) so a status poll
+  after a server restart can tell "queued job got dropped" apart from
+  "never requested". New `routers/export.py`: `POST /export/data` (queues a
+  build, 409 if one is already in flight), `GET /export/data/status`,
+  `GET /export/data/download`
+- Admin **Premium Features** page (`routers/admin/premium.py`,
+  `GET <ADMIN_PATH>/premium`): one card per premium perk (profile style,
+  verification requests, background image, paid themes, paid progress
+  styles, paid episode label styles, leaderboard ranking) grouped into
+  Profile & identity / Appearance & personalization / Stats & competition
+  sections, each with its own instant on/off switch
+  (`POST <ADMIN_PATH>/premium/toggle`) backed by a new
+  `SiteSettings.premium_<feature>_enabled` column per feature (migrations
+  `b4c6a1e0f923` for style/verification/background/themes/progress_style/
+  episode_label, `a1f5e8c3d629` for ranking); tile added to the admin
+  dashboard. `users/premium.py`: `PremiumFeature` literal, `PREMIUM_FEATURES`,
+  `feature_enabled()` (site-wide toggle lookup), `premium_active()`
+  (subscription active AND that perk's toggle on) — `require_premium` in
+  `users/auth.py` still only checks the subscription itself; each
+  endpoint/field checks its own feature toggle separately since they
+  disable one perk at a time rather than premium as a whole. Enforced in
+  `routers/auth.py`'s `update_profile` (background image, themes, progress
+  style, episode label style), `routers/premium.py`'s `update_style` and
+  `request_verification`, and `routers/stats.py`'s ranking endpoints
+- Paid episode label styles: `users/premium.py`'s `FREE_EPISODE_LABEL_STYLES`
+  (`"cross"` only) / `EPISODE_LABEL_STYLES` (adds `standard`, `literal`,
+  `verbose`); `User.episode_label_style` column (migration `c7d8e9f0a1b2`);
+  `ProfileUpdate.episode_label_style` with a validator against
+  `EPISODE_LABEL_STYLES`
+- Premium per-status Library accent colors: `User.status_colors` JSONB column
+  (migration `d3e9f6a2b7c1`); `PremiumStyleUpdate.status_colors` accepts a
+  per-key patch (`{"status": "#hex" | None}` — `None` clears that one status,
+  omitted keys keep their value, top-level `None` clears all), validated
+  against `WatchStatus` members and `PALETTE`; `routers/premium.py`'s
+  `update_style` merges the patch into the stored dict instead of replacing
+  it wholesale
+- Admin **Users** page: "Until date" and "Grant forever" premium-grant forms
+  alongside the existing "Grant days" one (`routers/admin/users.py`'s
+  `grant_premium` now accepts `days` OR `until_date` OR `forever`, dropping
+  the old 3650-day cap on `days`); `PREMIUM_FOREVER` sentinel
+  (`datetime(9999, 1, 1, tzinfo=UTC)`, since `is_premium` only ever checks
+  `premium_until > utcnow()` and `datetime.max` doesn't round-trip through
+  every DB driver); "email confirmed" / "grandfathered" pills next to a
+  user's existing premium/verified pills
+- TV Time import now also carries over comments and rewatch counts:
+  `routers/imports.py` reads `show_comment.csv`/`episode_comment.csv`/
+  `comments-prod-comments.csv` (filtered to `type` `comment`/`reply` rows)
+  into `Comment` rows, reconstructing reply threads via each row's TV Time
+  `id`/`parent_comment_id` (or `uuid`/`parent_uuid` for movie comments)
+  through a retry-until-no-progress loop so a self-reply chain resolves
+  regardless of row order — a reply whose parent is never one of this user's
+  own comments (the common case: a reply to another TV Time user) is
+  dropped rather than filed as a fake root comment. `rewatched_episode.csv`
+  tops up each episode's `WatchEvent` row count to TV Time's own `cpt`
+  count without ever double-counting a rewatch already logged manually or
+  via `POST /rewatch`, and creates the `EpisodeWatch` row if missing.
+  `_match_show` now falls back to a plain TMDB title search
+  (`_search_tv(name)`) when both the TVDB-id lookup and the TVDB-alias
+  retry come up empty (or no `TVDB_API_KEY` is set), instead of leaving the
+  show unmatched
+- `catalog/titles.py`'s `backfill_title_tmdb_id`: fills in `tmdb_id` (and
+  any still-missing poster/runtime/episode-count metadata) on a `Title` that
+  was created without a TMDB match on an earlier import run, called from
+  `routers/imports.py`'s `_upsert_library_entry` whenever a later run
+  resolves a `tmdb_id` for a title-text match that previously had none —
+  without this, a text-matched reconcile updated the `LibraryEntry` but
+  left the underlying `Title` permanently degraded. Race-safe: a concurrent
+  worker claiming the same `tmdb_id` for a different `Title` (a genuine
+  `uq_title_tmdb` collision) is caught and skipped rather than raised
+- `import_jobs` table (migration `b2f7a6d391ea`) and new `ImportJob` model:
+  durable marker for a user's last TV Time import outcome, written at job
+  start and completion/failure only, so `GET /import/tvtime/status` can
+  tell "server restarted mid-import" apart from "never run" after the
+  in-memory `_progress` dict is lost; `routers/imports.py`'s `_run_import`
+  now also tracks per-row `errors` (infra failures) separately from
+  `skipped` (normal dedupe) in the returned summary
+- `GET /upcoming` and `GET /upcoming/history` (`routers/upcoming.py`) both
+  gained a `media_type` query filter and now return `tmdb_id` per entry
 
 ### Changed
 
@@ -61,6 +206,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a different order
 - `media/http_cache.py` module docstring: removed references to Open
   Library and YouTube Data API (no longer used)
+- `UserCreate`/`register`: emails are now normalized (`.strip().lower()`)
+  before the uniqueness check and storage, in `routers/auth.py`'s `register`
+  and `update_profile`, so `Foo@Example.com` and `foo@example.com` can't
+  both register or collide inconsistently
+- `routers/admin/settings.py`: Site Settings page gained Turnstile captcha
+  and Email confirmation status chips/toggles, plus warning banners when
+  `TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET_KEY` or `BREVO_API_KEY` aren't set
+  in `.env`; turning email confirmation off bulk-confirms every currently
+  unconfirmed account (one row-level `UPDATE`, so `app_counters.total_users`
+  comes out correct via the existing trigger without a separate resync)
+  instead of leaving them silently excluded from login/ranking forever
+- `routers/upcoming.py`'s `get_upcoming_history`: TV and film history are now
+  queried independently (each skipped entirely when `media_type` filters the
+  other out) instead of always running both; the history cutoff moved from
+  `today + 1 day` to `today`, so a title releasing/airing today shows only
+  once, under `/upcoming`, instead of also appearing in `/upcoming/history`
+- `__main__.py`: `uvicorn.access` logs for high-frequency polling endpoints
+  (`/import/*/status`, `/auth/me`) are now filtered out via a
+  `logging.Filter`, so they don't drown out real request traffic in server
+  logs
+- `pyproject.toml`: added `fastapi.Form` to ruff's
+  `flake8-bugbear.extend-immutable-calls` (the admin premium-toggle and
+  settings forms use `Form(...)` defaults the same intended way as the
+  existing `Depends`/`Query` entries)
 
 ### Removed
 
@@ -78,6 +247,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   setting (YouTube Data API v3 key no longer needed)
 - `routers/stats.py`: `youtube_watched`, `books_read`, `pages_read`
   stat counters from `GET /stats` response
+
+### Fixed
+
+- `users/accounts.py`'s `delete_account`: `EpisodeCustomStill` rows have no
+  ORM relationship on `LibraryEntry` and no DB-level `ON DELETE CASCADE`, so
+  deleting a user whose library entries had custom episode stills previously
+  left those rows (and their still images) orphaned instead of being cleaned
+  up; now explicitly deleted (with their images GC'd) before the cascading
+  user delete. Also now clears `EmailConfirmationCode`, `ExportJob`,
+  `ImportJob` rows and the on-disk export zip for the deleted user, and
+  nulls (rather than leaves dangling) `InviteCode.created_by_user_id` for
+  codes the user created, since those codes may still be valid and in use
+  by others
 
 ## [0.5.0] - 2026-07-18
 

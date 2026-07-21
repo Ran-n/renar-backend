@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/07/10 18:19:20.072333
+Revised: 2026/07/21 09:51:03.798227
 
 Import a TV Time GDPR export zip: shows, episode history, movies, favorites.
 
@@ -13,11 +13,17 @@ The zip contains gdpr-data/*.csv. Relevant files:
   tv_show_rate.csv             show ratings
   tracking-prod-records-v2.csv per-episode watch events (season/episode/date)
   tracking-prod-records.csv    movie follow/towatch/watch events
+  show_comment.csv             this user's own show-level comments
+  episode_comment.csv          this user's own episode-level comments
+  comments-prod-comments.csv   this user's own movie comments (type=comment/reply rows only)
+  rewatched_episode.csv        per-episode rewatch counts ("cpt")
 
 Shows are matched to TMDB via TVDB id (/find), movies via name+year search.
 If the TVDB-id lookup misses (TMDB has no crosswalk entry for that id — common
-even for well-known shows), and a TVDB_API_KEY is configured, we ask TheTVDB
-for the show's name/aliases and retry a TMDB title search with each.
+even for well-known shows) and a TVDB_API_KEY is configured, we ask TheTVDB
+for the show's name/aliases and retry a TMDB title search with each; if that
+still comes up empty (or no TVDB_API_KEY is set), we fall back to a plain
+TMDB title search on the name TV Time gave us.
 Runs in a background thread; progress is polled via GET /import/tvtime/status.
 """
 
@@ -35,10 +41,21 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..catalog.titles import find_or_create_title, find_title
+from ..catalog.titles import backfill_title_tmdb_id, find_or_create_title, find_title
 from ..config import settings
 from ..database import SessionLocal
-from ..models import EpisodeWatch, LibraryEntry, MediaType, Title, User, WatchStatus, normalize_title_key
+from ..models import (
+    Comment,
+    EpisodeWatch,
+    ImportJob,
+    LibraryEntry,
+    MediaType,
+    Title,
+    User,
+    WatchEvent,
+    WatchStatus,
+    normalize_title_key,
+)
 from ..tmdb.tmdb_http import POSTER_BASE, tmdb_get
 from ..users.auth import get_current_user
 
@@ -56,6 +73,29 @@ _progress: dict[int, dict] = {}
 
 def _set(user_id: int, **kw):
     _progress.setdefault(user_id, {}).update(kw)
+
+
+def _mark_job(user_id: int, *, finished: bool, error: str | None = None, summary: dict | None = None) -> None:
+    """Upsert the durable ImportJob row so a status poll after a server
+    restart (which wipes _progress) can tell "job was interrupted" apart
+    from "never ran". Called only at job start and at completion/failure —
+    see ImportJob's docstring in models.py.
+    """
+    db = SessionLocal()
+    try:
+        job = db.get(ImportJob, user_id)
+        if job is None:
+            job = ImportJob(user_id=user_id)
+            db.add(job)
+        job.finished = finished
+        job.error = error
+        job.summary = summary
+        db.commit()
+    except Exception:
+        db.rollback()
+        _log.warning("Failed to persist import job state for user_id=%s", user_id, exc_info=True)
+    finally:
+        db.close()
 
 
 def _read_csv(zf: zipfile.ZipFile, name: str) -> list[dict]:
@@ -153,7 +193,7 @@ def _match_show(tvdb_id: str, name: str) -> tuple[dict | None, dict]:
     """Resolve one show to TMDB and fetch its details. Network-only, no DB access."""
     if not name:
         return None, {}
-    found = _find_tv_by_tvdb(tvdb_id) or _find_tv_via_tvdb_fallback(tvdb_id)
+    found = _find_tv_by_tvdb(tvdb_id) or _find_tv_via_tvdb_fallback(tvdb_id) or _search_tv(name)
     details: dict = {}
     if found:
         tmdb_id = found["id"]
@@ -234,7 +274,7 @@ def _upsert_library_entry(
     tmdb_key: tuple | None,
     existing_map: dict,
     reconcile,
-) -> tuple[int | None, bool, bool]:
+) -> tuple[int | None, bool, bool, bool]:
     """Insert or reconcile one LibraryEntry, on its own session.
 
     `existing_map` holds the identities the user already tracked *before*
@@ -250,7 +290,9 @@ def _upsert_library_entry(
     looks up what the winner just created, and reconciles into that instead
     of losing its data.
 
-    Returns (item_id, is_new, changed).
+    Returns (item_id, is_new, changed, error). `error` is only True when the
+    row failed for an infra reason (DB hiccup, unexpected exception) — the
+    caller counts that separately from a normal dedupe skip.
     """
     item_id = existing_map.get(tmdb_key) if tmdb_key else None
     if item_id is None:
@@ -274,22 +316,42 @@ def _upsert_library_entry(
                     else None
                 )
                 if winner is None:
-                    return None, False, False
+                    return None, False, False, False
+                if tmdb_id is not None and winner_title is not None:
+                    backfill_title_tmdb_id(
+                        db,
+                        winner_title,
+                        tmdb_id,
+                        poster_url=title_meta.get("poster_url"),
+                        runtime_minutes=title_meta.get("runtime_minutes"),
+                        total_episodes=title_meta.get("total_episodes"),
+                    )
                 changed = reconcile(winner, entry_fields)
                 db.commit()
-                return winner.id, False, changed
+                return winner.id, False, changed, False
             db.refresh(entry)
-            return entry.id, True, False
+            return entry.id, True, False, False
         entry = db.get(LibraryEntry, item_id)
         if entry is None:
-            return None, False, False
+            return None, False, False, False
+        if tmdb_id is not None:
+            title_row = db.get(Title, entry.title_id)
+            if title_row is not None:
+                backfill_title_tmdb_id(
+                    db,
+                    title_row,
+                    tmdb_id,
+                    poster_url=title_meta.get("poster_url"),
+                    runtime_minutes=title_meta.get("runtime_minutes"),
+                    total_episodes=title_meta.get("total_episodes"),
+                )
         changed = reconcile(entry, entry_fields)
         db.commit()
-        return item_id, False, changed
+        return item_id, False, changed, False
     except Exception:
         db.rollback()
         _log.warning("Upsert failed for %r (user_id=%s)", title, user_id, exc_info=True)
-        return None, is_new, False
+        return None, is_new, False, True
     finally:
         db.close()
 
@@ -301,7 +363,7 @@ def _process_show(
     for_later: set,
     rates: dict,
     existing_map: dict,
-) -> tuple[str, int | None, str | None, bool, bool] | None:
+) -> tuple[str, int | None, str | None, bool, bool, bool] | None:
     """Match one show row against TMDB and insert it. Runs in a worker thread."""
     tvdb_id = row.get("tv_show_id") or ""
     name = (row.get("tv_show_name") or "").strip()
@@ -343,7 +405,7 @@ def _process_show(
     # different TVDB entries can resolve to the same TMDB show
     title_key = ("tv_show", normalize_title_key(final_title))
     tmdb_key = ("tv_show", tmdb_id) if tmdb_id else None
-    item_id, is_new, changed = _upsert_library_entry(
+    item_id, is_new, changed, error = _upsert_library_entry(
         user_id,
         MediaType.tv_show,
         tmdb_id,
@@ -355,7 +417,7 @@ def _process_show(
         existing_map,
         _reconcile_show_entry,
     )
-    return tvdb_id, item_id, unmatched, is_new, changed
+    return tvdb_id, item_id, unmatched, is_new, changed, error
 
 
 def _process_movie(
@@ -363,7 +425,7 @@ def _process_movie(
     name: str,
     m: dict,
     existing_map: dict,
-) -> tuple[int | None, str | None, bool, bool]:
+) -> tuple[int | None, str | None, bool, bool, bool]:
     """Match one movie against TMDB and insert it. Runs in a worker thread."""
     found = _search_movie(name, m["year"])
     tmdb_id = found["id"] if found else None
@@ -380,7 +442,7 @@ def _process_movie(
     }
     title_key = ("film", normalize_title_key(final_title))
     tmdb_key = ("film", tmdb_id) if tmdb_id else None
-    item_id, is_new, changed = _upsert_library_entry(
+    item_id, is_new, changed, error = _upsert_library_entry(
         user_id,
         MediaType.film,
         tmdb_id,
@@ -392,12 +454,24 @@ def _process_movie(
         existing_map,
         _reconcile_movie_entry,
     )
-    return item_id, unmatched, is_new, changed
+    return item_id, unmatched, is_new, changed, error
 
 
 def _run_import(user_id: int, zip_bytes: bytes):
     db: Session = SessionLocal()
-    summary = {"shows": 0, "updated": 0, "episodes": 0, "movies": 0, "skipped": 0, "unmatched": []}
+    summary = {
+        "shows": 0,
+        "updated": 0,
+        "episodes": 0,
+        "movies": 0,
+        "comments": 0,
+        "comments_skipped": 0,
+        "rewatches": 0,
+        "rewatches_skipped": 0,
+        "skipped": 0,
+        "errors": 0,
+        "unmatched": [],
+    }
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
 
@@ -447,10 +521,12 @@ def _run_import(user_id: int, zip_bytes: bytes):
                 result = fut.result()
                 if result is None:
                     continue
-                tvdb_id, item_id, unmatched, is_new, changed = result
+                tvdb_id, item_id, unmatched, is_new, changed, error = result
                 if item_id is not None:
                     items_by_tvdb[tvdb_id] = item_id
                     show_results.append((tvdb_id, item_id, is_new, changed))
+                elif error:
+                    summary["errors"] += 1
                 else:
                     summary["skipped"] += 1
                 if unmatched:
@@ -539,54 +615,322 @@ def _run_import(user_id: int, zip_bytes: bytes):
             if len(release) >= 4 and release[:4].isdigit():
                 m["year"] = release[:4]
 
+        # name (normalized) -> item id, for every movie touched this run
+        # (matched fresh or reconciled) — lets movie comments below attach
+        # without re-resolving each title a second time.
+        items_by_movie: dict[str, int] = {}
+
         _set(user_id, stage="Matching movies", done=0, total=len(movies))
         done = 0
         with ThreadPoolExecutor(max_workers=MATCH_WORKERS) as pool:
-            futures = []
+            fut_to_name: dict = {}
             for name, m in movies.items():
                 # A movie already tracked under this exact name that TV Time
                 # doesn't report as watched has nothing to reconcile (only
                 # "watched" ever changes an existing entry) — skip the TMDB
                 # search entirely rather than re-matching every re-run.
-                if not m["watched"] and ("film", normalize_title_key(name)) in existing_map:
+                existing_id = existing_map.get(("film", normalize_title_key(name)))
+                if not m["watched"] and existing_id is not None:
+                    items_by_movie[normalize_title_key(name)] = existing_id
                     done += 1
                     summary["skipped"] += 1
                     _set(user_id, done=done)
                     continue
-                futures.append(pool.submit(_process_movie, user_id, name, m, existing_map))
-            for fut in as_completed(futures):
+                fut_to_name[pool.submit(_process_movie, user_id, name, m, existing_map)] = name
+            for fut in as_completed(fut_to_name):
                 done += 1
                 _set(user_id, done=done)
-                item_id, unmatched, is_new, changed = fut.result()
+                item_id, unmatched, is_new, changed, error = fut.result()
                 if item_id is not None:
+                    items_by_movie[normalize_title_key(fut_to_name[fut])] = item_id
                     if is_new:
                         summary["movies"] += 1
                     elif changed:
                         summary["updated"] += 1
                     else:
                         summary["skipped"] += 1
+                elif error:
+                    summary["errors"] += 1
                 else:
                     summary["skipped"] += 1
                 if unmatched:
                     summary["unmatched"].append(unmatched)
 
+        # ---------- comments ----------
+        # The export's user_id column is constant across every row (verified
+        # empirically against a real export) — this is only ever the
+        # exporting user's own comments, never other users', so importing
+        # them needs no per-row author check. Only attached to shows that
+        # got matched above (items_by_tvdb): a comment left on a show the
+        # user isn't tracking in this run would otherwise force a fresh TMDB
+        # match (and possibly a new library entry) just to file a comment,
+        # which isn't what "import my watch history" should do.
+        #
+        # show_comment.csv carries tv_show_id directly; episode_comment.csv
+        # doesn't, only tv_show_name, so it's matched via the same show
+        # rows' name -> tvdb_id mapping instead.
+        #
+        # Reply threads (parent_comment_id): a reply is only ever
+        # reconstructible when its parent is ALSO one of this user's own
+        # comments — i.e. present somewhere else in this same export — since
+        # the export contains nothing about other TV Time users' comments.
+        # `tvtime_id_to_comment_id` tracks TV Time's own `id` column ->
+        # the resulting Renar Comment.id for every comment resolved so far
+        # (root or reply, newly-created or found via dedupe), so a reply can
+        # look up its parent even across an arbitrarily deep self-reply
+        # chain, in any row order, via the retry loop below. A reply whose
+        # parent never resolves — because it's a reply to another TV Time
+        # user, the actual common case — is dropped rather than imported as
+        # a fake root comment: filing it as ordinary commentary on the
+        # show/episode would misrepresent what it actually is.
+        #
+        # Comment has no external TV Time id column, so re-running the
+        # import resolves existing rows the same way as new ones: a dedupe
+        # hit still yields that comment's id into tvtime_id_to_comment_id,
+        # so replies onto a comment from a *previous* import run resolve
+        # correctly too, not just replies within a single run.
+        #
+        # Movie comments live in a separate, newer export table
+        # (comments-prod-comments.csv) that also carries likes/reports mixed
+        # in via its own `type` column — only `comment`/`reply` rows are real
+        # commentary, so those are the only ones read here. It has no
+        # per-movie id either, only movie_name, matched the same way as
+        # episode comments: via items_by_movie, the name -> item id map built
+        # while matching movies above.
+        show_comment_rows = _read_csv(zf, "show_comment.csv")
+        episode_comment_rows = _read_csv(zf, "episode_comment.csv")
+        movie_comment_rows = [
+            r for r in _read_csv(zf, "comments-prod-comments.csv") if r.get("type") in ("comment", "reply")
+        ]
+        name_to_tvdb = {r["tv_show_name"]: r["tv_show_id"] for r in show_rows if r.get("tv_show_name")}
+
+        def _resolve_show_comment(row: dict) -> tuple[int | None, None, None, str]:
+            item_id = items_by_tvdb.get(row.get("tv_show_id") or "")
+            return item_id, None, None, (row.get("comment") or "").strip()
+
+        def _resolve_episode_comment(row: dict) -> tuple[int | None, int | None, int | None, str]:
+            tvdb_id = name_to_tvdb.get(row.get("tv_show_name") or "")
+            item_id = items_by_tvdb.get(tvdb_id or "")
+            text = (row.get("comment") or "").strip()
+            s_no, ep_no = row.get("episode_season_number"), row.get("episode_number")
+            try:
+                season, episode = (int(s_no), int(ep_no)) if item_id and s_no and ep_no else (None, None)
+            except ValueError:
+                season = episode = None
+            if item_id and (season is None or episode is None):
+                item_id = None  # matched show, but episode numbers didn't parse — treat as unmatched
+            return item_id, season, episode, text
+
+        def _resolve_movie_comment(row: dict) -> tuple[int | None, None, None, str]:
+            item_id = items_by_movie.get(normalize_title_key(row.get("movie_name") or ""))
+            return item_id, None, None, (row.get("text") or "").strip()
+
+        jobs = [
+            (row.get("id") or "", row.get("parent_comment_id") or "", *_resolve_show_comment(row), row)
+            for row in show_comment_rows
+        ]
+        jobs += [
+            (row.get("id") or "", row.get("parent_comment_id") or "", *_resolve_episode_comment(row), row)
+            for row in episode_comment_rows
+        ]
+        jobs += [
+            (row.get("uuid") or "", row.get("parent_uuid") or "", *_resolve_movie_comment(row), row)
+            for row in movie_comment_rows
+        ]
+
+        _set(user_id, stage="Importing comments", done=0, total=len(jobs))
+        title_comment_cache: dict[int, dict[tuple, int]] = {}
+        reply_comment_cache: dict[int, dict[str, int]] = {}
+        tvtime_id_to_comment_id: dict[str, int] = {}
+
+        def _existing_root(title_id: int, season: int | None, episode: int | None, text: str) -> int | None:
+            if title_id not in title_comment_cache:
+                rows = (
+                    db.query(Comment.id, Comment.season, Comment.episode, Comment.text)
+                    .filter(Comment.user_id == user_id, Comment.title_id == title_id)
+                    .all()
+                )
+                title_comment_cache[title_id] = {(s, e, t): cid for cid, s, e, t in rows}
+            return title_comment_cache[title_id].get((season, episode, text))
+
+        def _existing_reply(parent_id: int, text: str) -> int | None:
+            if parent_id not in reply_comment_cache:
+                rows = (
+                    db.query(Comment.id, Comment.text)
+                    .filter(Comment.user_id == user_id, Comment.parent_id == parent_id)
+                    .all()
+                )
+                reply_comment_cache[parent_id] = {t: cid for cid, t in rows}
+            return reply_comment_cache[parent_id].get(text)
+
+        def _create_root(
+            item_id: int | None, season: int | None, episode: int | None, text: str, created_at: datetime
+        ) -> tuple[int | None, bool]:
+            if not item_id or not text:
+                return None, False
+            item = db.get(LibraryEntry, item_id)
+            if item is None:
+                return None, False
+            existing = _existing_root(item.title_id, season, episode, text)
+            if existing is not None:
+                return existing, False
+            comment = Comment(
+                user_id=user_id,
+                title_id=item.title_id,
+                season=season,
+                episode=episode,
+                text=text,
+                created_at=created_at,
+            )
+            db.add(comment)
+            db.flush()
+            title_comment_cache.setdefault(item.title_id, {})[(season, episode, text)] = comment.id
+            return comment.id, True
+
+        def _create_reply(parent_comment_id: int, text: str, created_at: datetime) -> tuple[int | None, bool]:
+            if not text:
+                return None, False
+            existing = _existing_reply(parent_comment_id, text)
+            if existing is not None:
+                return existing, False
+            comment = Comment(
+                user_id=user_id,
+                title_id=None,
+                parent_id=parent_comment_id,
+                season=None,
+                episode=None,
+                text=text,
+                created_at=created_at,
+            )
+            db.add(comment)
+            db.flush()
+            reply_comment_cache.setdefault(parent_comment_id, {})[text] = comment.id
+            return comment.id, True
+
+        done = 0
+        pending: list[tuple[str, str, str, datetime]] = []
+        for tvtime_id, parent_tvtime_id, item_id, season, episode, text, row in jobs:
+            done += 1
+            if done % 100 == 0:
+                _set(user_id, done=done)
+            created_at = _parse_dt(row.get("created_at")) or datetime.now(UTC)
+            if parent_tvtime_id:
+                pending.append((tvtime_id, parent_tvtime_id, text, created_at))
+                continue
+            comment_id, is_new = _create_root(item_id, season, episode, text, created_at)
+            if comment_id is None:
+                summary["comments_skipped"] += 1
+                continue
+            if tvtime_id:
+                tvtime_id_to_comment_id[tvtime_id] = comment_id
+            if is_new:
+                summary["comments"] += 1
+
+        # Retry pending replies until a full pass makes no progress, so a
+        # multi-level self-reply chain resolves regardless of row order.
+        progress = True
+        while pending and progress:
+            progress = False
+            still_pending = []
+            for tvtime_id, parent_tvtime_id, text, created_at in pending:
+                parent_comment_id = tvtime_id_to_comment_id.get(parent_tvtime_id)
+                if parent_comment_id is None:
+                    still_pending.append((tvtime_id, parent_tvtime_id, text, created_at))
+                    continue
+                comment_id, is_new = _create_reply(parent_comment_id, text, created_at)
+                if comment_id is None:
+                    summary["comments_skipped"] += 1
+                    continue
+                if tvtime_id:
+                    tvtime_id_to_comment_id[tvtime_id] = comment_id
+                if is_new:
+                    summary["comments"] += 1
+                progress = True
+            pending = still_pending
+        # Whatever's left replies to a comment that isn't this user's own —
+        # can't be attached anywhere without misrepresenting it, so it's
+        # dropped rather than filed as a fake root comment.
+        summary["comments_skipped"] += len(pending)
+
+        db.commit()
+
+        # ---------- rewatches ----------
+        # rewatched_episode.csv has no tv_show_id, only tv_show_name (same as
+        # episode_comment.csv), matched the same way via name_to_tvdb. `cpt`
+        # is TV Time's own rewatch count for that episode; WatchEvent.
+        # rewatch_count (routers/media.py) is a plain COUNT of WatchEvent
+        # rows, so importing means topping each episode's row count up to
+        # `cpt`, never overwriting it — a rewatch already logged manually (or
+        # via the app's own POST /rewatch) is left alone, and re-running the
+        # import only ever inserts the shortfall, never doubles up. A
+        # rewatched episode implies at least one watch, so a missing
+        # EpisodeWatch row is created too, same as the app's own endpoint
+        # does. TV Time gives one timestamp per row, not one per rewatch, so
+        # every synthesized WatchEvent for a `cpt` > 1 row shares it.
+        rewatch_rows = _read_csv(zf, "rewatched_episode.csv")
+
+        def _resolve_rewatch(row: dict) -> tuple[int | None, int | None, int | None, int]:
+            tvdb_id = name_to_tvdb.get(row.get("tv_show_name") or "")
+            item_id = items_by_tvdb.get(tvdb_id or "")
+            try:
+                season, episode, cpt = (
+                    int(row.get("episode_season_number")),
+                    int(row.get("episode_number")),
+                    int(row.get("cpt")),
+                )
+            except (TypeError, ValueError):
+                return None, None, None, 0
+            if cpt < 1:
+                return None, None, None, 0
+            return item_id, season, episode, cpt
+
+        _set(user_id, stage="Importing rewatches", done=0, total=len(rewatch_rows))
+        done = 0
+        for row in rewatch_rows:
+            done += 1
+            if done % 100 == 0:
+                _set(user_id, done=done)
+            item_id, season, episode, cpt = _resolve_rewatch(row)
+            if not item_id or db.get(LibraryEntry, item_id) is None:
+                summary["rewatches_skipped"] += 1
+                continue
+            watched_at = _parse_dt(row.get("updated_at")) or _parse_dt(row.get("created_at")) or datetime.now(UTC)
+            if db.query(EpisodeWatch).filter_by(media_item_id=item_id, season=season, episode=episode).first() is None:
+                db.add(EpisodeWatch(media_item_id=item_id, season=season, episode=episode, watched_at=watched_at))
+            existing_events = (
+                db.query(WatchEvent)
+                .filter(WatchEvent.media_item_id == item_id, WatchEvent.season == season, WatchEvent.episode == episode)
+                .count()
+            )
+            to_add = cpt - existing_events
+            if to_add > 0:
+                for _ in range(to_add):
+                    db.add(WatchEvent(media_item_id=item_id, season=season, episode=episode, watched_at=watched_at))
+                summary["rewatches"] += to_add
+        db.commit()
+
         summary["unmatched"] = summary["unmatched"][:20]
         _set(user_id, stage="Done", finished=True, summary=summary, error=None)
+        _mark_job(user_id, finished=True, error=None, summary=summary)
         _log.info(
-            "TV Time import finished for user_id=%s: %s shows, %s episodes, %s movies, %s updated, %s skipped, "
-            "%s unmatched",
+            "TV Time import finished for user_id=%s: %s shows, %s episodes, %s movies, %s comments, %s rewatches, "
+            "%s updated, %s skipped, %s errors, %s unmatched",
             user_id,
             summary["shows"],
             summary["episodes"],
             summary["movies"],
+            summary["comments"],
+            summary["rewatches"],
             summary["updated"],
             summary["skipped"],
+            summary["errors"],
             len(summary["unmatched"]),
         )
     except Exception as exc:
         db.rollback()
         _log.exception("TV Time import failed for user_id=%s", user_id)
         _set(user_id, stage="Failed", finished=True, error=str(exc), summary=summary)
+        _mark_job(user_id, finished=True, error=str(exc), summary=summary)
     finally:
         db.close()
 
@@ -607,17 +951,43 @@ async def import_tvtime(
     except zipfile.BadZipFile as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="That is not a zip file") from exc
     _progress[user.id] = {"stage": "Starting", "done": 0, "total": 0, "finished": False, "error": None, "summary": None}
+    _mark_job(user.id, finished=False, error=None, summary=None)
     threading.Thread(target=_run_import, args=(user.id, data), daemon=True).start()
     return {"status": "started"}
 
 
 @router.get("/tvtime/status")
 def import_status(user: User = Depends(get_current_user)):
-    return _progress.get(user.id) or {
-        "stage": "Never run",
+    live = _progress.get(user.id)
+    if live is not None:
+        return live
+
+    # Nothing in memory for this user — either no import ever ran on this
+    # process, or one did and the process (and its in-memory _progress dict)
+    # was lost mid-import, e.g. a server restart. ImportJob (written at job
+    # start and at completion/failure) tells the two apart: a row stuck at
+    # finished=False means the job never got to report back.
+    db = SessionLocal()
+    try:
+        job = db.get(ImportJob, user.id)
+    finally:
+        db.close()
+    if job is None:
+        return {"stage": "Never run", "finished": True, "error": None, "summary": None, "done": 0, "total": 0}
+    if not job.finished:
+        return {
+            "stage": "Failed",
+            "finished": True,
+            "error": "Import was interrupted by a server restart. Please re-run it.",
+            "summary": None,
+            "done": 0,
+            "total": 0,
+        }
+    return {
+        "stage": "Failed" if job.error else "Done",
         "finished": True,
-        "error": None,
-        "summary": None,
+        "error": job.error,
+        "summary": job.summary,
         "done": 0,
         "total": 0,
     }

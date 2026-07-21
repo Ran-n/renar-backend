@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/07/17 19:32:52.574391
+Revised: 2026/07/21 09:51:05.354838
 
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
@@ -28,6 +28,11 @@ os.environ["MEDIA_DIR"] = str(_TMP / "media")
 os.environ["SECRET_KEY"] = "test-secret-key-0123456789abcdef"
 os.environ["TMDB_API_KEY"] = ""
 os.environ["TVDB_API_KEY"] = ""
+# Real keys in .env (for live/manual testing) must never leak into the suite —
+# test_turnstile.py configures them per-test via monkeypatch instead, and
+# every other register() call in the suite expects the check to no-op.
+os.environ["TURNSTILE_SITE_KEY"] = ""
+os.environ["TURNSTILE_SECRET_KEY"] = ""
 os.environ["ADMIN_USERNAME"] = ""
 os.environ["ADMIN_PASSWORD"] = ""
 os.environ["ADMIN_PATH"] = "/admin"
@@ -40,8 +45,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 
 from renar_backend.config import settings  # noqa: E402
-from renar_backend.database import Base, engine  # noqa: E402
+from renar_backend.database import Base, SessionLocal, engine  # noqa: E402
 from renar_backend.main import app  # noqa: E402
+from renar_backend.models import User  # noqa: E402
 
 with create_engine(_PG_BASE_URL).begin() as _conn:
     _conn.execute(text(f'CREATE SCHEMA "{_SCHEMA}"'))
@@ -93,13 +99,29 @@ def client():
     return TestClient(app)
 
 
+def _confirm_email(user_id: int) -> None:
+    """Most tests aren't about the confirmation flow itself and expect a
+    normal, ranking-eligible account — see test_email_confirmation.py for
+    the unconfirmed/pending-confirmation paths, which register through the
+    API directly instead of calling this."""
+    db = SessionLocal()
+    try:
+        db.get(User, user_id).email_confirmed = True
+        db.commit()
+    finally:
+        db.close()
+
+
 def register(client: TestClient, username: str = "alice", password: str = PASSWORD) -> dict:
     r = client.post(
         "/auth/register",
         json={"username": username, "email": f"{username}@example.com", "password": password},
     )
     assert r.status_code == 201, r.text
-    return r.json()
+    user = r.json()
+    _confirm_email(user["id"])
+    user["email_confirmed"] = True
+    return user
 
 
 def login(client: TestClient, username: str = "alice", password: str = PASSWORD) -> dict:

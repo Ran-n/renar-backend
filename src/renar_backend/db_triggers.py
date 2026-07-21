@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 09:54:55.646441
-Revised: 2026/07/17 10:25:32.558538
+Revised: 2026/07/21 09:51:02.775820
 
 Postgres functions/triggers that keep denormalized aggregate columns in sync
 at the database level — see docs/design-decisions.md, "users.total_watch_minutes:
@@ -200,13 +200,23 @@ DROP FUNCTION IF EXISTS _watch_minutes_contribution(text, integer, text, integer
 """
 
 # app_counters.total_users backs /stats/ranking's percentile denominator
-# (routers/stats.py._compute_ranking). COUNT(*) FROM users has no O(1)
-# shortcut in Postgres — MVCC means every row's visibility must be checked,
-# index or not — so at large user counts, computing it fresh on every
-# ranking request becomes real, unavoidable latency. This keeps a running
-# total instead, updated by the same one-row-at-a-time trigger pattern as
+# (routers/stats.py._compute_ranking) and counts CONFIRMED users only (see
+# users.email_confirmed) — an unconfirmed/throwaway account must not pad the
+# denominator or the "ahead of me" comparison, closing the ranking-inflation
+# gap a captcha alone doesn't (bulk hand-registered accounts still pass a
+# captcha). COUNT(*) FROM users WHERE email_confirmed has no O(1) shortcut in
+# Postgres — MVCC means every row's visibility must be checked, index or not
+# — so at large user counts, computing it fresh on every ranking request
+# becomes real, unavoidable latency. This keeps a running total instead,
+# updated by the same one-row-at-a-time trigger pattern as
 # total_watch_minutes: correct by construction, not by an app-level
 # increment call that could be missed on some future write path.
+#
+# Two triggers, not one: INSERT/DELETE (trg_users_count) only ever sees a
+# confirmed row on DELETE (a brand-new user is always email_confirmed=false),
+# so a second trigger (trg_users_email_confirmed) watches the UPDATE that
+# flips the flag — in either direction, since the email-change flow can flip
+# a confirmed user back to unconfirmed until the new address is verified.
 #
 # The (id=1) row is seeded here rather than assumed present, so this stays
 # safe to run against a database that hasn't been through the seeding
@@ -216,27 +226,51 @@ USER_COUNT_TRIGGER_SQL = """
 CREATE OR REPLACE FUNCTION trg_users_count() RETURNS trigger AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        UPDATE app_counters SET total_users = total_users + 1 WHERE id = 1;
+        IF NEW.email_confirmed THEN
+            UPDATE app_counters SET total_users = total_users + 1 WHERE id = 1;
+        END IF;
         RETURN NEW;
     ELSIF TG_OP = 'DELETE' THEN
-        UPDATE app_counters SET total_users = total_users - 1 WHERE id = 1;
+        IF OLD.email_confirmed THEN
+            UPDATE app_counters SET total_users = total_users - 1 WHERE id = 1;
+        END IF;
         RETURN OLD;
     END IF;
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION trg_users_email_confirmed() RETURNS trigger AS $$
+BEGIN
+    IF NEW.email_confirmed AND NOT OLD.email_confirmed THEN
+        UPDATE app_counters SET total_users = total_users + 1 WHERE id = 1;
+    ELSIF OLD.email_confirmed AND NOT NEW.email_confirmed THEN
+        UPDATE app_counters SET total_users = total_users - 1 WHERE id = 1;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 INSERT INTO app_counters (id, total_users)
-VALUES (1, (SELECT COUNT(*) FROM users))
+VALUES (1, (SELECT COUNT(*) FROM users WHERE email_confirmed))
 ON CONFLICT (id) DO NOTHING;
 
 DROP TRIGGER IF EXISTS users_count_iud ON users;
 CREATE TRIGGER users_count_iud
 AFTER INSERT OR DELETE ON users
 FOR EACH ROW EXECUTE FUNCTION trg_users_count();
+
+DROP TRIGGER IF EXISTS users_email_confirmed_update ON users;
+CREATE TRIGGER users_email_confirmed_update
+AFTER UPDATE ON users
+FOR EACH ROW
+WHEN (OLD.email_confirmed IS DISTINCT FROM NEW.email_confirmed)
+EXECUTE FUNCTION trg_users_email_confirmed();
 """
 
 USER_COUNT_TRIGGER_TEARDOWN_SQL = """
+DROP TRIGGER IF EXISTS users_email_confirmed_update ON users;
+DROP FUNCTION IF EXISTS trg_users_email_confirmed();
 DROP TRIGGER IF EXISTS users_count_iud ON users;
 DROP FUNCTION IF EXISTS trg_users_count();
 """

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/18 00:26:58.788297
+Revised: 2026/07/21 09:51:03.288862
 
 Admin dashboard: the tile-grid landing page at /admin (or the configured
 admin path).
@@ -142,6 +142,23 @@ _SERVICES = [
             ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
             '<circle cx="12" cy="12" r="10"/>'
             '<polyline points="12 6 12 12 16 14"/>'
+            "</svg>"
+        ),
+    },
+    {
+        # Same crown shape as frontend assets/badge_premium.svg — the actual
+        # badge shown next to a premium user's name — flattened to one fill
+        # so it drops into this tile's flat monochrome icon slot.
+        "name": "Premium Features",
+        "desc": "Toggle each premium perk on or off site-wide",
+        "href": f"{_P}/premium",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 -1.25 24 24"'
+            ' fill="currentColor">'
+            '<circle cx="2.7" cy="6" r="1.7"/><circle cx="12" cy="3.2" r="1.9"/><circle cx="21.3" cy="6" r="1.7"/>'
+            '<path d="M2.7 8.1 7.7 11.5 12 5.6 16.3 11.5 21.3 8.1 19.8 16.3 4.2 16.3Z"/>'
+            '<rect x="4.2" y="17.5" width="15.6" height="2.7" rx="1.35"/>'
+            '<path d="M12 9.4 14.1 12 12 14.6 9.9 12Z" opacity=".5"/>'
             "</svg>"
         ),
     },

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/09 14:29:25.931212
-Revised: 2026/07/10 13:42:46.181230
+Revised: 2026/07/21 09:51:05.606594
 
 TV Time import reconciliation: merging into titles the user already tracks
 (manually or from a prior import), instead of skipping them outright.
@@ -14,7 +14,7 @@ import zipfile
 
 import renar_backend.routers.imports as imports_mod
 from renar_backend.database import SessionLocal
-from renar_backend.models import EpisodeWatch, LibraryEntry, Title
+from renar_backend.models import Comment, EpisodeWatch, LibraryEntry, Title, WatchEvent
 
 
 def _csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:
@@ -33,6 +33,10 @@ def _build_zip(
     rates: list[dict] | None = None,
     episode_events: list[dict] | None = None,
     movie_events: list[dict] | None = None,
+    show_comments: list[dict] | None = None,
+    episode_comments: list[dict] | None = None,
+    movie_comments: list[dict] | None = None,
+    rewatches: list[dict] | None = None,
 ) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -60,7 +64,81 @@ def _build_zip(
             "gdpr-data/tracking-prod-records.csv",
             _csv_bytes(movie_events or [], ["movie_name", "type", "runtime", "release_date", "created_at"]),
         )
+        zf.writestr(
+            "gdpr-data/show_comment.csv",
+            _csv_bytes(show_comments or [], ["id", "parent_comment_id", "tv_show_id", "comment", "created_at"]),
+        )
+        zf.writestr(
+            "gdpr-data/episode_comment.csv",
+            _csv_bytes(
+                episode_comments or [],
+                [
+                    "id",
+                    "parent_comment_id",
+                    "tv_show_name",
+                    "episode_season_number",
+                    "episode_number",
+                    "comment",
+                    "created_at",
+                ],
+            ),
+        )
+        zf.writestr(
+            "gdpr-data/comments-prod-comments.csv",
+            _csv_bytes(
+                movie_comments or [],
+                ["uuid", "parent_uuid", "type", "movie_name", "text", "created_at"],
+            ),
+        )
+        zf.writestr(
+            "gdpr-data/rewatched_episode.csv",
+            _csv_bytes(
+                rewatches or [],
+                [
+                    "episode_id",
+                    "cpt",
+                    "created_at",
+                    "updated_at",
+                    "tv_show_name",
+                    "episode_season_number",
+                    "episode_number",
+                ],
+            ),
+        )
     return buf.getvalue()
+
+
+def _title_id_for_entry(item_id: int) -> int:
+    db = SessionLocal()
+    try:
+        return db.get(LibraryEntry, item_id).title_id
+    finally:
+        db.close()
+
+
+def _comments(user_id: int, title_id: int) -> set[tuple]:
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Comment.season, Comment.episode, Comment.text)
+            .filter(Comment.user_id == user_id, Comment.title_id == title_id)
+            .all()
+        )
+        return set(rows)
+    finally:
+        db.close()
+
+
+def _watch_event_count(item_id: int, season: int, episode: int) -> int:
+    db = SessionLocal()
+    try:
+        return (
+            db.query(WatchEvent)
+            .filter(WatchEvent.media_item_id == item_id, WatchEvent.season == season, WatchEvent.episode == episode)
+            .count()
+        )
+    finally:
+        db.close()
 
 
 def _episode_keys(item_id: int) -> set[tuple[int, int]]:
@@ -295,6 +373,362 @@ def test_import_skips_tmdb_search_for_unwatched_already_tracked_movie(client, al
 
     assert summary.get("error") is None
     assert summary["skipped"] == 1
+
+
+# ---------- comments ----------
+
+
+def test_import_adds_show_and_episode_comments(client, alice, monkeypatch):
+    user, headers = alice
+    show = client.post(
+        "/media", json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 555}, headers=headers
+    ).json()
+
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        show_comments=[{"tv_show_id": "100", "comment": "Loving this show", "created_at": "2026-01-01 00:00:00"}],
+        episode_comments=[
+            {
+                "tv_show_name": "Dark",
+                "episode_season_number": "1",
+                "episode_number": "1",
+                "comment": "What a premiere",
+                "created_at": "2026-01-02 00:00:00",
+            }
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 2
+    assert summary["comments_skipped"] == 0
+    title_id = _title_id_for_entry(show["id"])
+    assert _comments(user["id"], title_id) == {
+        (None, None, "Loving this show"),
+        (1, 1, "What a premiere"),
+    }
+
+
+def test_import_skips_comments_on_unmatched_shows(client, alice, monkeypatch):
+    user, _headers = alice
+    _patch_tmdb(monkeypatch)  # nothing matches
+    zip_bytes = _build_zip(
+        show_comments=[{"tv_show_id": "100", "comment": "Never tracked this one", "created_at": "2026-01-01 00:00:00"}],
+        episode_comments=[
+            {
+                "tv_show_name": "Unknown Show",
+                "episode_season_number": "1",
+                "episode_number": "1",
+                "comment": "Also never tracked",
+                "created_at": "2026-01-01 00:00:00",
+            }
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 0
+    assert summary["comments_skipped"] == 2
+
+
+def test_reimport_does_not_duplicate_comments(client, alice, monkeypatch):
+    user, headers = alice
+    show = client.post(
+        "/media", json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 555}, headers=headers
+    ).json()
+
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        show_comments=[{"tv_show_id": "100", "comment": "Loving this show", "created_at": "2026-01-01 00:00:00"}],
+    )
+    _run(user["id"], zip_bytes)
+    summary = _run(user["id"], zip_bytes)  # run again with identical data
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 0
+    title_id = _title_id_for_entry(show["id"])
+    assert len(_comments(user["id"], title_id)) == 1
+
+
+def test_import_links_reply_to_own_earlier_comment(client, alice, monkeypatch):
+    """A reply whose parent is also this user's own exported comment should
+    land as a real reply (Comment.parent_id set, no title/season/episode of
+    its own), not a second root comment."""
+    user, headers = alice
+    client.post("/media", json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 555}, headers=headers)
+
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        show_comments=[
+            {"id": "1", "tv_show_id": "100", "comment": "Loving this show", "created_at": "2026-01-01 00:00:00"},
+            {
+                "id": "2",
+                "parent_comment_id": "1",
+                "tv_show_id": "100",
+                "comment": "Me too!",
+                "created_at": "2026-01-02 00:00:00",
+            },
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 2
+    assert summary["comments_skipped"] == 0
+    db = SessionLocal()
+    try:
+        root = db.query(Comment).filter(Comment.user_id == user["id"], Comment.text == "Loving this show").one()
+        reply = db.query(Comment).filter(Comment.user_id == user["id"], Comment.text == "Me too!").one()
+    finally:
+        db.close()
+    assert reply.parent_id == root.id
+    assert reply.title_id is None
+    assert reply.season is None and reply.episode is None
+
+
+def test_import_drops_reply_to_another_users_comment(client, alice, monkeypatch):
+    """A reply whose parent isn't in this user's own export (i.e. a reply to
+    someone else's comment) must not be filed as a fake root comment."""
+    user, headers = alice
+    client.post("/media", json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 555}, headers=headers)
+
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        show_comments=[
+            {
+                "id": "2",
+                "parent_comment_id": "999999",  # someone else's comment, not in this export
+                "tv_show_id": "100",
+                "comment": "Agreed",
+                "created_at": "2026-01-01 00:00:00",
+            }
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 0
+    assert summary["comments_skipped"] == 1
+    db = SessionLocal()
+    try:
+        assert db.query(Comment).filter(Comment.user_id == user["id"]).count() == 0
+    finally:
+        db.close()
+
+
+def test_import_adds_movie_comment_and_reply(client, alice, monkeypatch):
+    user, headers = alice
+    movie = client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 777}, headers=headers).json()
+
+    _patch_tmdb(monkeypatch, movie_match={"id": 777, "title": "Heat", "release_date": "1995-12-15"})
+    zip_bytes = _build_zip(
+        movie_events=[
+            {
+                "movie_name": "Heat",
+                "type": "watch",
+                "runtime": "0",
+                "release_date": "1995-12-15",
+                "created_at": "2026-01-01 00:00:00",
+            }
+        ],
+        movie_comments=[
+            {
+                "uuid": "c1",
+                "type": "comment",
+                "movie_name": "Heat",
+                "text": "One of the greats",
+                "created_at": "2026-01-01 00:00:00",
+            },
+            {
+                "uuid": "c2",
+                "parent_uuid": "c1",
+                "type": "reply",
+                "movie_name": "Heat",
+                "text": "Agreed, De Niro and Pacino at their best",
+                "created_at": "2026-01-02 00:00:00",
+            },
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 2
+    assert summary["comments_skipped"] == 0
+    title_id = _title_id_for_entry(movie["id"])
+    assert (None, None, "One of the greats") in _comments(user["id"], title_id)
+    db = SessionLocal()
+    try:
+        root = db.query(Comment).filter(Comment.title_id == title_id, Comment.text == "One of the greats").one()
+        reply = db.query(Comment).filter(Comment.parent_id == root.id).one()
+        assert reply.text == "Agreed, De Niro and Pacino at their best"
+        assert reply.title_id is None
+    finally:
+        db.close()
+
+
+def test_import_ignores_movie_like_and_report_rows(client, alice, monkeypatch):
+    """comments-prod-comments.csv mixes likes/reports into the same file via
+    its `type` column — only comment/reply rows are real commentary."""
+    user, headers = alice
+    client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 777}, headers=headers)
+
+    _patch_tmdb(monkeypatch, movie_match={"id": 777, "title": "Heat", "release_date": "1995-12-15"})
+    zip_bytes = _build_zip(
+        movie_events=[
+            {
+                "movie_name": "Heat",
+                "type": "watch",
+                "runtime": "0",
+                "release_date": "1995-12-15",
+                "created_at": "2026-01-01 00:00:00",
+            }
+        ],
+        movie_comments=[
+            {"uuid": "l1", "type": "like", "movie_name": "Heat", "text": "", "created_at": "2026-01-01 00:00:00"},
+            {"uuid": "r1", "type": "report", "movie_name": "Heat", "text": "", "created_at": "2026-01-01 00:00:00"},
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 0
+    assert summary["comments_skipped"] == 0
+
+
+def test_import_skips_comments_on_unmatched_movies(client, alice, monkeypatch):
+    user, _headers = alice
+    _patch_tmdb(monkeypatch)  # nothing matches
+    zip_bytes = _build_zip(
+        movie_comments=[
+            {
+                "uuid": "c1",
+                "type": "comment",
+                "movie_name": "Never Tracked",
+                "text": "Never tracked this one",
+                "created_at": "2026-01-01 00:00:00",
+            }
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 0
+    assert summary["comments_skipped"] == 1
+
+
+# ---------- rewatches ----------
+
+
+def test_import_adds_rewatch_events_and_backfills_episode_watch(client, alice, monkeypatch):
+    user, headers = alice
+    show = client.post(
+        "/media", json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 555}, headers=headers
+    ).json()
+    # not previously marked watched — a rewatch record implies at least one watch
+    assert _episode_keys(show["id"]) == set()
+
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        rewatches=[
+            {
+                "episode_id": "1",
+                "cpt": "2",
+                "created_at": "2026-01-01 00:00:00",
+                "updated_at": "2026-01-02 00:00:00",
+                "tv_show_name": "Dark",
+                "episode_season_number": "1",
+                "episode_number": "1",
+            }
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["rewatches"] == 2
+    assert summary["rewatches_skipped"] == 0
+    assert _episode_keys(show["id"]) == {(1, 1)}
+    assert _watch_event_count(show["id"], 1, 1) == 2
+
+
+def test_reimport_tops_up_rewatch_count_without_duplicating(client, alice, monkeypatch):
+    user, headers = alice
+    show = client.post(
+        "/media", json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 555}, headers=headers
+    ).json()
+
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        rewatches=[
+            {
+                "episode_id": "1",
+                "cpt": "2",
+                "created_at": "2026-01-01 00:00:00",
+                "updated_at": "2026-01-02 00:00:00",
+                "tv_show_name": "Dark",
+                "episode_season_number": "1",
+                "episode_number": "1",
+            }
+        ],
+    )
+    _run(user["id"], zip_bytes)
+    assert _watch_event_count(show["id"], 1, 1) == 2
+
+    # re-run with a higher count: only the shortfall (1) should be added
+    zip_bytes_2 = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        rewatches=[
+            {
+                "episode_id": "1",
+                "cpt": "3",
+                "created_at": "2026-01-01 00:00:00",
+                "updated_at": "2026-01-03 00:00:00",
+                "tv_show_name": "Dark",
+                "episode_season_number": "1",
+                "episode_number": "1",
+            }
+        ],
+    )
+    summary = _run(user["id"], zip_bytes_2)
+
+    assert summary.get("error") is None
+    assert summary["rewatches"] == 1
+    assert _watch_event_count(show["id"], 1, 1) == 3
+
+
+def test_import_skips_rewatches_on_unmatched_shows(client, alice, monkeypatch):
+    user, _headers = alice
+    _patch_tmdb(monkeypatch)  # nothing matches
+    zip_bytes = _build_zip(
+        rewatches=[
+            {
+                "episode_id": "1",
+                "cpt": "2",
+                "created_at": "2026-01-01 00:00:00",
+                "updated_at": "2026-01-01 00:00:00",
+                "tv_show_name": "Unknown Show",
+                "episode_season_number": "1",
+                "episode_number": "1",
+            }
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["rewatches"] == 0
+    assert summary["rewatches_skipped"] == 1
 
 
 # ---------- concurrency: 8 worker threads racing on the same identity ----------

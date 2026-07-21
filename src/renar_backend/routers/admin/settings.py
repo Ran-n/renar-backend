@@ -2,11 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/18 00:26:59.097325
+Revised: 2026/07/21 09:51:03.416908
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
-(routers/admin/periodic_tasks.py).
+(routers/admin/periodic_tasks.py); premium feature toggles live on their own
+page too (routers/admin/premium.py).
 """
 
 import html
@@ -17,8 +18,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from ... import site_settings as _site_settings_mod
+from ...config import settings
 from ...database import get_db
-from ...models import SiteSettings
+from ...models import SiteSettings, User
 from ...site_settings import get_site_settings
 from ...users.auth import require_admin as _require_admin
 from ._html import (
@@ -144,6 +146,8 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
     )
     reg_dot = "#b8bb26" if ss.registration_open else "#fb4934"
     invite_dot = "#fabd2f" if ss.invite_only else "#928374"
+    turnstile_dot = "#b8bb26" if ss.turnstile_enabled else "#928374"
+    email_confirm_dot = "#b8bb26" if ss.email_confirmation_enabled else "#928374"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -182,6 +186,16 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
         <span class="status-chip-label">Invite only</span>
         <span class="status-chip-value">{"On" if ss.invite_only else "Off"}</span>
       </div>
+      <div class="status-chip">
+        <span class="status-dot" style="background:{turnstile_dot}"></span>
+        <span class="status-chip-label">Turnstile captcha</span>
+        <span class="status-chip-value">{"On" if ss.turnstile_enabled else "Off"}</span>
+      </div>
+      <div class="status-chip">
+        <span class="status-dot" style="background:{email_confirm_dot}"></span>
+        <span class="status-chip-label">Email confirmation</span>
+        <span class="status-chip-value">{"On" if ss.email_confirmation_enabled else "Off"}</span>
+      </div>
     </div>
 
     <form method="post" action="{_P}/settings">
@@ -205,10 +219,47 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
             "Require a valid invite code to register (see the Invite Codes page).",
         )
     }
+        {
+        toggle(
+            "turnstile_enabled",
+            "turnstile_enabled",
+            ss.turnstile_enabled,
+            "Turnstile captcha",
+            "Require a passed Cloudflare Turnstile check to register. Off falls back to IP rate-limiting only.",
+        )
+    }
+        {
+        toggle(
+            "email_confirmation_enabled",
+            "email_confirmation_enabled",
+            ss.email_confirmation_enabled,
+            "Email confirmation",
+            "Require a confirmation code before an account counts toward /stats/ranking, and before login "
+            "past the grace period. Turning this off immediately confirms every currently-unconfirmed account.",
+        )
+    }
         <p class="settings-hint">
           When <em>invite only</em> is on, <em>registration open</em> must also be on &mdash;
           otherwise registration is closed entirely regardless of invite codes.
         </p>
+        {
+        ""
+        if (settings.turnstile_site_key and settings.turnstile_secret_key)
+        else (
+            '<p class="settings-warning">&#x26A0; TURNSTILE_SITE_KEY / TURNSTILE_SECRET_KEY '
+            "are not set in this server's .env &mdash; turning this on has no effect until "
+            "both are configured and the server is restarted.</p>"
+        )
+    }
+        {
+        ""
+        if settings.brevo_api_key
+        else (
+            '<p class="settings-warning">&#x26A0; BREVO_API_KEY is not set in this server\'s .env &mdash; '
+            "confirmation codes are logged to the server console instead of actually emailed. "
+            "Set it (and EMAIL_SENDER_ADDRESS) and restart to send real emails.</p>"
+        )
+    }
       </div>
 
       <div class="settings-section">
@@ -338,6 +389,15 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
         </p>
       </div>
 
+      <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x2728;</span>Premium features</div>
+        <p class="settings-hint">
+          Profile style, verification requests, background image, themes, progress
+          styles, and episode label styles each have their own on/off switch on the
+          <a href="{_P}/premium">Premium Features</a> page.
+        </p>
+      </div>
+
       <button class="settings-save" type="submit">Save all settings</button>
     </form>
 
@@ -360,6 +420,8 @@ def admin_settings(
 def save_settings(
     registration_open: str | None = Form(default=None),
     invite_only: str | None = Form(default=None),
+    turnstile_enabled: str | None = Form(default=None),
+    email_confirmation_enabled: str | None = Form(default=None),
     rate_limit_per_minute: int = Form(...),
     flood_ban_per_minute: int = Form(...),
     auth_rate_limit_per_minute: int = Form(...),
@@ -380,6 +442,23 @@ def save_settings(
     ss = get_site_settings(db)
     ss.registration_open = registration_open == "1"
     ss.invite_only = invite_only == "1"
+    ss.turnstile_enabled = turnstile_enabled == "1"
+    was_email_confirmation_enabled = ss.email_confirmation_enabled
+    ss.email_confirmation_enabled = email_confirmation_enabled == "1"
+    if was_email_confirmation_enabled and not ss.email_confirmation_enabled:
+        # "off" means the concept stops mattering entirely, not that
+        # whoever hadn't confirmed yet stays silently excluded from
+        # /stats/ranking or blocked at login forever — see the field's
+        # docstring in models.py. Fires the trigger per row (a bulk UPDATE
+        # is still row-level at the Postgres level), so app_counters.total_users
+        # comes out correct without a separate resync step.
+        confirmed_count = (
+            db.query(User)
+            .filter(User.email_confirmed.is_(False))
+            .update({User.email_confirmed: True}, synchronize_session=False)
+        )
+        if confirmed_count:
+            _log.info("admin disabled email confirmation: bulk-confirmed %d accounts", confirmed_count)
     ss.rate_limit_per_minute = rate_limit_per_minute
     ss.flood_ban_per_minute = flood_ban_per_minute
     ss.auth_rate_limit_per_minute = auth_rate_limit_per_minute

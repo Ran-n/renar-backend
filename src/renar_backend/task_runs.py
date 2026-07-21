@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/18 22:40:40.061899
+Revised: 2026/07/21 09:51:04.705794
 
 Periodic-task tracking: each background task (see TASKS) is independently
 enabled, independently scheduled, and reports its own run status — one
@@ -73,6 +73,13 @@ TASKS: list[TaskSpec] = [
         "Drop abuse-strike rows nobody has touched in 30 days.",
         "Security",
         60,
+    ),
+    TaskSpec(
+        "email_confirmation_cleanup",
+        "Email confirmation cleanup",
+        "Delete accounts that never confirmed their email within 14 days.",
+        "Security",
+        360,
     ),
     TaskSpec(
         "tmdb_metadata_resync",

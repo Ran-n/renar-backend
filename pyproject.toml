@@ -55,7 +55,7 @@ ignore = []
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency-injection idiom: these calls in argument defaults are intended
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Form"]
 
 [tool.ruff.format]
 quote-style = "double"

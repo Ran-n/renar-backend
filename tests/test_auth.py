@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.984505
-Revised: 2026/07/16 13:37:27.159098
+Revised: 2026/07/21 09:51:05.481622
 
 Auth endpoints: register, login, me, profile, password change, account delete.
 """
@@ -17,6 +17,7 @@ from renar_backend.models import (
     Comment,
     CommentReport,
     EpisodeWatch,
+    ImportJob,
     InviteCode,
     LibraryEntry,
     LoginEvent,
@@ -122,14 +123,24 @@ def _make_invite(max_uses=1, uses=0, revoked=False, expires_at=None) -> str:
 def test_registration_status_defaults(client):
     r = client.get("/auth/registration-status")
     assert r.status_code == 200
-    assert r.json() == {"registration_open": True, "invite_only": False}
+    assert r.json() == {
+        "registration_open": True,
+        "invite_only": False,
+        "turnstile_site_key": None,
+        "email_confirmation_enabled": True,
+    }
 
 
 def test_registration_status_reflects_invite_only(client):
     _set_site_settings(invite_only=True, registration_open=False)
     r = client.get("/auth/registration-status")
     assert r.status_code == 200
-    assert r.json() == {"registration_open": False, "invite_only": True}
+    assert r.json() == {
+        "registration_open": False,
+        "invite_only": True,
+        "turnstile_site_key": None,
+        "email_confirmation_enabled": True,
+    }
 
 
 def test_registration_closed_returns_403(client):
@@ -531,6 +542,52 @@ def test_delete_account_removes_login_events(client, alice):
     db = SessionLocal()
     try:
         assert db.query(LoginEvent).count() == 0
+    finally:
+        db.close()
+
+
+def test_delete_account_with_import_job_row_does_not_fkey_violate(client, alice):
+    """Regression: accounts.delete_account must DELETE the import_jobs row
+    before deleting the user — the FK is NOT NULL and has no DB-level
+    ON DELETE CASCADE, so the plain db.delete(user) call that existed before
+    pass-1 would crash with a FK violation for any user who had ever started
+    a TV Time import."""
+    user, headers = alice
+    db = SessionLocal()
+    try:
+        db.add(ImportJob(user_id=user["id"], finished=True))
+        db.commit()
+    finally:
+        db.close()
+
+    assert client.delete("/auth/me", headers=headers).status_code == 204
+
+    db = SessionLocal()
+    try:
+        assert db.query(ImportJob).filter(ImportJob.user_id == user["id"]).count() == 0
+    finally:
+        db.close()
+
+
+def test_delete_account_nulls_out_created_invite_codes(client, alice):
+    """Regression: accounts.delete_account must NULL the invite_codes.created_by_user_id
+    FK before deleting the user — the FK is nullable (codes outlive their creator),
+    but a plain db.delete(user) with no prior NULL-out crashes when the FK is set."""
+    user, headers = alice
+    db = SessionLocal()
+    try:
+        db.add(InviteCode(code="TESTCODE123", created_by_user_id=user["id"], max_uses=5))
+        db.commit()
+    finally:
+        db.close()
+
+    assert client.delete("/auth/me", headers=headers).status_code == 204
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).filter(InviteCode.code == "TESTCODE123").first()
+        assert code is not None  # the code is preserved (still valid for others)
+        assert code.created_by_user_id is None  # FK nulled, not deleted
     finally:
         db.close()
 
