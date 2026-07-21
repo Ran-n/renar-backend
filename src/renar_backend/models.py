@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/18 19:33:26.947063
+Revised: 2026/07/21 09:51:03.034569
 """
 
 import enum
@@ -117,6 +117,27 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    # True once the user has completed a code-confirmation round trip proving
+    # ownership of `email` (see users/email_confirmation.py). Indexed: it's
+    # filtered on every /stats/ranking request (routers/stats.py._compute_ranking)
+    # to keep unconfirmed/throwaway accounts out of the leaderboard. Existing
+    # rows default to False on migration (see email_confirmation_grandfathered
+    # below for why that doesn't lock them out of login).
+    email_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    # True for every account that existed before this feature shipped
+    # (backfilled by migration ffffe2b24717 — see its docstring). Exempts an
+    # account from the login-gate grace-period block (routers/auth.py's
+    # login) and from the 14-day unconfirmed-account cleanup
+    # (users/email_confirmation.py's cleanup_unconfirmed_accounts) WITHOUT
+    # marking it email_confirmed — it still doesn't count toward
+    # /stats/ranking until it actually confirms. Never set for a newly
+    # registered account; the login/cleanup exemption applies once, forever,
+    # to whatever existed at rollout, not to accounts created afterward.
+    email_confirmation_grandfathered: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # Set while an email-change is awaiting its two-step confirmation
+    # (see routers/auth.py's update_profile) — `email` itself only ever
+    # changes once the new address's own code is confirmed.
+    pending_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     language: Mapped[str] = mapped_column(String(10), default="en")
     # When set, library tiles show Title.original_title instead of the
     # localized display_title (see list_media's `lang` param).
@@ -153,6 +174,16 @@ class User(Base):
     home_progress_style: Mapped[str] = mapped_column(String(20), default="rings", server_default="rings")
     home_season_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     home_series_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    # Per-status accent overrides for Library cards (badge bar / progress
+    # color) — premium-only, keyed by WatchStatus value, colors chosen from
+    # premium.PALETTE (validated server-side). Missing keys fall back to the
+    # theme's default accent for that status. Kept when premium lapses but
+    # only applied while active, same as the home season/series colors.
+    status_colors: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
+    # Season/episode label format shown next to episode titles (Upcoming,
+    # Title, Episode). "cross" ("1×05") is the only free style, same premium
+    # gate as theme/progress style, enforced in the /auth/profile route.
+    episode_label_style: Mapped[str] = mapped_column(String(20), default="cross", server_default="cross")
     # Set once the first-login welcome tour has been shown (or skipped).
     # Synced server-side so it doesn't re-appear on a different device.
     has_seen_welcome: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
@@ -230,6 +261,35 @@ class SiteSettings(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     invite_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     registration_open: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # On/off switch for the Cloudflare Turnstile check on /auth/register,
+    # independent of whether TURNSTILE_SITE_KEY/TURNSTILE_SECRET_KEY are set
+    # in .env (see config.py) — lets an admin fall back to IP rate-limiting
+    # only without touching those credentials.
+    turnstile_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # On/off switch for the registration/email-change confirmation-code flow
+    # (see users/email_confirmation.py, routers/auth.py's register/login).
+    # Off: new accounts are marked email_confirmed on creation instead of
+    # having to verify, and login is never gated on it. Flipping this off
+    # also bulk-confirms every currently-unconfirmed user (see
+    # routers/admin/settings.py's save_settings) — "off" means the concept
+    # stops mattering at all, not that existing unconfirmed accounts stay
+    # silently excluded from /stats/ranking or blocked at login forever.
+    email_confirmation_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Per-feature kill switches for premium perks — each independently
+    # disables one perk for every user regardless of premium_until, without
+    # touching the others. Existing subscriptions are preserved on the user
+    # row either way; a feature switched back on immediately honors them
+    # again. See users/premium.py::feature_enabled for the lookup and
+    # PremiumFeature for the fixed set of valid names. Custom poster/backdrop
+    # overrides are unaffected (still gated on is_premium alone) since
+    # they're a display concern, not a subsystem entry point.
+    premium_style_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    premium_verification_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    premium_background_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    premium_themes_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    premium_progress_style_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    premium_episode_label_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    premium_ranking_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     auth_rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=30)
     register_per_hour_per_ip: Mapped[int] = mapped_column(Integer, default=20)
     rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=600)
@@ -304,6 +364,30 @@ class InviteCode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_user_id])
+
+
+class EmailConfirmationCode(Base):
+    """A one-time code proving ownership of an email address — registration,
+    or either leg of the two-step email-change flow (update_profile in
+    routers/auth.py). `code_hash` is bcrypt (see users/email_confirmation.py),
+    never plaintext — unlike InviteCode above, this guards account takeover,
+    not just registration gating. `attempts` caps brute-force guesses against
+    the 6-digit space independently of `expires_at`; `consumed_at` makes a
+    code single-use and lets a resend invalidate whatever it replaces without
+    a delete (kept for audit)."""
+
+    __tablename__ = "email_confirmation_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    code_hash: Mapped[str] = mapped_column(String(255))
+    purpose: Mapped[str] = mapped_column(String(20))  # "register" | "change_authorize" | "change_confirm"
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship()
 
 
 class LoginEvent(Base):
@@ -917,6 +1001,50 @@ class CommentReport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     comment: Mapped[Comment] = relationship(back_populates="reports")
+
+
+class ImportJob(Base):
+    """Durable marker for a user's last TV Time import outcome.
+
+    routers/imports.py tracks live progress in an in-memory dict, which
+    doesn't survive a server restart — without this row, a restart mid-import
+    silently looks identical to "never run" to the status endpoint, and the
+    frontend reports a false "Import complete ✓". Written only at job start
+    and at completion/failure (not per progress tick), so a status poll that
+    finds no in-memory entry can still tell "interrupted" apart from "never
+    ran" from this row's `finished` flag.
+    """
+
+    __tablename__ = "import_jobs"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    finished: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ExportJob(Base):
+    """Durable marker for a user's personal-data export (GDPR Art. 20 — the
+    right to data portability). Every user can request one regardless of
+    premium status; `queued_at` only feeds the worker's priority queue (see
+    users/export_queue.py) — premium requests are dequeued first because
+    they're paying for compute priority, never as a way to withhold the
+    export itself, which stays free and available to everyone.
+
+    Same shape as ImportJob and for the same reason: routers/export.py keeps
+    live progress in an in-memory dict that doesn't survive a restart, so a
+    status poll after one needs this row to tell "queued job got dropped by
+    the restart" apart from "never requested". The finished export file
+    itself lives on disk (users/export.py::export_path), not in this row.
+    """
+
+    __tablename__ = "export_jobs"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # Alembic migrations are the source of truth for real deployments, but tests

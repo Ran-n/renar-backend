@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/13 09:21:11.000000
-Revised: 2026/07/16 09:54:32.010518
+Revised: 2026/07/21 09:51:06.113377
 
 /upcoming/history: past aired episodes and released films for tracked
 titles. Episode data is backfilled lazily (through the same TMDB season
@@ -11,9 +11,9 @@ cache season_tmdb() uses) on the first request that needs it.
 
 from datetime import date, timedelta
 
-from renar_backend.tmdb import tmdb_store
 from renar_backend.database import SessionLocal
 from renar_backend.models import Episode, LibraryEntry
+from renar_backend.tmdb import tmdb_store
 
 
 def _add(client, headers, **kwargs) -> dict:
@@ -83,6 +83,42 @@ def test_history_excludes_future_episode(client, alice, monkeypatch):
         tmdb_store, "tmdb_get", lambda path, params=None, cache=True: _season_payload((1, "Next", future))
     )
     assert client.get("/upcoming/history", headers=headers).json() == []
+
+
+def test_history_excludes_episode_airing_today(client, alice, monkeypatch):
+    """An episode airing today shows up in /upcoming (as "TODAY"); it must
+    not also appear in /upcoming/history, or the same episode is duplicated
+    across both lists."""
+    _, headers = alice
+    show = _add(client, headers, media_type="tv_show", title="Dark", tmdb_id=70523, status="watching")
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    today = date.today().isoformat()
+    monkeypatch.setattr(
+        tmdb_store, "tmdb_get", lambda path, params=None, cache=True: _season_payload((1, "Today's Episode", today))
+    )
+    assert client.get("/upcoming/history", headers=headers).json() == []
+
+
+def test_history_media_type_filter(client, alice, monkeypatch):
+    _, headers = alice
+    show = _add(client, headers, media_type="tv_show", title="Dark", tmdb_id=70523, status="watching")
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    aired = (date.today() - timedelta(days=3)).isoformat()
+    monkeypatch.setattr(
+        tmdb_store, "tmdb_get", lambda path, params=None, cache=True: _season_payload((1, "Pilot", aired))
+    )
+    film = _add(client, headers, media_type="film", title="Heat", tmdb_id=100, status="completed")
+    _set_title_for_entry(client, headers, film["id"], release_date=date.today() - timedelta(days=10))
+
+    tv_out = client.get("/upcoming/history", params={"media_type": "tv_show"}, headers=headers).json()
+    assert len(tv_out) == 1
+    assert tv_out[0]["media_type"] == "tv_show"
+
+    film_out = client.get("/upcoming/history", params={"media_type": "film"}, headers=headers).json()
+    assert len(film_out) == 1
+    assert film_out[0]["media_type"] == "film"
+
+    assert len(client.get("/upcoming/history", headers=headers).json()) == 2
 
 
 def test_history_lists_past_film_release(client, alice):

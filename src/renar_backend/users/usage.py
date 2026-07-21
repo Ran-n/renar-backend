@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/09 09:30:00.000000
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/21 09:51:05.228509
 
 Per-endpoint usage tracking.
 
@@ -21,6 +21,7 @@ the numbers it shows.
 
 import logging
 
+from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -72,7 +73,7 @@ def _record(method: str, path: str, user_id: int | None) -> None:
         db.commit()
 
 
-def _record_request_day(db, user_id: int) -> None:
+def _record_request_day(db: Session, user_id: int) -> None:
     """Bump the (user, today) request counter for the per-day chart. Skips the
     insert if the user was just deleted (same trailing-self-delete guard)."""
     today = utcnow().date()

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.607537
-Revised: 2026/07/10 18:25:42.607537
+Revised: 2026/07/21 09:51:05.731046
 
 Premium accounts: badge derivation, style colors, verification requests,
 custom posters (upload + GC) and the admin grant/revoke/verify actions.
@@ -151,6 +151,62 @@ def test_style_clear_color_with_null(client, alice):
     me = client.get("/auth/me", headers=headers).json()
     assert me["ring_color"] is None
     assert me["name_color"] == COLOR2  # untouched: only the sent field changed
+
+
+# ---------- status colors ----------
+
+
+def test_status_colors_update_requires_premium(client, alice):
+    _, headers = alice
+    r = client.patch("/premium/style", json={"status_colors": {"watching": COLOR}}, headers=headers)
+    assert r.status_code == 403
+
+
+def test_status_colors_roundtrip(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"status_colors": {"watching": COLOR}}, headers=headers)
+    assert r.status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["status_colors"] == {"watching": COLOR}
+
+
+def test_status_colors_merge_keeps_other_keys(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    client.patch("/premium/style", json={"status_colors": {"watching": COLOR}}, headers=headers)
+    r = client.patch("/premium/style", json={"status_colors": {"completed": COLOR2}}, headers=headers)
+    assert r.status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["status_colors"] == {"watching": COLOR, "completed": COLOR2}
+
+
+def test_status_colors_clear_one_key_with_null(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    client.patch(
+        "/premium/style",
+        json={"status_colors": {"watching": COLOR, "completed": COLOR2}},
+        headers=headers,
+    )
+    r = client.patch("/premium/style", json={"status_colors": {"watching": None}}, headers=headers)
+    assert r.status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["status_colors"] == {"completed": COLOR2}
+
+
+def test_status_colors_rejects_unknown_status(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"status_colors": {"binged": COLOR}}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_status_colors_rejects_non_palette_color(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"status_colors": {"watching": "#123456"}}, headers=headers)
+    assert r.status_code == 422
 
 
 # ---------- flair in public payloads ----------
@@ -410,6 +466,48 @@ def test_admin_grant_premium_invalid_days_rejected(client, admin_enabled, alice)
     user, _ = alice
     r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "0"}, auth=BASIC)
     assert r.status_code == 422
+
+
+def test_admin_grant_premium_no_field_rejected(client, admin_enabled, alice):
+    user, _ = alice
+    r = client.post(f"/admin/users/{user['id']}/premium", data={}, auth=BASIC)
+    assert r.status_code == 422
+
+
+def test_admin_grant_premium_large_days_allowed(client, admin_enabled, alice):
+    """The old 3650-day cap was an arbitrary sanity limit, not a real constraint."""
+    user, headers = alice
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "999999"}, auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    assert client.get("/auth/me", headers=headers).json()["is_premium"] is True
+
+
+def test_admin_grant_premium_until_date(client, admin_enabled, alice):
+    user, headers = alice
+    until = (utcnow() + timedelta(days=10)).date().isoformat()
+    r = client.post(
+        f"/admin/users/{user['id']}/premium", data={"until_date": until}, auth=BASIC, follow_redirects=False
+    )
+    assert r.status_code == 303
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["is_premium"] is True
+    assert me["premium_until"].startswith(until)
+
+
+def test_admin_grant_premium_until_date_in_past_rejected(client, admin_enabled, alice):
+    user, _ = alice
+    until = (utcnow() - timedelta(days=1)).date().isoformat()
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"until_date": until}, auth=BASIC)
+    assert r.status_code == 422
+
+
+def test_admin_grant_premium_forever(client, admin_enabled, alice):
+    user, headers = alice
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"forever": "1"}, auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["is_premium"] is True
+    assert me["premium_until"].startswith("9999")
 
 
 def test_admin_verify_and_unverify(client, admin_enabled, alice):

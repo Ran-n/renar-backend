@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.713668
-Revised: 2026/07/18 19:33:27.366485
+Revised: 2026/07/21 09:51:04.050727
 
 Watch-time and library statistics for the current user.
 """
@@ -21,6 +21,7 @@ from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import AppCounters, EpisodeWatch, LibraryEntry, MediaType, User, WatchStatus
 from ..users.auth import get_current_user, require_premium
+from ..users.premium import feature_enabled
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 _log = logging.getLogger(__name__)
@@ -230,16 +231,24 @@ def _compute_ranking(db: Session, user: User, ranking_metric: RankingMetric) -> 
     COUNT(*) FROM users: COUNT(*) has no O(1) shortcut in Postgres — MVCC
     means every row's visibility must be checked regardless of indexing — so
     at real scale that would mean scanning the entire users table on every
-    ranking request just to answer the denominator."""
+    ranking request just to answer the denominator.
+
+    Only email_confirmed users count, on both sides of this fraction — a
+    hand-registered throwaway account otherwise pads the "ahead of me" count
+    and app_counters.total_users equally (see db_triggers.py's confirmed-only
+    counter and docs/backlog.md's ranking-exploit note). The viewing `user`
+    doesn't have to be confirmed themselves to see their own (likely poor)
+    standing — only who counts as competition is filtered."""
     column = getattr(User, ranking_metric.attr)
     own_value = getattr(user, ranking_metric.attr)
     ahead = (
         db.query(func.count(User.id))
         .filter(
+            User.email_confirmed.is_(True),
             or_(
                 column > own_value,
                 and_(column == own_value, User.created_at < user.created_at),
-            )
+            ),
         )
         .scalar()
     )
@@ -268,6 +277,8 @@ def _all_rankings(db: Session, user: User) -> list[dict]:
 def get_ranking_metrics(db: Session = Depends(get_db), user: User = Depends(require_premium)):
     """Which leaderboards exist, so the frontend can offer a metric picker
     without hardcoding the list."""
+    if not feature_enabled("ranking"):
+        raise HTTPException(status_code=403, detail="Ranking is currently disabled")
     return [{"key": r["metric"], "label": r["label"], "unit": r["unit"]} for r in _all_rankings(db, user)]
 
 
@@ -281,6 +292,8 @@ def get_ranking(metric: str | None = None, db: Session = Depends(get_db), user: 
     Bundles the full metrics list into the response too (as "metrics") so a
     single request is enough to render tabs plus the selected standing,
     instead of needing a round trip to /ranking/metrics first."""
+    if not feature_enabled("ranking"):
+        raise HTTPException(status_code=403, detail="Ranking is currently disabled")
     rankings = _all_rankings(db, user)
     if not rankings:
         raise HTTPException(status_code=404, detail="No ranking metrics configured")

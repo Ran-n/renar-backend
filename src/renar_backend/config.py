@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/07/18 19:33:27.081377
+Revised: 2026/07/21 09:51:02.641591
 """
 
 from pathlib import Path
@@ -30,6 +30,21 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:8550", "http://127.0.0.1:8550"]
     tmdb_api_key: str = ""
     tvdb_api_key: str = ""  # optional: fallback lookup for TV Time import matching
+    # Cloudflare Turnstile (challenges.cloudflare.com) on /auth/register.
+    # Site key is public — served back to clients via /auth/registration-status
+    # so the register screen can build the widget without a separate config
+    # round trip. Secret key never leaves the backend. Empty secret disables
+    # the check entirely (dev default) rather than 503-ing registration. The
+    # on/off switch itself is `registration_open`-style (see below) — a seed
+    # default here, owned live by the admin panel from then on.
+    turnstile_site_key: str = ""
+    turnstile_secret_key: str = ""
+    # Brevo (transactional email) for the registration/email-change confirmation
+    # codes. Empty key means "log the would-be email instead of sending" — see
+    # users/email_confirmation.py::send_confirmation_email — so this stays safe
+    # to leave unset until a verified sending domain exists.
+    brevo_api_key: str = ""
+    email_sender_address: str = "noreply@renar.breren.com"
     media_dir: str = "./media"  # root of the content-addressed file store
     admin_username: str = ""  # admin panel stays 503 until both are set
     admin_password: str = ""
@@ -58,6 +73,7 @@ class Settings(BaseSettings):
     abuse_guard_enabled: bool = True
     enable_docs: bool = False  # /docs + /openapi.json advertise the API surface to scanners
     registration_open: bool = True
+    turnstile_enabled: bool = True  # off falls back to IP rate-limiting only, no Turnstile keys needed
     trust_proxy_headers: bool = False  # true ONLY behind a reverse proxy/CDN (X-Forwarded-For)
     exempt_ips: list[str] = ["127.0.0.1", "::1"]  # monitoring, local tooling
     # Persisted TMDB copies (tmdb_cache table) younger than this are served

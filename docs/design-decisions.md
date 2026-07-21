@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/19 04:17:42.140888 )
+[//]: # (+ Revised: 	2026/07/21 09:51:02.273700 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -632,16 +632,22 @@ per-proxy cache directory (`tmdb_cache/`) is gone.
 **Why:** one storage system instead of three, DB-visible sizes/dedup, and
 the immutable upstream paths make "cache forever, never revalidate" safe.
 
-### TVDB is a fallback, not the primary lookup
+### TVDB is a fallback, not the primary lookup; a plain title search is the last resort
 
 TV Time imports match shows to TMDB via TVDB id first (TMDB's `/find`
-crosswalk); only when that misses — common even for well-known shows — and
-`TVDB_API_KEY` is configured does the importer call TheTVDB directly.
+crosswalk); when that misses — common even for well-known shows — and
+`TVDB_API_KEY` is configured, the importer asks TheTVDB for the show's
+name/aliases and retries a TMDB title search with each. If that still comes
+up empty (or no `TVDB_API_KEY` is set), it falls back to a plain TMDB title
+search on the name TV Time exported, the same way movies are matched.
 
 **Why:** TMDB is already required for the rest of the app, so using it as
 the primary match keeps the import path dependency-free by default; TVDB is
-an optional improvement for the (frequent enough to matter) crosswalk gaps,
-not a hard requirement.
+an optional improvement for the (frequent enough to matter) crosswalk gaps.
+The final name-search fallback exists because both TMDB's crosswalk *and*
+TheTVDB's own lookup can miss for a real, well-known show (wrong/stale TVDB
+id in the export, a merged/renamed TVDB entry, etc.) — without it, those
+shows fail to import even though a plain TMDB search finds them instantly.
 
 ## Premium accounts
 

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 18:10:00.000000
-Revised: 2026/07/12 18:10:00.000000
+Revised: 2026/07/21 09:51:05.988781
 
 /upcoming reads next-episode/release-date data straight off Title (synced
 by the background pollers) instead of hitting TMDB on the request path;
@@ -108,6 +108,24 @@ def test_upcoming_status_filter(client, alice):
     out = client.get("/upcoming", params={"status_filter": "watching"}, headers=headers).json()
     assert len(out) == 1
     assert out[0]["media_type"] == "tv_show"
+
+
+def test_upcoming_media_type_filter(client, alice):
+    _, headers = alice
+    show = _add(client, headers, media_type="tv_show", title="Dark", tmdb_id=70523, status="watching")
+    _set_title_for_entry(client, headers, show["id"], next_episode_air_date=date.today() + timedelta(days=1))
+    film = _add(client, headers, media_type="film", title="Dune Part Three", tmdb_id=999, status="want_to_watch")
+    _set_title_for_entry(client, headers, film["id"], release_date=date.today() + timedelta(days=1))
+
+    tv_out = client.get("/upcoming", params={"media_type": "tv_show"}, headers=headers).json()
+    assert len(tv_out) == 1
+    assert tv_out[0]["media_type"] == "tv_show"
+
+    film_out = client.get("/upcoming", params={"media_type": "film"}, headers=headers).json()
+    assert len(film_out) == 1
+    assert film_out[0]["media_type"] == "film"
+
+    assert len(client.get("/upcoming", headers=headers).json()) == 2
 
 
 # ---------- film release-date poller ----------

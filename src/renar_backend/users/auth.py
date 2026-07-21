@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.008319
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/21 09:51:04.963920
 """
 
 import logging
@@ -100,7 +100,13 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 def require_premium(user: User = Depends(get_current_user)) -> User:
     """Gate for premium-only endpoints — the server-side check the UI locks
-    mirror. 403 (not 402) so clients treat it like any other permission."""
+    mirror. 403 (not 402) so clients treat it like any other permission.
+
+    Only checks the subscription itself; the admin's per-feature kill
+    switches (SiteSettings.premium_*_enabled) are checked separately by each
+    endpoint/field via users/premium.py::feature_enabled, since they disable
+    one perk at a time rather than premium as a whole.
+    """
     if not user.is_premium:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Premium subscription required")
     return user

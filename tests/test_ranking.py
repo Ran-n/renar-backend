@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 09:55:31.503656
-Revised: 2026/07/18 19:33:27.903563
+Revised: 2026/07/21 09:51:05.863550
 
 Watch-time leaderboard (/stats/ranking): the users.total_watch_minutes
 column maintained by a Postgres trigger (migration a7c2e9f4b816, mirrored
@@ -12,10 +12,12 @@ for tests by models.py registering the same DDL against LibraryEntry's
 
 from datetime import timedelta
 
+from conftest import ADMIN_BASIC as BASIC
 from sqlalchemy.exc import IntegrityError
 
+from renar_backend import site_settings
 from renar_backend.database import SessionLocal
-from renar_backend.models import AppCounters, LibraryEntry, MediaType, Title, User, WatchStatus, utcnow
+from renar_backend.models import AppCounters, LibraryEntry, MediaType, SiteSettings, Title, User, WatchStatus, utcnow
 from renar_backend.routers.stats import _total_watch_minutes_by_user
 
 
@@ -593,3 +595,52 @@ def test_ranking_percentile_uses_counter_not_live_count(client, alice, bob):
     _set_premium(bob_user["id"])
     r = client.get("/stats/ranking", headers=alice_headers).json()
     assert r["total_users"] == _total_users_counter() == 2
+
+
+# ---------- admin kill switch (premium_ranking_enabled) ----------
+
+
+def test_ranking_disabled_by_admin_toggle(client, admin_enabled, alice):
+    """The admin's per-feature switch, not just the subscription, gates
+    /stats/ranking — same pattern as premium_style_enabled etc. in
+    users/premium.py::feature_enabled."""
+    user, headers = alice
+    _set_premium(user["id"])
+    assert client.get("/stats/ranking", headers=headers).status_code == 200
+
+    r = client.post(
+        "/admin/premium/toggle", data={"feature": "ranking", "value": "0"}, auth=BASIC, follow_redirects=False
+    )
+    assert r.status_code == 303
+    assert client.get("/stats/ranking", headers=headers).status_code == 403
+    assert client.get("/stats/ranking/metrics", headers=headers).status_code == 403
+
+
+def test_ranking_metrics_disabled_by_admin_toggle(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    db = SessionLocal()
+    try:
+        row = db.get(SiteSettings, 1)
+        if row is None:
+            row = SiteSettings(id=1)
+            db.add(row)
+        row.premium_ranking_enabled = False
+        db.commit()
+    finally:
+        db.close()
+    site_settings.invalidate()
+    assert client.get("/stats/ranking", headers=headers).status_code == 403
+    assert client.get("/stats/ranking/metrics", headers=headers).status_code == 403
+
+
+def test_ranking_re_enabled_by_admin_toggle_honors_existing_subscription(client, admin_enabled, alice):
+    """Switching the perk back on immediately restores access for a user
+    whose premium_until never lapsed — no re-grant needed."""
+    user, headers = alice
+    _set_premium(user["id"])
+    client.post("/admin/premium/toggle", data={"feature": "ranking", "value": "0"}, auth=BASIC, follow_redirects=False)
+    assert client.get("/stats/ranking", headers=headers).status_code == 403
+
+    client.post("/admin/premium/toggle", data={"feature": "ranking", "value": "1"}, auth=BASIC, follow_redirects=False)
+    assert client.get("/stats/ranking", headers=headers).status_code == 200
