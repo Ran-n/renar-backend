@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/21 09:51:03.543243
+Revised: 2026/07/21 20:57:05.966922
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -255,7 +255,7 @@ def _render_user_detail(
         _render_hbars("Library by type", by_type, "items", cap=True),
         _render_hbars("Library by status", by_status, "items", cap=True),
     ])
-    actions = _render_premium_actions(user) + _render_account_actions(user)
+    actions = f'<div class="actions-grid">{_render_account_actions(user)}{_render_premium_actions(user)}</div>'
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -968,6 +968,14 @@ def edit_user(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # Mirror the same normalization self-service registration/profile-update
+    # applies (routers/auth.py's _normalize_email / registration's username
+    # handling) — otherwise the admin path can create a case-variant
+    # duplicate (Foo@Example.com vs foo@example.com) that the unique index
+    # doesn't catch, undermining the "one row per address" invariant the
+    # rest of the app (e.g. /auth/login's username-or-email lookup) relies on.
+    username = username.strip() if username else username
+    email = email.strip().lower() if email else email
     if username and username != user.username:
         if db.query(User).filter(User.username == username, User.id != user_id).first():
             raise HTTPException(status_code=409, detail="Username already taken")
@@ -997,6 +1005,7 @@ def set_user_password(
     if not (8 <= len(new_password) <= 72) or len(new_password.encode()) > 72:
         raise HTTPException(status_code=422, detail="Password must be 8-72 characters")
     user.password_hash = hash_password(new_password)
+    user.password_changed_at = utcnow()
     db.commit()
     _log.info("admin=%s reset password for user id=%s username=%s", admin_user, user_id, user.username)
     return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)

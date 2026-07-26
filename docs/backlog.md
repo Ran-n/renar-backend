@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/07/21 09:51:02.148132 )
+[//]: # (+ Revised: 	2026/07/26 23:27:39.696597 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -67,6 +67,31 @@ Known gaps and follow-ups, not yet scheduled.
   the *entire* library to produce a single correct number, so pagination
   doesn't apply to it the way it does to a listing endpoint — this wasn't a
   gap, just an imprecise description in the original audit note.
+
+## Flagged during 2026-07-21 full sweep — fixed
+
+- **`users/auth.py`'s `get_current_user` wrote to the DB (`_touch_activity`,
+  commit) on every authenticated request — fixed.** Every current reader of
+  `last_active_at` (admin analytics' `active_today`/`active_7d`, the admin
+  user-detail page, the GDPR export) only needs day-level accuracy, so
+  `_touch_activity` now skips the write when the existing value is already
+  younger than `_ACTIVITY_TOUCH_INTERVAL` (15 minutes) — cuts the write
+  volume by ~two orders of magnitude for an active user without changing
+  anything any reader sees.
+
+- **`tmdb/tmdb_http.py` sends the TMDB v3 API key as a URL query
+  parameter — investigated 2026-07-21, already correct, no code change.**
+  Checked against TMDB's own auth docs
+  (https://developer.themoviedb.org/reference/authentication): the
+  `Authorization: Bearer` header only accepts a Read Access Token (the
+  separate JWT-shaped credential), never the legacy v3 API key — TMDB
+  states outright that a v3 key "only works when passed as a query
+  parameter, rather than in an Authorization header." `tmdb_get` already
+  branches correctly (JWT-shaped key → `Bearer` header, legacy key →
+  `api_key` query param), so the query-param path for v3 keys is required
+  by TMDB, not a latent bug. The logging-leak risk this entry raised is
+  real in the abstract but only for a URL-logging client/middleware that
+  doesn't already exist in this codebase.
 
 ## TV Time import (`routers/imports.py`)
 
@@ -172,8 +197,9 @@ Known gaps and follow-ups, not yet scheduled.
   tracking" entries under Features below. Once those Renar-side features
   exist, this importer needs matching read-and-map logic:
   `watched_on_episode.csv`/`followed_tv_show_source.csv` (source id per
-  episode/show watch — TV Time's `watched_on_source_id` enum isn't
-  documented anywhere in the export itself, so its meaning needs
+  episode/show watch — both files are confirmed present in a real GDPR
+  export carrying `watched_on_source_id`; the field exists, only the enum
+  isn't documented anywhere in the export itself, so its meaning needs
   reverse-engineering, e.g. by cross-checking a few known-source watches in
   a real account against the app's UI) for watched-on, and
   `lists-prod-lists.csv` for custom lists. Explicitly decided *not* to build
@@ -264,6 +290,97 @@ Known gaps and follow-ups, not yet scheduled.
   and the admin panel has no live toggle for the grace-period/cleanup
   windows (currently fixed constants in `users/email_confirmation.py`).
 
+- **Soft delete with a 30-day grace period for account deletion.**
+  `DELETE /auth/me` (`routers/auth.py:520-525`) currently calls
+  `users/accounts.py`'s `delete_account` directly, which purges the user row
+  and every referencing row (comments, likes, follows, notifications, login
+  events, media items, exports on disk, etc.) synchronously and irreversibly
+  in the same request — no recovery window. Wanted instead: mark the account
+  for deletion rather than purging immediately; if the user logs back in
+  before 30 days elapse, cancel the pending deletion and restore normal
+  access; after 30 days with no login, a background job runs the existing
+  purge. `delete_account` itself is already the right final-purge
+  implementation and needs no changes — it becomes the thing the grace-period
+  job calls, not the thing `DELETE /auth/me` calls directly.
+
+  Needs scoping: whether a pending-deletion account can be used normally
+  during the grace period or is read-only/logged-out until the user
+  explicitly cancels; whether to email a "deletion scheduled" / "deletion
+  cancelled" notice; and how this interacts with the admin panel's own
+  delete-user action (same soft-delete grace period, or an immediate hard
+  delete for admins, kept as an explicit override).
+
+  **Concrete touch points, from a 2026-07-22 research pass** (file/line refs
+  may drift, re-check before implementing):
+  1. `models.py`: add `deletion_requested_at: Mapped[datetime | None]` to
+     `User` (nullable, no backfill needed — NULL means "not scheduled"),
+     near the existing `banned`/`ban_reason` columns (~line 147-148), which
+     are the closest existing precedent for an account-state flag. No
+     generic `status` enum exists on `User` today — `banned` is the only
+     other account-state boolean.
+  2. New Alembic migration, nullable-column-add, modeled on the most recent
+     migration (`ffffe2b24717_add_email_confirmation_grandfathering.py`,
+     the current head) — same `batch_alter_table("users")` /
+     `add_column`/`drop_column` shape, `down_revision = "ffffe2b24717"`.
+  3. `users/accounts.py`: add `request_deletion(user, db)` /
+     `cancel_deletion(user, db)` (set/clear the new column, commit, maybe
+     send an email); leave `delete_account` itself untouched — it's called
+     by the new purge job and can still be called directly for an admin
+     hard-delete override.
+  4. `routers/auth.py`: change `DELETE /auth/me` (520-525) to call
+     `request_deletion` instead of `delete_account`; add a
+     `POST /auth/cancel-deletion` endpoint (or fold into `PATCH /profile`).
+     Decide login-time behavior: `login` (246-280) checks `user.banned` at
+     259-260 right after password verification and before the
+     email-confirmation grace-period gate (261-274, itself a close analog
+     of the grace-period logic this feature needs, including its
+     machine-readable 403 `detail` string for the frontend) — a
+     `deletion_requested_at` check would slot in the same place, either
+     blocking login like `banned` or auto-cancelling the pending deletion
+     and letting login proceed (product decision).
+  5. `users/auth.py`'s `get_current_user` (80-98, the dependency behind
+     every authenticated route including `DELETE /auth/me` itself) has the
+     same `user.banned` check at 95-96 — mirror there too if pending-deletion
+     accounts should be blocked from using the API during the grace period
+     rather than just flagged.
+  6. `task_runs.py`: add a new `TaskSpec` to the `TASKS` registry (48-93),
+     e.g. `TaskSpec("account_purge", "Account purge", "Permanently delete
+     accounts past their 30-day deletion grace period.", "Security", 360)`
+     — this alone gets it a toggle/interval card in the admin Periodic
+     Tasks panel (`routers/admin/periodic_tasks.py`), no admin-UI code
+     needed beyond the registry entry.
+  7. `social/notifier.py`: there's no general-purpose scheduler in this
+     codebase (no APScheduler/Celery) — periodic work is hand-rolled
+     `asyncio` loops, one per task, each sleeping on
+     `task_runs.get_interval_minutes(key)` and checking
+     `task_runs.is_enabled(key)`. The closest existing analog to copy is
+     `_email_confirmation_cleanup_loop` (318-332), which purges accounts
+     unconfirmed for 14 days by calling `accounts.delete_account` per stale
+     row — same shape needed here, filtered on `deletion_requested_at`
+     older than 30 days instead. New loop gets registered in the list
+     `start_periodic_tasks()` returns (352-361); `main.py`'s `lifespan()`
+     (67-84) already starts/cancels every task in that list, no changes
+     needed there.
+  8. Email notice: no generic mailer module exists — `send_confirmation_email`
+     in `users/email_confirmation.py` (76-103) is the only sender, coupled
+     to the confirmation-code flow (Brevo, pooled `httpx.Client`, logs
+     instead of sending when `BREVO_API_KEY` is unset). A "deletion
+     scheduled"/"deletion cancelled" notice needs either a new parallel
+     function in that file following the same pattern, or breaking the
+     Brevo-send logic out into a generic `send_email(to, subject, text)`
+     helper first.
+  9. `schemas.py`'s `UserOut` (116-146): expose `deletion_requested_at` so
+     the frontend can show grace-period UI (banner, days remaining, cancel
+     button).
+  10. `routers/admin/users.py`: `delete_user` (1036-1048) calls
+      `accounts.delete_account` directly today — decide whether admin
+      delete stays an immediate hard delete (likely, as an override) or
+      also goes through the soft-delete path. If a pending-deletion state
+      should be visible in the admin panel, `_render_user_detail`'s
+      `banned_badge` pattern (~236-237) is the existing precedent for a
+      status pill, and `_render_account_actions` (163-214) is where a
+      "cancel pending deletion" admin action would live.
+
 - **Real phone number confirmation on registration.** Same shape as the
   email-confirmation item above, but there's currently no phone number
   field on `User` at all (`models.py:111-151`) — this needs the field
@@ -284,6 +401,225 @@ Known gaps and follow-ups, not yet scheduled.
   available again (to stop swap-and-grab abuse), and whether inactive (not
   just unconfirmed) accounts should eventually free their username too.
   Not scoped in detail yet.
+
+## Bugs
+
+- **Block marking future (unaired) episodes as watched — server-side enforcement.**
+  `PUT /media/{id}/episodes/{season}/{episode}` → `set_episode()` in `media.py`
+  must reject watch requests for episodes whose `air_date` is a future date (422
+  with a clear message). If the episode has no known air date, allow it (treat as
+  possibly aired/leaked). The frontend also guards this, but the backend must
+  enforce it independently so the constraint can't be bypassed via the API.
+
+- **Show fully up-to-date with aired episodes must not appear in "Watch Next".**
+  `list_media()` with `order_by="last_watched"` powers the "Continue Watching"
+  list. It must exclude shows where all aired episodes (`air_date <= today`) are
+  watched and only future-dated episodes remain. `_sync_progress()` computes
+  progress — it may need a companion flag (e.g. `has_unwatched_aired`) that
+  `list_media` can filter on, or the filter can be applied directly in the query.
+  A show should only re-enter the list once a new episode's air date passes.
+
+- **New aired episodes should rank #2 in "Watch Next".**
+  When a tracked show has a newly aired episode the user hasn't watched, it
+  should bubble to position #2 in the list (position #1 is the most recently
+  actively-watched item — highest `last_watched_at`). Depends on the bug above
+  being fixed first — a fully caught-up show must not appear in the list at
+  all before this ordering rule is applied. The ordering currently sorts by
+  `last_watched` descending; a secondary sort key is needed for shows with at
+  least one unwatched aired episode whose `air_date > last_watched_at`.
+
+## Features
+
+- **Diary endpoint — chronological watch/activity log.**
+  New endpoint `GET /diary` returning the user's watch events in
+  reverse-chronological order, paginated. Should cover both film/show library
+  completions and individual episode watches. Response shape per entry:
+  `title_id`, `title` (display name), `poster_path`, `type` (`film`/`episode`),
+  `watched_at`, `rating` (nullable), `season`/`episode` (nullable, for episode
+  entries). Support query params: `page`, `type` filter, `from`/`to` date range.
+  Sources: `episode_watches` and `library_entries` (films and show-level
+  completions via `last_watched_at`). Prefer one unified endpoint over two
+  separate ones if the schema allows it cleanly.
+
+- **Chronological sort on comments.**
+  `GET /media/{id}/comments` currently returns comments in a fixed order.
+  Add a `?sort=asc|desc` query parameter so clients can request oldest-first
+  (chronological). Default remains the current behaviour; `asc` is the new
+  opt-in. Change goes in the comments query in `routers/comments.py` (or
+  wherever comments are fetched).
+
+- **Reviews (alongside the existing Comments).**
+  Reviews are longer, more considered write-ups — distinct from the casual
+  comment thread already in place. Backend work: new `reviews` table + Alembic
+  migration, new CRUD endpoints in `routers/`, normalization check in
+  `test_normalization.py`. Schema must stay BCNF (a review's rating is a fact
+  about the user+title pair, not a copy of anything else).
+
+- **Share — film, show, episode, comment.**
+  Backend needs to support shareable deep links or redirect URLs for a title page,
+  a specific episode, and a comment (anchor within a thread). Options: generate
+  canonical share URLs in the API response, or add a `/share/{type}/{id}`
+  redirect endpoint. Decide on a URL scheme before implementing frontend share
+  buttons.
+
+- **Social login: Continue with Google / Continue with Apple.**
+  Not committed — revisit once real signup-funnel data shows password-registration
+  drop-off is a problem worth solving. Would need nullable `google_id`/`apple_id`
+  columns on `User` (with nullable `password_hash`), new Alembic migration, new
+  `/auth/google`/`/auth/apple` endpoints, `google-auth` + JWKS verification for
+  Apple, `GOOGLE_CLIENT_ID`/`APPLE_*` env vars. Apple requires an Apple Developer
+  account and is mandatory if Google sign-in is also offered on iOS. Decide on
+  native plugin bridge vs. OAuth web-redirect before scoping further.
+
+- **Recommendation feed: infinite-scroll "what to watch next".**
+  Not committed — needs design work on what signals feed the taste model before
+  scoping endpoints. Would need a "taste inferer" (model/heuristic from watch
+  history, ratings, dwell time), new endpoint(s) in `routers/recommendations.py`,
+  implicit-signal recording (skip, completion, dwell), and cold-start handling
+  for new users. Open question: in-house collaborative/content-based filtering
+  vs. external recommendation service.
+
+- **Push notifications (system notifications while the app is closed).**
+  `notifier.py`'s `check_new_episodes` only ever writes an in-app `Notification`
+  row — nothing reaches the device when the app isn't open. A killed-app
+  system notification from a server-side event requires going through the
+  OS's push channel (FCM on Android, APNs on iOS); there's no way around
+  that requirement on stock Android/iOS. Scoped approach: **OneSignal via
+  the `flet-onesignal` PyPI package** (actively maintained, MIT, requires
+  `flet>=0.80.0` — no known incompatibility with this repo's `flet==0.85.3`,
+  not yet smoke-tested) instead of hand-rolling `firebase_messaging` +
+  pubspec overrides — OneSignal hosts the device-token/delivery layer, the
+  backend only calls its REST send API. Still required regardless of this
+  choice: a Firebase project (Service Account JSON, Android FCM credentials)
+  and an Apple Developer account + APNs certificate for iOS — OneSignal sits
+  on top of those, it doesn't remove them.
+
+  **Platform scope: Android/iOS/mobile web only, Windows explicitly out.**
+  OneSignal's Windows support is WNS-on-UWP only, not the Windows App
+  SDK/WinUI3 target a modern Flet Windows build would use — and desktop
+  isn't a maintained distribution target for Renar in the first place (see
+  the Turnstile-widget desktop gap above), so this isn't worth chasing a
+  different provider for. Cost at this scope: free — OneSignal's Free plan
+  is unlimited mobile push sends, and web push is free up to 10,000
+  subscribers per send (paid tiers only kick in past that subscriber count,
+  not from notification volume) — worth revisiting only if/when web push
+  subscribers approach that number.
+
+  **Film releases currently generate no notification at all, in-app or
+  push.** `check_upcoming_films` (below) only refreshes `Title.release_date`
+  for `/upcoming` — it never writes a `Notification` row the way
+  `check_new_episodes` does for episodes. Since this backlog item is
+  explicitly "new episodes/films", closing that gap (a same-day-of-release
+  in-app + push notification, mirroring `check_new_episodes`'s dedupe-by-row
+  pattern but keyed on the film releasing rather than an episode airing) is
+  part of this item's scope, not a separate one.
+
+  **Decisions locked in during scoping (2026-07-21):**
+  - **REST shape:** extend `routers/notifications.py` with `POST
+    /notifications/devices` and `DELETE /notifications/devices/{player_id}`
+    rather than a new router — same auth dependency, two endpoints don't
+    warrant a new file.
+  - **v1 kill switch:** none beyond "unset `ONESIGNAL_REST_API_KEY` = feature
+    off", matching the existing `brevo_api_key` convention. No `site_settings`
+    DB toggle for v1 — a live admin kill switch is a fast-follow, not launch-blocking.
+  - **Push call shape:** one OneSignal API call per `Notification` row
+    created, fired synchronously right after `db.add(Notification(...))`,
+    inside the existing per-show/per-title commit boundary (never batched
+    across a whole scan) — a push failure must never block `Notification`
+    creation or the notifier loop.
+  - **Tap deep-link:** push `data` payload carries `media_item_id` + `kind`;
+    the tap handler reuses `notifications_view.py`'s existing
+    `title_ctx`/`navigate_safe(page, "/title")` pattern to jump straight to
+    the title, not a generic open-to-notifications-list.
+  - Confirmed **not** premium-gated — notifications are core tracking
+    utility, not a cosmetic perk (see `premium.py`'s existing perk list, all cosmetic).
+  - Out of scope for v1: Windows/desktop, live admin kill switch, rich media
+    push, retry/queueing on push failure, badge counts, OneSignal
+    external_user_id linking, notification quiet-hours.
+
+  **Backend work:**
+  - New `DeviceToken` model (`models.py`, after `Notification`): `user_id`
+    FK (indexed), `player_id` (`String(64)`, `UniqueConstraint` on
+    `player_id` alone — not `(user_id, player_id)`, since a player_id is
+    unique per OS-level install and registering it under a different
+    logged-in user should move ownership, not duplicate the row),
+    `platform` (`"android"`/`"ios"`/`"web"`), `created_at`. One row per
+    device, so one-to-many against `User`, not a column on it. New Alembic
+    migration (`down_revision` = current head `a4d6e1b8c2f7`), following
+    `b2f7a6d391ea_add_import_jobs_table.py`'s template. `users/accounts.py`'s
+    `delete_account` needs a new line purging `DeviceToken` rows for the
+    user, same FK-safe-order pattern as every other user-referencing table there.
+  - `config.py`: `onesignal_app_id`/`onesignal_rest_api_key`, both
+    `str = ""` next to `brevo_api_key`, same "empty = disabled, log instead
+    of send" convention as `send_confirmation_email`. App ID isn't secret
+    (ships client-side); REST key is server-only. Frontend gets its own
+    `ONESIGNAL_APP_ID` in `renar-frontend/.env` rather than fetching it from
+    the backend, since the SDK needs it very early at page/session setup.
+  - New `social/onesignal.py` helper mirroring `users/email_confirmation.py`'s
+    Brevo integration line-for-line: pooled `httpx.Client`, `send_push(player_ids,
+    title, body, data=None)` that never raises (logs-and-swallows on missing
+    key or `httpx.HTTPError`) — callers in `notifier.py` depend on that guarantee.
+  - `check_new_episodes` (`social/notifier.py:109-119`) gains a `send_push`
+    call right after each `db.add(Notification(...))`, inside the per-item
+    loop, before the per-show `db.commit()`.
+  - `check_upcoming_films` (`social/notifier.py:131-162`) needs restructuring
+    to close the "no film notification at all" gap noted above: shift its
+    query from distinct `Title` rows to `LibraryEntry` rows (regaining
+    per-user granularity, grouped by `tmdb_id` so one TMDB fetch still
+    serves every tracking user, same shape `check_new_episodes` already
+    uses), notify only once release day has actually arrived (a
+    `RECENT_DAYS`-style window, not on every "coming soon" refresh), dedupe
+    via the existing `Notification` unique constraint with a new
+    `kind="film_released"` (season/episode stay `NULL`).
+
+  **Frontend work:**
+  - Add `flet-onesignal==0.85.*` to `[project.dependencies]` in
+    `pyproject.toml` (next to `flet-webview` — confirmed via its own
+    `pyproject.toml` that it depends only on `flet>=0.80.0`, no heavy native
+    transitive deps the way `flet-web` has, so the dependency-groups
+    isolation trick `flet-web` needs shouldn't apply here, but worth a `flet
+    build apk` smoke test to confirm before assuming safe). Any Android
+    manifest `meta-data` OneSignal needs should go through
+    `[tool.flet.android.meta_data]` (a real supported `flet_cli` key) —
+    **not** a hand-patch under `build/flutter/android/...`, which is exactly
+    the fragility the Turnstile `usesCleartextTraffic` note already warns
+    about (edits there aren't source-controlled and vanish on
+    `--clear-cache`/a flet version bump/fresh checkout).
+  - `api_client.py`: `register_device_token(player_id, platform)` /
+    `deregister_device_token(player_id)`, same `_request()` pattern as the
+    existing `/notifications` methods (~line 707-725).
+  - SDK init in `main.py` near page/session setup (exact `flet-onesignal`
+    call names not yet confirmed against the installed package — check
+    before writing). Register hooks at two points: `complete_login`
+    (`views/auth/auth_views.py:102-147`, the single shared post-login entry
+    point for both normal login and post-email-confirm login) and the
+    app-start saved-session restore in `main.py` (~268-287), so a device
+    re-registers even without a fresh login. Deregister hook at logout
+    (`views/profile/profile_view.py:449`) — must fire **before**
+    `api.logout()` clears the bearer token, since deregistering needs auth.
+  - Tap-to-deep-link: OneSignal's "notification opened" callback reads
+    `data.media_item_id` and reuses `notifications_view.py`'s existing
+    `title_ctx` + `navigate_safe(page, "/title")` pattern.
+
+  **Backend test plan** (pytest, real DB, happy path + error paths per this
+  repo's convention): register/deregister endpoints (happy path, upsert
+  moves ownership between two users, wrong-owner deregister is a no-op, 401
+  unauthenticated); `check_new_episodes` sends push exactly once per
+  notified user with the right payload, a push failure never blocks the
+  `Notification` row or rolls back the commit, no `DeviceToken` means no
+  error; `check_upcoming_films` creates a `film_released` notification only
+  once release day arrives and dedupes on a second run, no notification
+  before release (regression guard for existing `/upcoming` behavior);
+  `onesignal.send_push` no-ops cleanly with the key unset and swallows HTTP errors.
+
+  **Manual verification needs a real Android device** — FCM token delivery
+  is unreliable on emulators. Full device (force-kill app → trigger
+  `check_new_episodes`/`check_upcoming_films` → confirm notification arrives
+  and tap opens the right title) → logout (confirm `device_tokens` row
+  deleted server-side) → uninstall/reinstall (confirm re-login registers a
+  fresh row, no error on the stale one) pass needed before shipping. iOS
+  pass (TestFlight/ad-hoc + APNs cert) is a stretch goal for the same pass,
+  not a blocker for an Android-first ship.
 
 ## Infrastructure
 

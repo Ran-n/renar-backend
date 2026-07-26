@@ -371,10 +371,28 @@ def test_change_password_roundtrip(client, alice):
         json={"current_password": PASSWORD, "new_password": "newpassword456"},
         headers=headers,
     )
-    assert r.status_code == 204
+    assert r.status_code == 200
+    assert r.json()["access_token"]
     old = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
     assert old.status_code == 401
     login(client, "alice", "newpassword456")
+
+
+def test_change_password_invalidates_previously_issued_token(client, alice):
+    """A token issued before the password change must stop working — even
+    though it hasn't expired — since it's exactly the kind of leaked/stolen
+    credential a password change is meant to invalidate."""
+    _, headers = alice
+    r = client.post(
+        "/auth/change_password",
+        json={"current_password": PASSWORD, "new_password": "newpassword456"},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    assert client.get("/auth/me", headers=headers).status_code == 401
+
+    new_headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    assert client.get("/auth/me", headers=new_headers).status_code == 200
 
 
 def test_change_password_wrong_current_unauthorized(client, alice):
@@ -510,6 +528,35 @@ def test_login_updates_usage_stats(client):
 
     row = _user_row(user["id"])
     assert row.last_active_at is not None
+
+
+def test_activity_touch_throttled_within_interval(client):
+    user = register(client, "alice")
+    headers = login(client)
+    client.get("/auth/me", headers=headers)
+    first = _user_row(user["id"]).last_active_at
+
+    client.get("/auth/me", headers=headers)
+    second = _user_row(user["id"]).last_active_at
+    assert second == first  # within the throttle window, no new write
+
+
+def test_activity_touch_fires_again_after_interval(client):
+    user = register(client, "alice")
+    headers = login(client)
+    client.get("/auth/me", headers=headers)
+
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).last_active_at = datetime.now(UTC) - timedelta(minutes=20)
+        db.commit()
+    finally:
+        db.close()
+    stale = _user_row(user["id"]).last_active_at
+
+    client.get("/auth/me", headers=headers)
+    refreshed = _user_row(user["id"]).last_active_at
+    assert refreshed > stale
 
 
 def test_login_records_login_event(client):

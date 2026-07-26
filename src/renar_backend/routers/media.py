@@ -2,10 +2,11 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/07/18 19:33:27.303178
+Revised: 2026/07/26 19:01:22.261390
 """
 
 import logging
+from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import func, or_
@@ -27,6 +28,7 @@ from ..models import (
     WatchEvent,
     WatchStatus,
     prefetch_episode_cache,
+    utcnow,
 )
 from ..schemas import (
     CustomPosterSet,
@@ -37,7 +39,7 @@ from ..schemas import (
     LibraryEntryUpdate,
     RewatchCreate,
 )
-from ..tmdb.tmdb_store import localized_titles, refresh_title_details, warm_title_translations
+from ..tmdb.tmdb_store import localized_titles, refresh_title_details, sync_show_episodes, warm_title_translations
 from ..users.auth import get_current_user, require_premium
 from .tmdb import fetch_poster_bytes
 
@@ -72,6 +74,7 @@ def list_media(
     search: str | None = None,
     lang: str | None = None,
     favorites_only: bool = False,
+    order_by: str | None = None,
     limit: int | None = None,
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -104,7 +107,16 @@ def list_media(
                 Title.id.in_(cached_match),
             )
         )
-    query = query.order_by(LibraryEntry.updated_at.desc()).offset(offset).limit(limit)
+    # "last_watched" is opt-in (Home's in-progress preview) rather than the
+    # default: it orders by genuine watch activity only (see
+    # LibraryEntry.last_watched_at), while Library's own browsing/filtering
+    # keeps the existing "most recently touched at all" order everyone
+    # already expects.
+    if order_by == "last_watched":
+        query = query.order_by(LibraryEntry.last_watched_at.desc().nullslast())
+    else:
+        query = query.order_by(LibraryEntry.updated_at.desc())
+    query = query.offset(offset).limit(limit)
     entries = query.all()
     prefetch_episode_cache(db, (e.title_id for e in entries))
 
@@ -205,6 +217,9 @@ def create_media(
         current_episode=data.current_episode,
         episodes_watched=data.episodes_watched,
         is_favorite=data.is_favorite,
+        # same rule as update_media: adding straight into "watching" (or
+        # "completed", the no-episodes film case) is itself a watch signal
+        last_watched_at=utcnow() if data.status in (WatchStatus.watching, WatchStatus.completed) else None,
     )
     db.add(item)
     db.commit()
@@ -268,6 +283,35 @@ def _derive_season_episode(item: LibraryEntry, db: Session) -> None:
     item.current_season, item.current_episode = ep.season, ep.episode_number
 
 
+def _mark_all_aired_watched(item: LibraryEntry, db: Session) -> None:
+    """Fill in EpisodeWatch rows for every already-aired episode the user
+    hasn't marked yet — used when a show is set straight to "completed"
+    without per-episode tracking. Only episodes with a known air_date in the
+    past are touched, so a still-airing show never gets future/unannounced
+    episodes marked watched out from under it. _sync_progress (called at the
+    end) uses the same aired-only count as its completion threshold, so it
+    won't demote the "completed" status the caller just set."""
+    if item.title_ref is None:
+        return
+    sync_show_episodes(db, item.title_ref)
+    aired = (
+        db.query(Episode)
+        .filter(Episode.title_id == item.title_id, Episode.air_date.isnot(None), Episode.air_date <= date.today())
+        .all()
+    )
+    if not aired:
+        return
+    existing = {(w.season, w.episode) for w in db.query(EpisodeWatch).filter(EpisodeWatch.media_item_id == item.id)}
+    for ep in aired:
+        if (ep.season, ep.episode_number) not in existing:
+            db.add(EpisodeWatch(media_item_id=item.id, season=ep.season, episode=ep.episode_number))
+    # sessions here are autoflush=False (see database.py) — _sync_progress
+    # re-queries EpisodeWatch, so the inserts above must be committed first
+    # or it won't see them, same as every other call site of _sync_progress.
+    db.commit()
+    _sync_progress(item, db)
+
+
 @router.patch("/{item_id}", response_model=LibraryEntryOut)
 def update_media(
     item_id: int,
@@ -277,10 +321,45 @@ def update_media(
 ):
     item = _get_owned_item(item_id, user, db)
     changed = data.model_dump(exclude_unset=True)
+    if item.media_type == MediaType.film:
+        tv_only = {"episodes_watched", "current_season", "current_episode"} & changed.keys()
+        if tv_only:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{', '.join(sorted(tv_only))} not applicable to a film",
+            )
     for field, value in changed.items():
         setattr(item, field, value)
     if "episodes_watched" in changed and "current_season" not in changed and "current_episode" not in changed:
         _derive_season_episode(item, db)
+    # Setting status -> completed directly (not via per-episode toggles)
+    # otherwise leaves zero EpisodeWatch rows behind: episodes_watched stays
+    # untouched, so per-episode ratings/rewatch have no data for a show the
+    # user just told us they're done with. Backfill every already-aired
+    # episode as watched — unless the caller also gave an explicit
+    # episodes_watched count of their own, which wins instead.
+    if (
+        changed.get("status") == WatchStatus.completed
+        and item.media_type == MediaType.tv_show
+        and "episodes_watched" not in changed
+    ):
+        _mark_all_aired_watched(item, db)
+    # Coarse progress (no per-episode rows) is still the user asserting a
+    # watch happened, so it has to move last_watched_at the same as the
+    # per-episode path does — everything else this endpoint can touch
+    # (favorite, rating, notes, url, status on its own) must NOT.
+    #
+    # status -> watching is included too: a show manually flipped to
+    # "watching" (no episodes marked yet) is exactly the case where the user
+    # most wants it to surface on Home right away, instead of sitting at the
+    # bottom of the list until they separately go mark an episode watched.
+    # status -> completed also counts — a film has no episode rows at all,
+    # so "mark this watched" for one IS this status change and nothing else.
+    if {"episodes_watched", "current_season", "current_episode"} & changed.keys() or changed.get("status") in (
+        WatchStatus.watching,
+        WatchStatus.completed,
+    ):
+        item.last_watched_at = utcnow()
     db.commit()
     db.refresh(item)
     return item
@@ -468,6 +547,27 @@ def clear_custom_episode_still(
 # ---------- per-episode tracking ----------
 
 
+def _aired_episode_total(item: LibraryEntry, db: Session) -> int | None:
+    """How many episodes have actually aired, per the synced Episode
+    catalog — None when nothing's synced yet for this title (caller falls
+    back to the flat Title.total_episodes count).
+
+    Title.total_episodes comes straight from TMDB's number_of_episodes,
+    which can already include an episode announced with a future air_date
+    that hasn't aired. Without this, a still-airing show the user has fully
+    caught up on would never cross that flat threshold, and so would never
+    promote to "completed" (shown as "Caught up" for a non-ended show) until
+    the show itself wrapped."""
+    known = db.query(func.count(Episode.id)).filter(Episode.title_id == item.title_id).scalar()
+    if not known:
+        return None
+    return (
+        db.query(func.count(Episode.id))
+        .filter(Episode.title_id == item.title_id, Episode.air_date.isnot(None), Episode.air_date <= date.today())
+        .scalar()
+    )
+
+
 def _sync_progress(item: LibraryEntry, db: Session) -> None:
     """Recompute counters/status from the episode_watches rows."""
     watches = db.query(EpisodeWatch).filter(EpisodeWatch.media_item_id == item.id).all()
@@ -475,8 +575,19 @@ def _sync_progress(item: LibraryEntry, db: Session) -> None:
     if watches:
         last = max(watches, key=lambda w: (w.season, w.episode))
         item.current_season, item.current_episode = last.season, last.episode
-    if item.total_episodes and item.episodes_watched >= item.total_episodes:
+        item.last_watched_at = utcnow()
+    total = _aired_episode_total(item, db)
+    if total is None:
+        total = item.total_episodes
+    if total and item.episodes_watched >= total:
         item.status = WatchStatus.completed
+    elif item.status == WatchStatus.completed:
+        # no longer every episode is watched — completed doesn't hold up
+        # anymore, so this undoes the auto-promotion above the same way an
+        # unwatch undoes want_to_watch -> watching below. Without this, an
+        # unwatch after finishing a show left the status stuck on
+        # "completed" forever, since nothing ever demoted it back down.
+        item.status = WatchStatus.watching if item.episodes_watched > 0 else WatchStatus.want_to_watch
     elif item.episodes_watched > 0 and item.status == WatchStatus.want_to_watch:
         item.status = WatchStatus.watching
     db.commit()
@@ -577,6 +688,47 @@ def rewatch(
         if watch is None:
             db.add(EpisodeWatch(media_item_id=item.id, season=data.season, episode=data.episode))
     db.add(WatchEvent(media_item_id=item.id, season=data.season, episode=data.episode))
+    # _sync_progress only stamps last_watched_at off episode_watches rows, so
+    # a rewatch of an episode already in that table (or a whole-film rewatch,
+    # which has no episode_watches row at all) wouldn't otherwise move it —
+    # this is itself a watch event, so it must count.
+    item.last_watched_at = utcnow()
+    db.commit()
+    _sync_progress(item, db)
+    return _ratings_summary(item, db)
+
+
+@router.delete("/{item_id}/rewatch")
+def undo_rewatch(
+    item_id: int,
+    data: RewatchCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Remove the single most recent rewatch for this item/episode, without
+    touching the underlying watched status (EpisodeWatch row untouched) —
+    the inverse of POST .../rewatch, one event at a time. Lets the frontend
+    step an already-rewatched episode down by one instead of jumping
+    straight to fully unwatched when the user "unmarks" it."""
+    item = _get_owned_item(item_id, user, db)
+    if (data.season is None) != (data.episode is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="season and episode must be given together",
+        )
+    latest = (
+        db.query(WatchEvent)
+        .filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season == data.season,
+            WatchEvent.episode == data.episode,
+        )
+        .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        .first()
+    )
+    if latest is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rewatch to undo")
+    db.delete(latest)
     db.commit()
     _sync_progress(item, db)
     return _ratings_summary(item, db)

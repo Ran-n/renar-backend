@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.395578
-Revised: 2026/07/18 19:33:27.970634
+Revised: 2026/07/22 13:50:06.518967
 
 Media library CRUD, filters, ownership, and community ratings.
 """
@@ -179,6 +179,68 @@ def test_list_favorites_only_paginated(client, alice):
     assert [i["title"] for i in favorites_page2] == ["Heat"]
 
 
+# ---------- order_by=last_watched ----------
+
+
+def test_order_by_last_watched_ignores_non_watch_edits(client, alice):
+    """Only genuine watch activity should move an item under
+    order_by=last_watched; a favorite toggle still bumps updated_at (the
+    default order) but must not touch last_watched_at."""
+    _, headers = alice
+    a = _create(client, headers, media_type="tv_show", title="A")
+    b = _create(client, headers, media_type="tv_show", title="B")
+    _create(client, headers, media_type="tv_show", title="C")  # never watched
+
+    client.put(f"/media/{a['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+    client.put(f"/media/{b['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+    # touches updated_at only — must not count as watch activity
+    client.patch(f"/media/{a['id']}", json={"is_favorite": True}, headers=headers)
+
+    default_order = [i["title"] for i in client.get("/media", headers=headers).json()]
+    assert default_order == ["A", "B", "C"]  # updated_at desc: the favorite edit put A back on top
+
+    watched_order = [
+        i["title"] for i in client.get("/media", params={"order_by": "last_watched"}, headers=headers).json()
+    ]
+    assert watched_order == ["B", "A", "C"]  # B's episode watch is more recent than A's; C never watched sorts last
+
+
+def test_order_by_last_watched_status_to_watching_counts(client, alice):
+    """Manually marking a show 'watching' (no episodes marked yet) must
+    outrank an item with no watch activity at all — the whole point is
+    surfacing it on Home without the user having to also find and mark an
+    episode."""
+    _, headers = alice
+    _create(client, headers, media_type="tv_show", title="Untouched")
+    marked = _create(client, headers, media_type="tv_show", title="Marked", status="want_to_watch")
+    client.patch(f"/media/{marked['id']}", json={"status": "watching"}, headers=headers)
+
+    order = [i["title"] for i in client.get("/media", params={"order_by": "last_watched"}, headers=headers).json()]
+    assert order == ["Marked", "Untouched"]
+
+
+def test_order_by_last_watched_status_to_completed_counts_for_films(client, alice):
+    """Films have no episode rows at all, so marking one 'completed' IS the
+    watch signal — it must count the same as an episode watch would for a
+    show."""
+    _, headers = alice
+    _create(client, headers, title="Untouched")
+    watched_film = _create(client, headers, title="Watched Film", status="want_to_watch")
+    client.patch(f"/media/{watched_film['id']}", json={"status": "completed"}, headers=headers)
+
+    order = [i["title"] for i in client.get("/media", params={"order_by": "last_watched"}, headers=headers).json()]
+    assert order == ["Watched Film", "Untouched"]
+
+
+def test_order_by_last_watched_create_with_watching_status_counts(client, alice):
+    _, headers = alice
+    _create(client, headers, title="Untouched", status="want_to_watch")
+    _create(client, headers, title="Fresh Watch", status="watching")
+
+    order = [i["title"] for i in client.get("/media", params={"order_by": "last_watched"}, headers=headers).json()]
+    assert order == ["Fresh Watch", "Untouched"]
+
+
 # ---------- get / patch / ownership ----------
 
 
@@ -213,6 +275,15 @@ def test_patch_updates_fields(client, alice):
     assert r.status_code == 200
     body = r.json()
     assert (body["rating"], body["status"], body["is_favorite"]) == (8, "completed", True)
+
+
+def test_patch_film_rejects_tv_only_fields(client, alice):
+    _, headers = alice
+    item = _create(client, headers)
+    r = client.patch(f"/media/{item['id']}", json={"episodes_watched": 1}, headers=headers)
+    assert r.status_code == 422
+    r = client.patch(f"/media/{item['id']}", json={"current_season": 1, "current_episode": 2}, headers=headers)
+    assert r.status_code == 422
 
 
 def test_patch_other_users_item_not_found(client, alice, bob):

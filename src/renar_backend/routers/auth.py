@@ -502,7 +502,7 @@ def update_profile(
     return user
 
 
-@router.post("/change_password", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/change_password", response_model=Token)
 def change_password(
     data: PasswordChange,
     db: Session = Depends(get_db),
@@ -514,7 +514,12 @@ def change_password(
             detail="Current password is incorrect",
         )
     user.password_hash = hash_password(data.new_password)
+    user.password_changed_at = utcnow()
     db.commit()
+    # Changing the password invalidates every token issued before this
+    # moment (see get_current_user) — including the one this request was
+    # authenticated with, so hand back a fresh one for the caller's own session.
+    return Token(access_token=create_access_token(user.id))
 
 
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)

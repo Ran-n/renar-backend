@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/21 09:51:03.034569
+Revised: 2026/07/22 09:53:49.509513
 """
 
 import enum
@@ -117,6 +117,13 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    # Bumped whenever the password changes (self-service or admin reset).
+    # get_current_user rejects any bearer token issued before this moment, so
+    # a leaked token stops working as soon as the password it was minted
+    # under is replaced, instead of staying valid for the rest of its
+    # ACCESS_TOKEN_EXPIRE_MINUTES lifetime. NULL means "never changed since
+    # this column existed" — no cutoff to enforce.
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # True once the user has completed a code-confirmation round trip proving
     # ownership of `email` (see users/email_confirmation.py). Indexed: it's
     # filtered on every /stats/ranking request (routers/stats.py._compute_ranking)
@@ -631,6 +638,7 @@ class LibraryEntry(Base):
         UniqueConstraint("user_id", "title_id", name="uq_user_title"),
         Index("ix_media_items_user_id_status", "user_id", "status"),
         Index("ix_media_items_user_id_updated_at", "user_id", "updated_at"),
+        Index("ix_media_items_user_id_last_watched_at", "user_id", "last_watched_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -648,6 +656,11 @@ class LibraryEntry(Base):
     current_season: Mapped[int | None] = mapped_column(Integer, nullable=True)
     current_episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
     episodes_watched: Mapped[int] = mapped_column(Integer, default=0)
+    # Set only when the user actually marks an episode (or, for a film, the
+    # item itself) watched/rewatched — unlike updated_at, this deliberately
+    # does NOT move on a favorite toggle, rating, note, or status edit, so
+    # Home's "in progress" ordering can reflect genuine watch activity only.
+    last_watched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
     # Premium-only poster override, always a stored image (TMDB alternates are
     # downloaded into the store, uploads land there directly). Per-entry, so it
