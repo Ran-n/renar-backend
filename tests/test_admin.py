@@ -114,6 +114,31 @@ def test_admin_edit_email_invalid_rejected(client, admin_enabled, alice):
     assert r.status_code == 422
 
 
+def test_admin_edit_email_normalized(client, admin_enabled, alice, bob):
+    """Mirrors self-service registration's normalization — an admin edit must
+    not be able to create a case-variant duplicate of another account's
+    email (the unique index is case-sensitive, so only app-level
+    normalization catches this)."""
+    alice_user, _ = alice
+    bob_user, _ = bob
+    r = client.post(f"/admin/users/{alice_user['id']}/edit", data={"email": "  New@Example.com  "}, auth=BASIC)
+    assert r.status_code in (200, 303)
+    r = client.get(f"/admin/users/{alice_user['id']}", auth=BASIC)
+    assert "new@example.com" in r.text
+
+    conflict = client.post(f"/admin/users/{bob_user['id']}/edit", data={"email": " NEW@EXAMPLE.COM "}, auth=BASIC)
+    assert conflict.status_code == 409
+
+
+def test_admin_edit_username_normalized(client, admin_enabled, alice):
+    user, _ = alice
+    r = client.post(f"/admin/users/{user['id']}/edit", data={"username": "  spaced  "}, auth=BASIC)
+    assert r.status_code in (200, 303)
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "spaced" in r.text
+    assert "  spaced  " not in r.text
+
+
 def test_admin_set_password_takes_effect(client, admin_enabled, alice):
     user, _ = alice
     r = client.post(

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/21 09:51:02.273700 )
+[//]: # (+ Revised: 	2026/07/26 23:27:39.773676 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -356,6 +356,20 @@ else's comment — failed deletion with an FK violation. Any new
 user-referencing table gets added to the shared helper once, not remembered
 twice.
 
+Deleting the account's comments this way also deletes the entire reply
+subtree, including replies written by *other* still-existing accounts —
+considered and kept as-is: consistent with the no-tombstone stance above
+(a reply without its parent's context is worthless anyway), and account
+deletion isn't a special case of comment deletion in this regard.
+
+**Revisit when:** users complain about losing their own replies to a
+deleted account's comment, or moderation wants deleted-comment threads
+preserved as evidence — at that point anonymizing the deleted user's
+comments (strip authorship, keep content and subtree) instead of deleting
+them becomes worth the added complexity (an UPDATE with cascading side
+effects instead of a clean DELETE, plus a decision on what "anonymized
+comment" renders as client-side).
+
 ### Content-addressed image store (`storage.py`)
 
 Uploaded/cached images (avatars, cached posters) are stored by
@@ -632,6 +646,63 @@ per-proxy cache directory (`tmdb_cache/`) is gone.
 **Why:** one storage system instead of three, DB-visible sizes/dedup, and
 the immutable upstream paths make "cache forever, never revalidate" safe.
 
+### Frontend disk cache keys: SHA-256 of the URL, not the server's blake3 hash
+
+Every file in the backend's content-addressed store *is* named by its
+blake3 hash (both custom overrides and TMDB-proxied images, see above), but
+`renar-frontend`'s `image_disk_cache.py::_key()` still generates its own
+local cache filename by SHA-256-hashing the whole `src` URL, rather than
+reusing or being handed that hash.
+
+**Why the frontend can't just read the hash out of the URL:** only custom
+overrides (`/images/{hash}`) carry it. The far more common case — TV/movie
+posters — is served from `/tmdb/image/{size}/{tmdb_filename}`
+(`routers/tmdb.py`), addressed by TMDB's own identity because the backend
+doesn't know the hash yet at the point that URL has to be constructed: the
+listing endpoints (`search`/`trending`/`popular`/`details`/`season`/
+`credits`) build `poster_url` etc. straight from raw TMDB JSON with no
+cache lookup at all, and even the image proxy itself only learns the hash
+*after* fetching/storing on a cache miss. So one uniform local-hashing
+scheme that works for both URL shapes is simpler than branching to extract
+an embedded hash for one shape and falling back to hashing for the other.
+
+**Considered and rejected: exposing the hash in listing JSON.** The
+listing endpoints could do one batched `external_images` lookup per
+response (`source='tmdb' AND key IN (...)`, not N+1) and attach a `hash`
+field when an image is already cached. This is real DB/payload cost added
+(one extra indexed query + ~1-2 KB per response) in exchange for the
+frontend sometimes skipping a SHA-256 computation over a short string —
+work that was already microseconds. Net effect: strictly more total cost,
+not less, since the backend side only ever adds cost and the frontend side
+never saves more than it already spent. Also doesn't remove the
+SHA-256 fallback path, since most listing results (an unopened search hit,
+a `trending` entry nobody's viewed yet) have no cached hash to expose.
+
+**Considered and rejected: eagerly downloading every listed poster so a
+hash always exists.** Would block `search`/`trending`/`popular` on
+downloading 10-40 images from TMDB before the metadata response could
+return at all, and permanently store images nobody ever opens (most of a
+scrollable results list is never tapped) — the opposite of the "each
+image fetched at most once, only when actually requested" design already
+in place (see above).
+
+**Considered and rejected: redirecting `/tmdb/image/...` to `/images/{hash}`
+once known.** `follow_redirects=True` on the frontend's httpx clients would
+make this transparent, but it doesn't help the first-ever fetch of an image
+(hash isn't known until after that fetch completes anyway) and adds a
+redirect round-trip to every subsequent fetch in exchange for a benefit
+(frontend skips computing its own key) that's smaller than the round-trip
+cost itself.
+
+**Why SHA-256 specifically, not blake3, for this local key:** this is a
+filesystem-safe, collision-resistant cache-key derivation, not a
+security-sensitive hash — either algorithm satisfies it equally.
+`blake3`'s PyPI package has no published wheels for the Android/iOS
+targets `renar-frontend` actually ships to (Flet's `serious_python`
+packaging), so adding it as a hard dependency risks breaking mobile builds
+for a purely cosmetic "matches the storage layer's algorithm" win. Not
+worth the risk.
+
 ### TVDB is a fallback, not the primary lookup; a plain title search is the last resort
 
 TV Time imports match shows to TMDB via TVDB id first (TMDB's `/find`
@@ -782,6 +853,108 @@ source the frontend's Profile → About screen reads.
 per-user admin role on `User` would be schema/auth churn for no security
 benefit — the existing HTTP-Basic `/admin` panel already covers real
 admin needs and isn't tied to user accounts at all.
+
+### `password_changed_at` + `iat_ts`: password change invalidates prior tokens
+
+`users.password_changed_at` is stamped on every password change — self-service
+(`POST /auth/change_password`) and admin reset. `get_current_user` rejects any
+bearer token whose issuance time predates this value, so a leaked/stolen token
+stops working the instant the password it was minted under is replaced, rather
+than surviving for the rest of its configured expiry window.
+
+**Why a custom `iat_ts` claim, not the standard `iat`:** JWT's `iat` is a
+registered claim that PyJWT floors to whole-second Unix time. A password change
+that happens within the same wall-clock second as a token issuance would make
+`iat == password_changed_at` — the comparison `iat < changed_at` would be `False`
+and the old token would survive. `iat_ts` carries the same instant as a plain
+Python `float` (microsecond precision via `datetime.timestamp()`), so the
+comparison is always exact regardless of timing. `iat` is still included in the
+payload for RFC 7519 compatibility; `iat_ts` is the value `get_current_user`
+actually checks.
+
+**Why `POST /auth/change_password` returns a fresh `Token` instead of 204:**
+since the request is itself authenticated with a token that the new
+`password_changed_at` just invalidated, the caller's own session would end on
+their very next request if no new token were handed back. Returning a fresh one
+keeps the caller's session live without a separate login round-trip.
+
+**Why `NULL` on `password_changed_at` means "no cutoff":** existing accounts
+never had the column before migration `c1d4e7f2a9b6` ran, so `NULL` is
+deliberately treated as "never changed" — no cutoff to enforce. A token issued
+before the migration has no `iat_ts` claim (`payload.get("iat_ts")` returns
+`None`), which `get_current_user` treats as "pre-dates any stored
+`password_changed_at`" and rejects — the safe default when the claim is absent.
+
+### `list_media`'s `order_by=last_watched`: watch activity only, opt-in
+
+`library_entries.last_watched_at` is stamped only by genuine watch
+activity — an episode marked/unmarked watched (`_sync_progress`), a
+rewatch (film or episode, `rewatch`), coarse progress edits
+(`episodes_watched`/`current_season`/`current_episode` via the PATCH), or
+a status change *into* `watching`/`completed`. It is deliberately **not**
+touched by favorite, rating, notes, url, or any other PATCH field, and
+it's a separate column from `updated_at` (which still bumps on any of
+those).
+
+`list_media` only orders by it when the caller passes
+`order_by=last_watched`; the default stays `updated_at desc`. Home's
+"continue watching" preview passes the new param; Library's own
+browsing/filtering does not, so its existing "most recently touched at
+all" order is unaffected.
+
+**Why status → `watching` counts as watch activity:** a show flipped to
+`watching` with zero episodes marked yet is exactly the case where the
+user most wants it to surface on Home right away — the alternative is it
+sitting invisible at the bottom of the list (see nulls below) until they
+separately track down the title and mark an episode. Same reasoning
+covers status → `completed` for a film: films have no episode rows at
+all, so "I watched this" for a film *is* that status change and nothing
+else — without this rule films could never appear in the ordering.
+
+**Ties/nulls:** `nullslast()` — an entry with no watch activity yet sorts
+after every entry that has some, but no explicit "stale" cutoff or
+demotion exists. A show marked `watching` and never touched again just
+sits at whatever position its (frozen) `last_watched_at` earns it,
+sliding down as other entries get newer activity, until it eventually
+falls off Home's capped preview (still reachable via "See full
+library"). No TTL-based auto-revert to `want_to_watch` — deliberately
+deferred, since "abandoned" has no obvious universal cutoff (movies
+never get a second episode event; a slow-burn show might get one every
+few months by design) and inventing one is a product decision, not a bug
+fix.
+
+**Migration `b7f3d0a91c4e`** backfilled existing `watching`/`completed`
+rows from each item's latest `episode_watches.watched_at` (falling back
+to `updated_at`) specifically so this rollout didn't make every
+pre-existing in-progress show read as "never watched" and vanish from
+the ordering until the user happened to watch something new.
+
+### `update_media` rejects TV-only fields on a film
+
+`PATCH /media/{id}` blanket-`setattr`s whatever fields the caller sends
+(see `LibraryEntryUpdate`) — nothing in the schema knows which item it's
+being applied to, so it can't tell "an int ≥ 0" from "an int ≥ 0 that
+doesn't apply to this item's media type". `episodes_watched`,
+`current_season`, `current_episode` are TV-show-only concepts sitting on
+the same shared `library_entries` row a film uses (see "Titles vs.
+library entries" above) — the DB schema doesn't stop a film row from
+having them written.
+
+**Why the endpoint, not the schema:** only `update_media` has both the
+incoming fields and the target item's actual `media_type` (via
+`item.media_type`, the `title_ref` passthrough) at the same time. It now
+422s if any of those three fields are present in the request and the
+item is a film.
+
+**Why this exists:** the frontend's home-view hero card had a bug where
+tapping "mark watched" on a film sent `{"episodes_watched": eps}` instead
+of `{"status": "completed"}` — the request succeeded and silently wrote
+a meaningless `episodes_watched` count onto a film forever, with no
+error surfaced anywhere. This guard doesn't fix that specific caller (the
+frontend bug is fixed separately) but stops the same class of bug —
+wrong caller sends a type-inapplicable field — from silently corrupting
+data again, including once more media types (e.g. books) exist and bring
+their own type-only fields.
 
 ## Dev server
 

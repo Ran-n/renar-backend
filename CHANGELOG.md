@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/21 09:51:02.021539 )
+[//]: # (+ Revised: 	2026/07/26 23:27:27.989481 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -13,6 +13,108 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- `library_entries.last_watched_at`: timestamp stamped only on genuine
+  watch activity — an episode toggled watched/unwatched (`_sync_progress`),
+  a rewatch (`POST`/`DELETE .../rewatch`), coarse progress edits
+  (`episodes_watched`/`current_season`/`current_episode` via the `PATCH`),
+  or a status change into `watching`/`completed`. Deliberately NOT touched
+  by favorite, rating, notes, url, or any other `PATCH` field, so
+  Home's "continue watching" ordering reflects real viewing history only.
+  Migration `b7f3d0a91c4e` adds the column and backfills existing
+  `watching`/`completed` rows from each item's latest `episode_watches.watched_at`
+  (fallback: `updated_at`) so no in-progress show vanishes on rollout
+- Composite index `ix_media_items_user_id_last_watched_at` (migration `b7f3d0a91c4e`)
+- `users.password_changed_at`: bumped on every password change — self-service
+  (`POST /auth/change_password`) and admin reset (`set_user_password`); migration
+  `c1d4e7f2a9b6`. `users/auth.py`'s `get_current_user` rejects any bearer token
+  whose `iat_ts` claim predates this value, so a leaked/stolen token stops working
+  the instant the password it was minted under is replaced, rather than surviving
+  for the rest of its expiry window. `iat_ts` is a custom float JWT claim carrying
+  the issuance instant at full microsecond precision — the standard `iat` claim
+  is floored to whole seconds by PyJWT, too coarse to distinguish tokens issued
+  within the same second of a password change
+- `POST /auth/change_password` now returns a `Token` (fresh access token) instead
+  of 204 — since changing the password revokes every previously issued token
+  (see above), the caller receives a new one automatically so their own session
+  stays live without a separate login call
+- `routers/media.py`'s `_mark_all_aired_watched`: called when `update_media` sets
+  a show's `status` directly to `completed` without an accompanying
+  `episodes_watched` count — fills in `EpisodeWatch` rows for every episode whose
+  `air_date` is in the past, so per-episode ratings/rewatch have a real history
+  to work from instead of zero rows; `_sync_progress` re-counts immediately after
+  and won't demote the status (it uses the same aired-only threshold)
+- `routers/media.py`'s `_aired_episode_total`: `_sync_progress` now uses the count
+  of episodes with `air_date <= today` as the 100% threshold — a still-airing show
+  the user has fully caught up on can now auto-promote to `completed` / "Caught up"
+  instead of remaining stuck while future episodes are announced. Falls back to
+  `Title.total_episodes` when no synced `Episode` rows exist for the title
+- `_sync_progress` status demotion on unwatch: unwatching an episode can undo
+  the `completed` auto-promotion, rolling back to `watching` (some episodes
+  remain) or `want_to_watch` (no episodes remain); previously the status stayed
+  `completed` forever once auto-promoted even if the user then unmarked episodes
+- `DELETE /media/{item_id}/rewatch`: removes the most recent `WatchEvent` for
+  a given item/episode, without touching the `EpisodeWatch` row — inverse of
+  `POST .../rewatch`, one event at a time, so the user can step an
+  already-rewatched episode down by one rather than jumping straight to
+  fully-unwatched
+- `list_media` (`GET /media`): new `order_by=last_watched` query parameter;
+  orders by `library_entries.last_watched_at desc nullslast`. Default remains
+  `updated_at desc`; Library browsing/filtering is unaffected. Used by Home's
+  "continue watching" preview
+- `create_media` (`POST /media`): stamps `last_watched_at` when an item is
+  added directly in `watching` or `completed` status, matching `update_media`'s
+  rule that a status transition into those states is itself a watch signal
+- TV Time import: trailing-year extraction — TV Time appends a disambiguation
+  year to same-named shows (`Shogun 1980`, `Shogun (1980)`); `_split_trailing_year`
+  separates base title from year, passes `first_air_date_year` to TMDB, and
+  retries without the year (then verbatim) on a miss
+- TV Time import: CJK space-stripped retry — TMDB tokenizes on whitespace;
+  a stray space in a CJK title that TV Time and TMDB space differently returns
+  zero results; `_cjk_space_stripped` strips all spaces for a second query when
+  the title contains CJK characters
+- TV Time import: fuzzy fallback (`_fuzzy_search` / `_FUZZY_THRESHOLD = 0.8`) —
+  drops trailing words from the query, collects a candidate pool across retries,
+  picks the best `difflib.SequenceMatcher` match above the threshold; applied
+  as the final fallback for both TV and movie matching after all exact/year-split
+  retries fail
+- TV Time import: one-off special/OVA fallback — items still unmatched after
+  movie/show matching are tried as episode references: `_show_episode_splits`
+  splits the name on `" - "` / `": "` into candidate show+episode pairs,
+  `_search_tv` resolves the show, `_show_episode_pool` fetches every episode
+  (season 0 included), and `_match_episode_in_pool` picks the best match above
+  `_EPISODE_THRESHOLD = 0.75`; a missing show parent is created so the episode
+  has somewhere to attach; `seen` tracks watched episodes across both the main
+  loop and this fallback to avoid duplicates
+- TV Time import: `_search_movie` falls back to `_search_tv` once the movie-side
+  exhausts all retries — handles TV originals mis-catalogued as movies in TV
+  Time exports; result is inserted as a `tv_show` entry using `name` /
+  `first_air_date` fields rather than movie ones
+- TV Time import: `_upsert_library_entry` now returns a fifth `duplicate_in_run`
+  flag — the race loser in a concurrent same-run insert collision; callers skip
+  the count for those entries so a brand-new account import never misreports a
+  title as "already in your library"
+- TV Time import: process-wide `_import_slots` semaphore (`MAX_CONCURRENT_IMPORTS
+  = 3`) — concurrent imports over the cap get 429 instead of each holding up to
+  200 MB simultaneously; slot acquired before reading the upload body, released
+  in `_run_import`'s `finally` block
+- `__main__.py`'s `_log_config()`: replaces the old `logging.basicConfig` + single
+  filter with a full uvicorn-compatible log config — rotating file handler
+  (`logs/renar-backend.log`, 10 MB × 5 backups, UTF-8, no ANSI codes), plain
+  console handler; TMDB image proxy requests (`/tmdb/image/`) added to the
+  console quiet-path filter while the file handler remains filter-free. `logs/`
+  added to `.gitignore`
+- `tests/test_admin.py`: email normalization test (admin edit must not create a
+  case-variant duplicate), username normalization test
+- `tests/test_auth.py`: `test_change_password_invalidates_previously_issued_token`,
+  `test_activity_touch_throttled_within_interval`,
+  `test_activity_touch_fires_again_after_interval`
+
+- `routers/media.py`'s `update_media`: rejects `episodes_watched`,
+  `current_season`, `current_episode` with 422 when the target item's
+  `media_type` is `film` — those fields are TV-show-only and nothing
+  previously stopped a buggy caller from writing them to a film row (the
+  frontend hero-card bug did exactly this; see renar-frontend's changelog)
 
 - `resync_tmdb_metadata` / `resync_tmdb_metadata_once` in
   `social/notifier.py`: periodic background job that re-fetches TMDB
@@ -225,11 +327,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `__main__.py`: `uvicorn.access` logs for high-frequency polling endpoints
   (`/import/*/status`, `/auth/me`) are now filtered out via a
   `logging.Filter`, so they don't drown out real request traffic in server
-  logs
+  logs (console only; file handler below is now filter-free)
 - `pyproject.toml`: added `fastapi.Form` to ruff's
   `flake8-bugbear.extend-immutable-calls` (the admin premium-toggle and
   settings forms use `Form(...)` defaults the same intended way as the
   existing `Depends`/`Query` entries)
+- `users/auth.py`'s `_touch_activity`: throttled to at most one DB write per
+  `_ACTIVITY_TOUCH_INTERVAL` (15 minutes) per user — all current readers of
+  `last_active_at` (admin analytics `active_today`/`active_7d`, admin
+  user-detail page, GDPR export) only need day-level accuracy; the previous
+  per-request commit was the highest-frequency write on the app's busiest
+  dependency
+- `routers/admin/users.py`'s `edit_user`: email and username are now
+  normalized (`.strip().lower()` / `.strip()`) before the uniqueness check,
+  mirroring self-service `register`/`update_profile` — previously an admin
+  edit could create a case-variant email duplicate that the unique index
+  (case-sensitive) wouldn't catch
+- `routers/admin/users.py`'s `set_user_password`: stamps
+  `user.password_changed_at = utcnow()`, invalidating any tokens the
+  target user currently holds — same effect as the self-service path
+- `routers/admin/_html.py`: account-action cards are now laid out in a
+  two-column `.actions-grid` (responsive: collapses to one column on
+  narrow viewport widths)
+- `routers/social.py`'s `list_following` / `list_followers`: apply
+  `_DEFAULT_LIST_LIMIT = 60` when `limit` is omitted; previously returned
+  an unbounded response regardless of how large the follower/following list was
+- `users/export_queue.py`'s `_run`: export failure no longer exposes the
+  raw exception string via `ExportJob.error` or `GET /export/data/status`
+  — a generic user-facing message is stored instead; the real exception
+  still reaches the server log. Same treatment applied to import failures
+  in `routers/imports.py`'s `_run_import`
+- `database.py`: `create_engine` now passes `connect_args={"connect_timeout": 5}`
+  — caps new connection attempts at 5 seconds so a request fails fast with
+  a clear error when the DB host is unreachable, instead of hanging until
+  the OS TCP timeout fires
 
 ### Removed
 
@@ -249,6 +380,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   stat counters from `GET /stats` response
 
 ### Fixed
+
+- TV Time import: shows resolved via the concurrent-insert-race path
+  (same-run `duplicate_in_run`) were previously counted as "already in your
+  library" even on a brand-new account — `duplicate_in_run` now correctly
+  skips them in every counting branch so they neither inflate "already in
+  library" nor double-count a title that one sibling worker already claimed
 
 - `users/accounts.py`'s `delete_account`: `EpisodeCustomStill` rows have no
   ORM relationship on `LibraryEntry` and no DB-level `ON DELETE CASCADE`, so

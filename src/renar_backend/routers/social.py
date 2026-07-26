@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/07/17 19:40:36.383004
+Revised: 2026/07/21 14:01:18.418063
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -23,6 +23,12 @@ from ..users.premium import flair
 
 router = APIRouter(tags=["social"])
 _log = logging.getLogger(__name__)
+
+# default page size when the caller omits `limit` — same unbounded-default
+# bug shape as `list_media` (see routers/media.py's `_DEFAULT_LIST_LIMIT`),
+# fixed the same way: a very large follower/following list would otherwise
+# come back in one response.
+_DEFAULT_LIST_LIMIT = 60
 
 
 def _user_or_404(user_id: int, db: Session) -> User:
@@ -198,9 +204,9 @@ def list_following(
     me: User = Depends(get_current_user),
 ):
     _user_or_404(user_id, db)
+    limit = _DEFAULT_LIST_LIMIT if limit is None else limit
     query = db.query(Follow).filter(Follow.follower_id == user_id).order_by(Follow.created_at.desc(), Follow.id.desc())
-    if limit is not None:
-        query = query.offset(offset).limit(limit)
+    query = query.offset(offset).limit(limit)
     follows = query.all()
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_([f.followed_id for f in follows]))}
     return _public_users_batch([users_by_id[f.followed_id] for f in follows], me, db)
@@ -215,9 +221,9 @@ def list_followers(
     me: User = Depends(get_current_user),
 ):
     _user_or_404(user_id, db)
+    limit = _DEFAULT_LIST_LIMIT if limit is None else limit
     query = db.query(Follow).filter(Follow.followed_id == user_id).order_by(Follow.created_at.desc(), Follow.id.desc())
-    if limit is not None:
-        query = query.offset(offset).limit(limit)
+    query = query.offset(offset).limit(limit)
     follows = query.all()
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_([f.follower_id for f in follows]))}
     return _public_users_batch([users_by_id[f.follower_id] for f in follows], me, db)

@@ -159,7 +159,7 @@ def _patch_tmdb(
     monkeypatch, show_matches: dict[str, tuple[dict | None, dict]] | None = None, movie_match: dict | None = None
 ):
     monkeypatch.setattr(imports_mod, "_match_show", lambda tvdb_id, name: (show_matches or {}).get(tvdb_id, (None, {})))
-    monkeypatch.setattr(imports_mod, "_search_movie", lambda name, year: movie_match)
+    monkeypatch.setattr(imports_mod, "_search_movie", lambda name, year: (movie_match, False))
 
 
 # ---------- shows: new season on an already-tracked show ----------
@@ -765,7 +765,11 @@ def test_concurrent_rows_resolving_to_same_show_insert_exactly_once(client, alic
 
     assert summary.get("error") is None
     assert summary["shows"] == 1
-    assert summary["skipped"] == 39
+    # The 39 race losers are same-run duplicates of a brand-new show, not
+    # pre-existing library entries — they must not inflate "skipped" (which
+    # reads to the user as "already in your library"), since nothing here
+    # existed before this import ran.
+    assert summary["skipped"] == 0
     assert _entry_count(user["id"]) == 1
     assert _title_count(999) == 1
 

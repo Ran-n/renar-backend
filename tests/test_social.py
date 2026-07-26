@@ -122,6 +122,32 @@ def test_followers_list_paginated(client, bob, make_user):
     assert [u["username"] for u in page2] == ["follower0"]
 
 
+def test_following_list_default_limit(client, alice, make_user):
+    alice_user, headers = alice
+    followed = [make_user(f"followed{i}")[0] for i in range(65)]
+    for user in followed:
+        client.post(f"/users/{user['id']}/follow", headers=headers)
+
+    capped = client.get(f"/users/{alice_user['id']}/following", headers=headers).json()
+    assert len(capped) == 60  # default page size when `limit` is omitted
+
+    page2 = client.get(f"/users/{alice_user['id']}/following", params={"offset": 60}, headers=headers).json()
+    assert len(page2) == 5
+
+
+def test_followers_list_default_limit(client, bob, make_user):
+    bob_user, _ = bob
+    followers = [make_user(f"follower{i}") for i in range(65)]
+    for _, hdrs in followers:
+        client.post(f"/users/{bob_user['id']}/follow", headers=hdrs)
+
+    capped = client.get(f"/users/{bob_user['id']}/followers", headers=hdrs).json()
+    assert len(capped) == 60  # default page size when `limit` is omitted
+
+    page2 = client.get(f"/users/{bob_user['id']}/followers", params={"offset": 60}, headers=hdrs).json()
+    assert len(page2) == 5
+
+
 def test_user_media_is_visible_to_others(client, alice, bob):
     _, headers = alice
     bob_user, bob_headers = bob

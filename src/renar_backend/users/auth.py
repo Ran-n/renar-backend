@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.008319
-Revised: 2026/07/21 09:51:04.963920
+Revised: 2026/07/21 14:55:07.689383
 """
 
 import logging
@@ -61,8 +61,14 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def create_access_token(user_id: int) -> str:
-    expire = datetime.now(UTC) + timedelta(minutes=settings.access_token_expire_minutes)
-    payload = {"sub": str(user_id), "exp": expire}
+    now = datetime.now(UTC)
+    expire = now + timedelta(minutes=settings.access_token_expire_minutes)
+    # "iat" is a registered JWT claim PyJWT floors to whole seconds — too
+    # coarse to tell apart a token minted just before vs. just after a
+    # password change that happens within the same second. "iat_ts" carries
+    # the same instant as a plain float, full microsecond precision intact,
+    # for get_current_user's revocation check.
+    payload = {"sub": str(user_id), "exp": expire, "iat": now, "iat_ts": now.timestamp()}
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
 
 
@@ -86,11 +92,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
         user_id = int(payload["sub"])
+        issued_at = payload.get("iat_ts")
     except (jwt.PyJWTError, KeyError, ValueError):
         raise credentials_error from None
 
     user = db.get(User, user_id)
     if user is None:
+        raise credentials_error
+    if user.password_changed_at is not None and (
+        issued_at is None or datetime.fromtimestamp(issued_at, UTC) < user.password_changed_at
+    ):
         raise credentials_error
     if user.banned:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account has been banned")
@@ -112,13 +123,27 @@ def require_premium(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+# Every current reader of last_active_at (admin analytics' active_today/
+# active_7d, the admin user-detail page, the GDPR export) only needs
+# day-level accuracy, so a write on every single authenticated request is
+# far more precision than anything consumes — and it's a DB write+commit on
+# the single busiest dependency in the app. Skipping the write when the
+# existing value is already fresh enough cuts that cost by ~two orders of
+# magnitude for an active user without changing anything any reader sees.
+_ACTIVITY_TOUCH_INTERVAL = timedelta(minutes=15)
+
+
 def _touch_activity(user: User, db: Session) -> None:
-    """Record the moment of this authenticated request. Request *counts* are
-    not kept here — they are derived from endpoint_stats / request_days,
-    which UsageTrackingMiddleware maintains.
+    """Record the moment of this authenticated request, throttled to at most
+    once per `_ACTIVITY_TOUCH_INTERVAL` per user. Request *counts* are not
+    kept here — they are derived from endpoint_stats / request_days, which
+    UsageTrackingMiddleware maintains.
     """
+    now = utcnow()
+    if user.last_active_at is not None and now - user.last_active_at < _ACTIVITY_TOUCH_INTERVAL:
+        return
     db.query(User).filter(User.id == user.id).update(
-        {User.last_active_at: utcnow()},
+        {User.last_active_at: now},
         synchronize_session=False,
     )
     db.commit()

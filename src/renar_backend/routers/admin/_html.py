@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/18 00:26:59.254832
+Revised: 2026/07/21 20:57:25.419445
 
 Shared HTML/CSS primitives for the admin control panel.
 
@@ -119,6 +119,8 @@ _RESPONSIVE_CSS = """
       .detail-head { flex-wrap: wrap; }
       .detail-avatar, .detail-avatar-fallback { width: 48px; height: 48px; }
       .detail-name { font-size: 1.1rem; }
+
+      .actions-grid { grid-template-columns: 1fr; }
 
       .charts-grid { grid-template-columns: 1fr; }
       .hbar-row { grid-template-columns: 68px 1fr 30px; gap: .4rem; }
@@ -346,9 +348,13 @@ _DETAIL_CSS = """
     }
 
     /* Admin account-action forms */
+    .actions-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem;
+      margin-bottom: 1.25rem; align-items: start;
+    }
     .actions-card {
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: 12px; padding: 1.1rem 1.25rem; margin-bottom: 1.25rem;
+      border-radius: 12px; padding: 1.1rem 1.25rem; margin-bottom: 0;
     }
     .actions-title { font-size: .82rem; font-weight: 600; color: var(--text); margin-bottom: .9rem; }
     .action-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .6rem; }

@@ -95,14 +95,17 @@ def _run(user_id: int) -> None:
             job.error = None
             db.commit()
         _progress[user_id] = {"state": "ready"}
-    except Exception as exc:
+    except Exception:
         _log.warning("export failed for user_id=%s", user_id, exc_info=True)
         db.rollback()
+        # The real exception goes to the log above only — callers only ever
+        # see a generic message via GET /export/data/status.
+        generic_error = "Export failed due to an internal error. Please try again or contact support."
         job = db.get(ExportJob, user_id)
         if job is not None:
             job.finished = True
-            job.error = str(exc)
+            job.error = generic_error
             db.commit()
-        _progress[user_id] = {"state": "failed", "error": str(exc)}
+        _progress[user_id] = {"state": "failed", "error": generic_error}
     finally:
         db.close()

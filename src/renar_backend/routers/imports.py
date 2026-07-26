@@ -28,8 +28,10 @@ Runs in a background thread; progress is polled via GET /import/tvtime/status.
 """
 
 import csv
+import difflib
 import io
 import logging
+import re
 import threading
 import time
 import zipfile
@@ -67,6 +69,14 @@ _log = logging.getLogger(__name__)
 # handles the concurrent writes fine; the DB's unique constraints are the
 # authority on dedupe races (see _upsert_library_entry).
 MATCH_WORKERS = 8
+
+# Each upload is read fully into memory (up to 200 MB, see import_tvtime) and
+# then processed on its own thread — with no cap, N users importing at once
+# could each hold ~200 MB simultaneously. This bounds concurrent imports
+# process-wide; anyone past the cap gets a 429 and can retry shortly instead
+# of piling onto memory.
+MAX_CONCURRENT_IMPORTS = 3
+_import_slots = threading.Semaphore(MAX_CONCURRENT_IMPORTS)
 
 _progress: dict[int, dict] = {}
 
@@ -126,11 +136,100 @@ def _find_tv_by_tvdb(tvdb_id: str) -> dict | None:
         return None
 
 
+# TV Time disambiguates same-named shows by appending a trailing year, either
+# bare ("Shogun 1980") or parenthesized ("Shogun (1980)") — TMDB's /search/tv
+# matches on title text, so a literal year suffix in the query routinely
+# returns zero results even though the show exists under its plain title.
+_TRAILING_YEAR_RE = re.compile(r"^(?P<base>.+\S)\s*\(?(?P<year>19\d{2}|20\d{2})\)?$")
+
+
+def _split_trailing_year(name: str) -> tuple[str, str | None]:
+    m = _TRAILING_YEAR_RE.match(name.strip())
+    if not m:
+        return name, None
+    return m.group("base").strip(), m.group("year")
+
+
+# CJK scripts have no real word-boundary spaces of their own — a stray space
+# introduced by the export (observed on Japanese titles, e.g. TV Time's
+# "ドラゴンボール超スーパー ヒーロー" vs TMDB's "ドラゴンボール超 スーパーヒーロー")
+# is enough to turn an otherwise-correct query into zero results, since TMDB's
+# search tokenizes on whitespace. Only applied when CJK characters are
+# present — stripping spaces from a Latin title would just break it further.
+_CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
+
+
+def _cjk_space_stripped(name: str) -> str | None:
+    if " " in name and _CJK_RE.search(name):
+        return name.replace(" ", "")
+    return None
+
+
+# Last-resort fallback for near-miss export data — a typo or a wrong-script
+# letter substitution (e.g. TV Time exporting "طعم كيلاس" for what TMDB
+# stores as "طعم گيلاس", or "O Corpo Oberto" for "O Corpo Aberto") — that
+# TMDB's own search won't surface at all under the exact string, since it
+# does no fuzzy matching server-side. Dropping the last word broadens the
+# query enough to surface a candidate pool; a high similarity threshold on
+# the result is what keeps this from silently attaching the wrong title to
+# someone's library — a bad guess here is worse than leaving it unmatched.
+_FUZZY_THRESHOLD = 0.8
+_FUZZY_MAX_TRIMS = 2
+
+
+def _fuzzy_ratio(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, a.strip().casefold(), b.strip().casefold()).ratio()
+
+
+def _fuzzy_search(name: str, kind: str) -> dict | None:
+    query = name
+    candidates: dict[int, dict] = {}
+    for _ in range(_FUZZY_MAX_TRIMS):
+        query, _, last_word = query.rpartition(" ")
+        if not query or not last_word or len(query) < 3:
+            break
+        try:
+            data = tmdb_get(f"/search/{kind}", {"query": query, "include_adult": "false"})
+        except Exception:
+            _log.warning("TMDB fuzzy %s search failed for %r", kind, query, exc_info=True)
+            continue
+        for r in data.get("results") or []:
+            candidates[r["id"]] = r
+
+    if not candidates:
+        return None
+
+    title_field = "title" if kind == "movie" else "name"
+    orig_field = "original_title" if kind == "movie" else "original_name"
+    best, best_score = None, 0.0
+    for r in candidates.values():
+        score = max(_fuzzy_ratio(name, r.get(title_field) or ""), _fuzzy_ratio(name, r.get(orig_field) or ""))
+        if score > best_score:
+            best, best_score = r, score
+    return best if best_score >= _FUZZY_THRESHOLD else None
+
+
 def _search_tv(name: str) -> dict | None:
+    base_name, year = _split_trailing_year(name)
     try:
-        data = tmdb_get("/search/tv", {"query": name, "include_adult": "false"})
+        params = {"query": base_name, "include_adult": "false"}
+        if year:
+            params["first_air_date_year"] = year
+        data = tmdb_get("/search/tv", params)
         results = data.get("results") or []
-        return results[0] if results else None
+        if not results and year:  # retry without the year constraint
+            data = tmdb_get("/search/tv", {"query": base_name, "include_adult": "false"})
+            results = data.get("results") or []
+        if not results and base_name != name:  # last resort: the verbatim query
+            data = tmdb_get("/search/tv", {"query": name, "include_adult": "false"})
+            results = data.get("results") or []
+        stripped = _cjk_space_stripped(name)
+        if not results and stripped:
+            data = tmdb_get("/search/tv", {"query": stripped, "include_adult": "false"})
+            results = data.get("results") or []
+        if results:
+            return results[0]
+        return _fuzzy_search(name, "tv")
     except Exception:
         _log.warning("TMDB tv search failed for %r", name, exc_info=True)
         return None
@@ -214,7 +313,14 @@ def _match_show(tvdb_id: str, name: str) -> tuple[dict | None, dict]:
     return found, details
 
 
-def _search_movie(name: str, year: str | None) -> dict | None:
+def _search_movie(name: str, year: str | None) -> tuple[dict | None, bool]:
+    """Returns (result, is_tv). TV Time sometimes logs an item as a movie
+    whose TMDB entry is actually a TV show (observed with short-form/
+    streaming-original series, e.g. "Die Hart 2: Die Harter") — a plain
+    movie search finds nothing for those, so once the movie-side retries are
+    exhausted we also try `_search_tv`, which already tries harder
+    (year-splitting, CJK-space retry) than duplicating that logic here.
+    """
     try:
         params = {"query": name, "include_adult": "false"}
         if year:
@@ -224,10 +330,117 @@ def _search_movie(name: str, year: str | None) -> dict | None:
         if not results and year:  # retry without the year constraint
             data = tmdb_get("/search/movie", {"query": name, "include_adult": "false"})
             results = data.get("results") or []
-        return results[0] if results else None
+        stripped = _cjk_space_stripped(name)
+        if not results and stripped:
+            data = tmdb_get("/search/movie", {"query": stripped, "include_adult": "false"})
+            results = data.get("results") or []
+        if results:
+            return results[0], False
     except Exception:
         _log.warning("TMDB movie search failed for %r", name, exc_info=True)
-        return None
+        return None, False
+    tv_found = _search_tv(name)  # already tries its own fuzzy fallback internally
+    if tv_found:
+        return tv_found, True
+    fuzzy_found = _fuzzy_search(name, "movie")
+    return (fuzzy_found, False) if fuzzy_found else (None, False)
+
+
+# TV Time has no season/episode concept for one-off specials and OVAs, so it
+# logs them as a standalone item instead of folding them into the parent
+# show's episode history — title search then fails outright, since neither a
+# show nor a movie by that exact name exists on TMDB; it only exists as one
+# specific episode of a show. TV Time uses more than one naming convention
+# for this, so several splits are tried, broadest/most reliable first:
+#   "進撃の巨人 - Wall Sina, Goodbye 前編"        (Attack on Titan S0E17)
+#   "Thus Spoke Kishibe Rohan 2: Mutsu-kabe Hill" (a franchise-entry ordinal
+#                                                   on the show side, S1E2)
+# A wrong split just fails to resolve a show, or resolves one whose episode
+# list doesn't contain the episode part, and falls through safely either way
+# — see _match_episode_in_pool's containment check and similarity floor.
+def _show_episode_splits(name: str) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    if " - " in name:
+        show_part, _, episode_part = name.partition(" - ")
+        candidates.append((show_part.strip(), episode_part.strip()))
+    if ": " in name:
+        show_part, _, episode_part = name.rpartition(": ")
+        show_part, episode_part = show_part.strip(), episode_part.strip()
+        if show_part and episode_part:
+            candidates.append((show_part, episode_part))
+            trimmed = re.sub(r"\s+\d{1,2}$", "", show_part)
+            if trimmed != show_part:
+                candidates.append((trimmed, episode_part))
+    return [(s, e) for s, e in candidates if s and e]
+
+
+def _show_episode_pool(tmdb_id: int) -> list[dict]:
+    """Every episode of a show, season 0 (specials) included, as {season,
+    episode, name} — the only way to check whether a name is one specific
+    episode, since TMDB has no "search episodes by name" endpoint.
+    """
+    episodes: list[dict] = []
+    try:
+        show = tmdb_get(f"/tv/{tmdb_id}")
+    except Exception:
+        _log.warning("TMDB show fetch failed for tmdb_id=%s", tmdb_id, exc_info=True)
+        return episodes
+    for s in show.get("seasons") or []:
+        season_number = s.get("season_number")
+        if season_number is None:
+            continue
+        try:
+            season = tmdb_get(f"/tv/{tmdb_id}/season/{season_number}")
+        except Exception:
+            _log.warning("TMDB season fetch failed for tmdb_id=%s season=%s", tmdb_id, season_number, exc_info=True)
+            continue
+        for ep in season.get("episodes") or []:
+            episodes.append({
+                "season": season_number,
+                "episode": ep.get("episode_number"),
+                "name": ep.get("name") or "",
+            })
+    return episodes
+
+
+_EPISODE_DECORATION_RE = re.compile(r"[(（][^)）]*[)）]|[前後]編\s*$")
+_EPISODE_THRESHOLD = 0.75
+
+
+def _episode_core(name: str) -> str:
+    """Strip parenthetical part-numbers ("(1)") and the Japanese part-marker
+    suffixes ("前編"/"後編", "part 1"/"part 2") that differ between how TV
+    Time names a special and how TMDB's episode list does — leaving just the
+    part likely to appear, verbatim, inside the other string.
+    """
+    return _EPISODE_DECORATION_RE.sub("", name).strip().casefold()
+
+
+def _episode_similarity(episode_part: str, candidate_name: str) -> float:
+    """A resolved show's own episode named "Lost Girls: Wall Sina, Goodbye
+    (1)" is a superset of the export's plainer "Wall Sina, Goodbye 前編", not
+    a near-identical string — so containment of one's decoration-stripped
+    core in the other is a stronger, and here safer, signal than raw
+    character-sequence similarity: a wrong pick only misfiles one episode of
+    a show already anchored by an earlier exact match, not a whole extra
+    title.
+    """
+    a, b = episode_part.strip().casefold(), candidate_name.strip().casefold()
+    if not a or not b:
+        return 0.0
+    core_a, core_b = _episode_core(a), _episode_core(b)
+    if (core_a and core_a in b) or (core_b and core_b in a):
+        return 0.9
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _match_episode_in_pool(episode_part: str, pool: list[dict]) -> dict | None:
+    best, best_score = None, 0.0
+    for ep in pool:
+        score = _episode_similarity(episode_part, ep["name"])
+        if score > best_score:
+            best, best_score = ep, score
+    return best if best is not None and best_score >= _EPISODE_THRESHOLD and best["episode"] is not None else None
 
 
 def _reconcile_show_entry(entry: LibraryEntry, incoming: dict) -> bool:
@@ -274,7 +487,7 @@ def _upsert_library_entry(
     tmdb_key: tuple | None,
     existing_map: dict,
     reconcile,
-) -> tuple[int | None, bool, bool, bool]:
+) -> tuple[int | None, bool, bool, bool, bool]:
     """Insert or reconcile one LibraryEntry, on its own session.
 
     `existing_map` holds the identities the user already tracked *before*
@@ -290,9 +503,14 @@ def _upsert_library_entry(
     looks up what the winner just created, and reconciles into that instead
     of losing its data.
 
-    Returns (item_id, is_new, changed, error). `error` is only True when the
-    row failed for an infra reason (DB hiccup, unexpected exception) — the
-    caller counts that separately from a normal dedupe skip.
+    Returns (item_id, is_new, changed, error, duplicate_in_run). `error` is
+    only True when the row failed for an infra reason (DB hiccup, unexpected
+    exception) — the caller counts that separately from a normal dedupe
+    skip. `duplicate_in_run` is True only for the race loser above: the
+    identity wasn't in `existing_map` (so nothing pre-existed for this user
+    before the import started), it just lost a same-run race to a sibling
+    row for the same title — the caller must not count that as "already in
+    your library", since on a brand-new account nothing could be.
     """
     item_id = existing_map.get(tmdb_key) if tmdb_key else None
     if item_id is None:
@@ -316,7 +534,7 @@ def _upsert_library_entry(
                     else None
                 )
                 if winner is None:
-                    return None, False, False, False
+                    return None, False, False, False, False
                 if tmdb_id is not None and winner_title is not None:
                     backfill_title_tmdb_id(
                         db,
@@ -328,12 +546,12 @@ def _upsert_library_entry(
                     )
                 changed = reconcile(winner, entry_fields)
                 db.commit()
-                return winner.id, False, changed, False
+                return winner.id, False, changed, False, True
             db.refresh(entry)
-            return entry.id, True, False, False
+            return entry.id, True, False, False, False
         entry = db.get(LibraryEntry, item_id)
         if entry is None:
-            return None, False, False, False
+            return None, False, False, False, False
         if tmdb_id is not None:
             title_row = db.get(Title, entry.title_id)
             if title_row is not None:
@@ -347,11 +565,11 @@ def _upsert_library_entry(
                 )
         changed = reconcile(entry, entry_fields)
         db.commit()
-        return item_id, False, changed, False
+        return item_id, False, changed, False, False
     except Exception:
         db.rollback()
         _log.warning("Upsert failed for %r (user_id=%s)", title, user_id, exc_info=True)
-        return None, is_new, False, True
+        return None, is_new, False, True, False
     finally:
         db.close()
 
@@ -363,7 +581,7 @@ def _process_show(
     for_later: set,
     rates: dict,
     existing_map: dict,
-) -> tuple[str, int | None, str | None, bool, bool, bool] | None:
+) -> tuple[str, int | None, str | None, bool, bool, bool, bool] | None:
     """Match one show row against TMDB and insert it. Runs in a worker thread."""
     tvdb_id = row.get("tv_show_id") or ""
     name = (row.get("tv_show_name") or "").strip()
@@ -405,7 +623,7 @@ def _process_show(
     # different TVDB entries can resolve to the same TMDB show
     title_key = ("tv_show", normalize_title_key(final_title))
     tmdb_key = ("tv_show", tmdb_id) if tmdb_id else None
-    item_id, is_new, changed, error = _upsert_library_entry(
+    item_id, is_new, changed, error, duplicate_in_run = _upsert_library_entry(
         user_id,
         MediaType.tv_show,
         tmdb_id,
@@ -417,7 +635,7 @@ def _process_show(
         existing_map,
         _reconcile_show_entry,
     )
-    return tvdb_id, item_id, unmatched, is_new, changed, error
+    return tvdb_id, item_id, unmatched, is_new, changed, error, duplicate_in_run
 
 
 def _process_movie(
@@ -425,13 +643,16 @@ def _process_movie(
     name: str,
     m: dict,
     existing_map: dict,
-) -> tuple[int | None, str | None, bool, bool, bool]:
+) -> tuple[int | None, str | None, bool, bool, bool, bool]:
     """Match one movie against TMDB and insert it. Runs in a worker thread."""
-    found = _search_movie(name, m["year"])
+    found, is_tv = _search_movie(name, m["year"])
     tmdb_id = found["id"] if found else None
-    final_title = ((found or {}).get("title") or name).strip()
+    # A TV fallback match uses "name"/"first_air_date" instead of the movie
+    # fields; recorded as a tv_show entry so its library card/poster/genres
+    # come from the right TMDB endpoint, not a nonexistent movie one.
+    final_title = ((found or {}).get("title" if not is_tv else "name") or name).strip()
     unmatched = name if not found else None
-    release = (found or {}).get("release_date") or ""
+    release = (found or {}).get("release_date" if not is_tv else "first_air_date") or ""
     title_meta = {
         "year": int(release[:4]) if release[:4].isdigit() else (int(m["year"]) if m["year"] else None),
         "runtime_minutes": m["runtime"],
@@ -440,11 +661,13 @@ def _process_movie(
     entry_fields = {
         "status": WatchStatus.completed if m["watched"] else WatchStatus.want_to_watch,
     }
-    title_key = ("film", normalize_title_key(final_title))
-    tmdb_key = ("film", tmdb_id) if tmdb_id else None
-    item_id, is_new, changed, error = _upsert_library_entry(
+    media_type = MediaType.tv_show if is_tv else MediaType.film
+    key_kind = "tv_show" if is_tv else "film"
+    title_key = (key_kind, normalize_title_key(final_title))
+    tmdb_key = (key_kind, tmdb_id) if tmdb_id else None
+    item_id, is_new, changed, error, duplicate_in_run = _upsert_library_entry(
         user_id,
-        MediaType.film,
+        media_type,
         tmdb_id,
         final_title,
         title_meta,
@@ -454,7 +677,7 @@ def _process_movie(
         existing_map,
         _reconcile_movie_entry,
     )
-    return item_id, unmatched, is_new, changed, error
+    return item_id, unmatched, is_new, changed, error, duplicate_in_run
 
 
 def _run_import(user_id: int, zip_bytes: bytes):
@@ -509,7 +732,7 @@ def _run_import(user_id: int, zip_bytes: bytes):
         # worth of episodes in the next step.
         _set(user_id, stage="Matching shows", done=0, total=len(show_rows))
         items_by_tvdb: dict[str, int] = {}
-        show_results: list[tuple[str, int, bool, bool]] = []
+        show_results: list[tuple[str, int, bool, bool, bool]] = []
         done = 0
         with ThreadPoolExecutor(max_workers=MATCH_WORKERS) as pool:
             futures = [
@@ -521,10 +744,10 @@ def _run_import(user_id: int, zip_bytes: bytes):
                 result = fut.result()
                 if result is None:
                     continue
-                tvdb_id, item_id, unmatched, is_new, changed, error = result
+                tvdb_id, item_id, unmatched, is_new, changed, error, duplicate_in_run = result
                 if item_id is not None:
                     items_by_tvdb[tvdb_id] = item_id
-                    show_results.append((tvdb_id, item_id, is_new, changed))
+                    show_results.append((tvdb_id, item_id, is_new, changed, duplicate_in_run))
                 elif error:
                     summary["errors"] += 1
                 else:
@@ -571,9 +794,17 @@ def _run_import(user_id: int, zip_bytes: bytes):
             summary["episodes"] += 1
         db.commit()
 
-        for _tvdb_id, item_id, is_new, changed in show_results:
+        for _tvdb_id, item_id, is_new, changed, duplicate_in_run in show_results:
             if is_new:
                 summary["shows"] += 1
+            elif duplicate_in_run:
+                # This row lost a same-run race to a sibling that resolved to
+                # the same identity — that sibling already put this item_id
+                # in exactly one bucket above (new, or updated via touching
+                # episodes). Counting it again here — even as "updated",
+                # since the same touched_items membership would otherwise
+                # qualify it — would double-count one imported title as two.
+                continue
             elif changed or item_id in touched_items:
                 summary["updated"] += 1
             else:
@@ -640,11 +871,13 @@ def _run_import(user_id: int, zip_bytes: bytes):
             for fut in as_completed(fut_to_name):
                 done += 1
                 _set(user_id, done=done)
-                item_id, unmatched, is_new, changed, error = fut.result()
+                item_id, unmatched, is_new, changed, error, duplicate_in_run = fut.result()
                 if item_id is not None:
                     items_by_movie[normalize_title_key(fut_to_name[fut])] = item_id
                     if is_new:
                         summary["movies"] += 1
+                    elif duplicate_in_run:
+                        pass  # already counted once by the sibling that won the insert race
                     elif changed:
                         summary["updated"] += 1
                     else:
@@ -655,6 +888,85 @@ def _run_import(user_id: int, zip_bytes: bytes):
                     summary["skipped"] += 1
                 if unmatched:
                     summary["unmatched"].append(unmatched)
+
+        # ---------- one-off special/OVA fallback ----------
+        # Anything still unmatched gets one more look: if it splits into a
+        # show name and an episode name (see _show_episode_splits), the show
+        # resolves, and that show actually has an episode with that name
+        # (specials included), it's really a watch on that show, not a
+        # missing title. Several candidate splits are tried per name since
+        # TV Time doesn't use one consistent naming convention for these.
+        still_unmatched: list[str] = []
+        season_cache: dict[int, list[dict]] = {}
+        touched_by_fallback: set[int] = set()
+        for name in summary["unmatched"]:
+            show_found = None
+            episode = None
+            show_part = None
+            for candidate_show, candidate_episode in _show_episode_splits(name):
+                found = _search_tv(candidate_show)
+                if not found:
+                    continue
+                tmdb_id = found["id"]
+                pool = season_cache.get(tmdb_id)
+                if pool is None:
+                    pool = _show_episode_pool(tmdb_id)
+                    season_cache[tmdb_id] = pool
+                matched = _match_episode_in_pool(candidate_episode, pool)
+                if matched is not None:
+                    show_found, episode, show_part = found, matched, candidate_show
+                    break
+            if episode is None:
+                still_unmatched.append(name)
+                continue
+
+            tmdb_id = show_found["id"]
+            show_title = show_found.get("name") or show_part
+            title_row = find_title(db, MediaType.tv_show, tmdb_id, show_title)
+            entry = (
+                db.query(LibraryEntry).filter_by(user_id=user_id, title_id=title_row.id).first()
+                if title_row is not None
+                else None
+            )
+            if entry is None:
+                # not tracked as a show in this import at all — add it so the
+                # episode has somewhere to attach, same as any other new show
+                db_title = find_or_create_title(db, MediaType.tv_show, tmdb_id, show_title)
+                entry = LibraryEntry(user_id=user_id, title_id=db_title.id, status=WatchStatus.watching)
+                db.add(entry)
+                db.flush()
+
+            key = (entry.id, episode["season"], episode["episode"])
+            if key not in seen:
+                seen.add(key)
+                db.add(
+                    EpisodeWatch(
+                        media_item_id=entry.id,
+                        season=episode["season"],
+                        episode=episode["episode"],
+                        watched_at=datetime.now(UTC),
+                    )
+                )
+                summary["episodes"] += 1
+                touched_by_fallback.add(entry.id)
+        summary["unmatched"] = still_unmatched
+        db.commit()
+
+        # same counters/auto-status sync as the main show loop above, scoped
+        # to just the handful of entries this fallback touched
+        for item_id in touched_by_fallback:
+            watches = db.query(EpisodeWatch).filter(EpisodeWatch.media_item_id == item_id).all()
+            item = db.get(LibraryEntry, item_id)
+            item.episodes_watched = len(watches)
+            last = max(watches, key=lambda w: (w.season, w.episode))
+            item.current_season, item.current_episode = last.season, last.episode
+            if (
+                item.total_episodes
+                and item.episodes_watched >= item.total_episodes
+                and item.status not in (WatchStatus.dropped, WatchStatus.paused)
+            ):
+                item.status = WatchStatus.completed
+        db.commit()
 
         # ---------- comments ----------
         # The export's user_id column is constant across every row (verified
@@ -926,13 +1238,18 @@ def _run_import(user_id: int, zip_bytes: bytes):
             summary["errors"],
             len(summary["unmatched"]),
         )
-    except Exception as exc:
+    except Exception:
         db.rollback()
         _log.exception("TV Time import failed for user_id=%s", user_id)
-        _set(user_id, stage="Failed", finished=True, error=str(exc), summary=summary)
-        _mark_job(user_id, finished=True, error=str(exc), summary=summary)
+        # The real exception (which can include file paths, driver internals,
+        # or DB error text) goes to the server log above only — callers only
+        # ever see a generic message via GET /import/tvtime/status.
+        generic_error = "Import failed due to an internal error. Please try again or contact support."
+        _set(user_id, stage="Failed", finished=True, error=generic_error, summary=summary)
+        _mark_job(user_id, finished=True, error=generic_error, summary=summary)
     finally:
         db.close()
+        _import_slots.release()
 
 
 @router.post("/tvtime", status_code=status.HTTP_202_ACCEPTED)
@@ -943,13 +1260,27 @@ async def import_tvtime(
     running = _progress.get(user.id)
     if running and not running.get("finished", True):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An import is already running")
-    data = await file.read()
-    if len(data) > 200 * 1024 * 1024:
-        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="File too large")
+    # Acquired before reading the body — that's the expensive part (up to
+    # 200 MB held in memory) this slot exists to bound. Released in
+    # _run_import's finally.
+    if not _import_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many imports running right now. Please try again shortly.",
+        )
     try:
-        zipfile.ZipFile(io.BytesIO(data)).namelist()
-    except zipfile.BadZipFile as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="That is not a zip file") from exc
+        data = await file.read()
+        if len(data) > 200 * 1024 * 1024:
+            raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="File too large")
+        try:
+            zipfile.ZipFile(io.BytesIO(data)).namelist()
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="That is not a zip file"
+            ) from exc
+    except Exception:
+        _import_slots.release()
+        raise
     _progress[user.id] = {"stage": "Starting", "done": 0, "total": 0, "finished": False, "error": None, "summary": None}
     _mark_job(user.id, finished=False, error=None, summary=None)
     threading.Thread(target=_run_import, args=(user.id, data), daemon=True).start()
