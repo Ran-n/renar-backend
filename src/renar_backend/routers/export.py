@@ -11,6 +11,7 @@ why premium only affects queue order, never whether the export exists.
 """
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
@@ -72,4 +73,8 @@ def download_export(user: User = Depends(get_current_user)):
     path = export_path(user.id)
     if not path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No export ready for this account")
-    return FileResponse(path, media_type="application/zip", filename="renar-export.zip")
+    # mtime is when build_export finished writing this file — the export's
+    # own timestamp, not the moment it happens to be downloaded.
+    built_at = datetime.fromtimestamp(path.stat().st_mtime, UTC).strftime("%Y%m%d-%H%M%S")
+    filename = f"renar-export-{built_at}.7z"
+    return FileResponse(path, media_type="application/x-7z-compressed", filename=filename)

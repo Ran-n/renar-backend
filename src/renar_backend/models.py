@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/22 09:53:49.509513
+Revised: 2026/07/27 09:51:03.045699
 """
 
 import enum
@@ -1017,20 +1017,28 @@ class CommentReport(Base):
 
 
 class ImportJob(Base):
-    """Durable marker for a user's last TV Time import outcome.
+    """Durable marker for a user's last outcome from a given import origin
+    (routers/imports.py's registry — TV Time, a Renar export, and whatever
+    gets added later, e.g. Letterboxd).
 
-    routers/imports.py tracks live progress in an in-memory dict, which
+    Each importer keeps live progress in its own in-memory dict, which
     doesn't survive a server restart — without this row, a restart mid-import
     silently looks identical to "never run" to the status endpoint, and the
     frontend reports a false "Import complete ✓". Written only at job start
     and at completion/failure (not per progress tick), so a status poll that
     finds no in-memory entry can still tell "interrupted" apart from "never
     ran" from this row's `finished` flag.
+
+    Keyed by (user_id, kind) rather than user_id alone: an account can have
+    a past import from more than one origin (e.g. migrated from TV Time,
+    later also restored a Renar export), and each origin's outcome/summary
+    shape is independent of the others'.
     """
 
     __tablename__ = "import_jobs"
 
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(30), primary_key=True)
     finished: Mapped[bool] = mapped_column(Boolean, default=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

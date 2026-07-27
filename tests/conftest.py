@@ -86,9 +86,21 @@ def _fresh_db():
     Base.metadata.create_all(engine)
     engine.dispose()
     from renar_backend import site_settings, task_runs
+    from renar_backend.users import export_queue, renar_import, tvtime_import
 
     task_runs._enabled_cache = None  # each test gets a fresh schema; don't leak a prior test's cache
     site_settings._cache_ts = 0.0  # same: don't serve a cached row from the just-dropped schema
+    # Every importer/exporter keeps LIVE progress in a process-global dict,
+    # keyed by user_id, that survives independently of the DB (a server
+    # restart shouldn't lose in-flight status just because a request happens
+    # to land mid-drop_all). But the schema above just reset — and since ids
+    # restart at 1 each test, the next test's alice reuses the same user_id a
+    # PREVIOUS test's entry is still keyed under. Without this, a status
+    # check the very next test would see a stale "still running"/"done" from
+    # a completely unrelated earlier test.
+    export_queue._progress.clear()
+    renar_import._progress.clear()
+    tvtime_import._progress.clear()
     yield
 
 

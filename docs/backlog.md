@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/07/26 23:27:39.696597 )
+[//]: # (+ Revised: 	2026/07/27 13:50:25.209636 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -93,13 +93,43 @@ Known gaps and follow-ups, not yet scheduled.
   real in the abstract but only for a URL-logging client/middleware that
   doesn't already exist in this codebase.
 
-## TV Time import (`routers/imports.py`)
+## Import system (`routers/imports.py`)
+
+Generalized from a single hardcoded TV Time importer to a registry of
+pluggable importers (`users/tvtime_import.py`, `users/renar_import.py`, ...)
+dispatched by auto-detecting the uploaded file's content — see
+`routers/imports.py`'s module docstring for the registry shape. Old
+endpoints `POST /import/tvtime` and `GET /import/tvtime/status` are now
+`POST /import` (with an optional `claimed_kind` cross-checked against
+detection) and `GET /import/status`; `GET /import/sources` is new, listing
+every registered origin for the frontend's source picker
+([import_view.py](../../renar-frontend/src/renar_frontend/views/profile/import_view.py)).
+`ImportJob` (models.py) is now keyed by `(user_id, kind)` instead of just
+`user_id` (migration `76058e1d65e8`), so an account's TV Time and Renar
+import outcomes don't clobber each other.
+
+- **Renar-native import — added.** `users/renar_import.py` is the write
+  side of GDPR Art. 20 data portability: restores an account from its own
+  `users/export.py` `.7z` export (profile/library/comments/social), so a
+  lost account or a fresh install can get everything back rather than just
+  a document to look at. Every row already carries its own `tmdb_id`, so
+  there's no fuzzy TMDB matching — it runs synchronously on one thread
+  rather than fanning out across a worker pool like the TV Time importer.
+  Merge semantics mirror the TV Time importer: an existing row is only
+  filled in or extended, never clobbered, so re-running (or importing into
+  an account that already has data) is safe. Only `following` is restored
+  on the social side — `followers` isn't this account's to recreate. A
+  reply's parent is only reconstructed when it's also one of this user's
+  own exported comments (same self-reply-only limitation as the TV Time
+  importer, documented below).
+
+### TV Time import
 
 - **Infra failures counted as "skipped" — fixed.** `_upsert_library_entry`
   now returns a fourth `error` flag, set only when its `except Exception`
   fires (a real infra failure), never for an ordinary dedupe skip. Callers
   tally it into a separate `summary["errors"]` counter instead of folding it
-  into `skipped`, and [import_view.py](../../renar-frontend/src/renar_frontend/views/library/import_view.py)
+  into `skipped`, and [import_view.py](../../renar-frontend/src/renar_frontend/views/profile/import_view.py)
   surfaces it as a red "{n} failed due to a server error" line.
 
 - **Transient TMDB failures permanently degrade an entry — reconcile now
@@ -120,8 +150,8 @@ Known gaps and follow-ups, not yet scheduled.
 - **Server restart mid-import fails silently — fixed.** Progress still lives
   in the in-memory `_progress` dict (fine for normal polling), but a new
   durable `ImportJob` row (models.py, migration `b2f7a6d391ea`) is now
-  written at job start and at completion/failure. `GET /import/tvtime/status`
-  falls back to it whenever `_progress` has nothing for the user (a new
+  written at job start and at completion/failure. `GET /import/status`
+  (was `/import/tvtime/status`) falls back to it whenever `_progress` has nothing for the user (a new
   process after a restart): `finished=False` there means the job never
   reported back, so the endpoint now returns an explicit "Import was
   interrupted by a server restart" error instead of a fabricated "Never run"
@@ -173,7 +203,7 @@ Known gaps and follow-ups, not yet scheduled.
   endpoint already does. TV Time gives one timestamp per row, not one per
   rewatch, so every synthesized event for a `cpt` > 1 row shares it.
 
-- **Import coverage panel — added.** [import_view.py](../../renar-frontend/src/renar_frontend/views/library/import_view.py)
+- **Import coverage panel — added.** [import_view.py](../../renar-frontend/src/renar_frontend/views/profile/import_view.py)
   now has a "What gets imported?" button opening a dialog that lists every
   category that is and isn't imported, with a one-line reason for each
   omission (no equivalent Renar feature yet, deliberately excluded as

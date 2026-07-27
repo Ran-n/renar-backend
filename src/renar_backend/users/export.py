@@ -2,13 +2,15 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/21 00:00:00.000000
-Revised: 2026/07/21 09:51:07.918158
+Revised: 2026/07/27 08:29:08.786267
 
 Builds a user's personal-data export (GDPR Art. 20 — the right to data
 portability): every account, library and social fact Renar stores about
-them, as one JSON document zipped for download. Runs on export_queue's
-worker rather than inline in a request (see that module's docstring for
-why a queue exists at all).
+them, as one JSON file per data category (profile/library/comments/social)
+inside a 7z archive for download — mirrors how Google Takeout and similar
+exports split by category rather than shipping one giant blob. Runs on
+export_queue's worker rather than inline in a request (see that module's
+docstring for why a queue exists at all).
 
 Deliberately not reusing the *_out Pydantic schemas: those shape API
 responses for the frontend (expand params, computed URLs, etc.) and would
@@ -20,10 +22,10 @@ directly and lists every field explicitly.
 import contextlib
 import io
 import json
-import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+import py7zr
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import settings
@@ -34,7 +36,7 @@ EXPORTS_ROOT = Path(settings.media_dir) / "exports"
 
 
 def export_path(user_id: int) -> Path:
-    return EXPORTS_ROOT / f"{user_id}.zip"
+    return EXPORTS_ROOT / f"{user_id}.7z"
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -73,8 +75,19 @@ def _comment(db: Session, comment: Comment) -> dict:
     title_id, season, episode = resolve_root_scope(db, comment)
     title = db.get(Title, title_id) if title_id else None
     return {
+        # `id`/`parent_id` are this instance's own row ids, not portable
+        # identifiers — kept so build_import can restitch reply chains: a
+        # reply's parent is either another comment in this same export (self
+        # -reply, matched via these ids) or, when re-importing into the very
+        # database this came from (the common "restore my account" case),
+        # still resolvable as a live Comment.id belonging to someone else.
+        # Meaningless noise for any other reader; never used as an API id.
+        "id": comment.id,
+        "parent_id": comment.parent_id,
         "text": comment.text,
         "title": title.title if title else None,
+        "tmdb_id": title.tmdb_id if title else None,
+        "media_type": title.media_type.value if title else None,
         "season": season,
         "episode": episode,
         "is_reply": comment.parent_id is not None,
@@ -83,9 +96,9 @@ def _comment(db: Session, comment: Comment) -> dict:
 
 
 def build_export(user: User, db: Session) -> bytes:
-    """Everything Renar stores about this account, as one JSON document
-    inside a zip. Only ever reads `user`'s own rows — nothing here can leak
-    another account's data."""
+    """Everything Renar stores about this account, as one JSON file per
+    category inside a 7z archive. Only ever reads `user`'s own rows —
+    nothing here can leak another account's data."""
     profile = {
         "username": user.username,
         "email": user.email,
@@ -138,18 +151,15 @@ def build_export(user: User, db: Session) -> bytes:
         .all()
     ]
 
-    data = {
-        "exported_at": _iso(datetime.now(UTC)),
-        "profile": profile,
-        "library": library,
-        "comments": comments,
-        "following": following,
-        "followers": followers,
-    }
+    profile["exported_at"] = _iso(datetime.now(UTC))
+    social = {"following": following, "followers": followers}
 
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("data.json", json.dumps(data, indent=2, ensure_ascii=False))
+    with py7zr.SevenZipFile(buf, "w") as zf:
+        zf.writestr(json.dumps(profile, indent=2, ensure_ascii=False), "profile.json")
+        zf.writestr(json.dumps(library, indent=2, ensure_ascii=False), "library.json")
+        zf.writestr(json.dumps(comments, indent=2, ensure_ascii=False), "comments.json")
+        zf.writestr(json.dumps(social, indent=2, ensure_ascii=False), "social.json")
     return buf.getvalue()
 
 

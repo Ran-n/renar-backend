@@ -13,8 +13,9 @@ import io
 import json
 import threading
 import time
-import zipfile
 from datetime import timedelta
+
+import py7zr
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import User, utcnow
@@ -60,7 +61,7 @@ def test_download_before_ready_is_404(client, alice):
     assert client.get("/export/data/download", headers=headers).status_code == 404
 
 
-def test_export_flow_free_user(client, alice):
+def test_export_flow_free_user(client, alice, tmp_path):
     user, headers = alice
     client.post(
         "/media",
@@ -76,15 +77,20 @@ def test_export_flow_free_user(client, alice):
 
     r = client.get("/export/data/download", headers=headers)
     assert r.status_code == 200
-    assert r.headers["content-type"] == "application/zip"
+    assert r.headers["content-type"] == "application/x-7z-compressed"
+    disposition = r.headers["content-disposition"]
+    assert "renar-export-" in disposition
+    assert disposition.endswith('.7z"')
 
-    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-        data = json.loads(zf.read("data.json"))
-    assert data["profile"]["username"] == user["username"]
-    assert data["profile"]["is_premium"] is False
-    assert len(data["library"]) == 1
-    assert data["library"][0]["title"] == "Heat"
-    assert data["library"][0]["rating"] == 9
+    with py7zr.SevenZipFile(io.BytesIO(r.content), "r") as zf:
+        zf.extractall(path=tmp_path)
+    profile = json.loads((tmp_path / "profile.json").read_text())
+    library = json.loads((tmp_path / "library.json").read_text())
+    assert profile["username"] == user["username"]
+    assert profile["is_premium"] is False
+    assert len(library) == 1
+    assert library[0]["title"] == "Heat"
+    assert library[0]["rating"] == 9
 
 
 def test_export_available_without_premium(client, alice):
