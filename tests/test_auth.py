@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.984505
-Revised: 2026/07/21 09:51:05.481622
+Revised: 2026/07/27 09:56:23.130946
 
 Auth endpoints: register, login, me, profile, password change, account delete.
 """
@@ -602,7 +602,7 @@ def test_delete_account_with_import_job_row_does_not_fkey_violate(client, alice)
     user, headers = alice
     db = SessionLocal()
     try:
-        db.add(ImportJob(user_id=user["id"], finished=True))
+        db.add(ImportJob(user_id=user["id"], kind="tvtime", finished=True))
         db.commit()
     finally:
         db.close()

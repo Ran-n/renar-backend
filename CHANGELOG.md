@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/26 23:27:27.989481 )
+[//]: # (+ Revised: 	2026/07/27 13:52:44.303992 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-07-27
+
+### Added
+
+- `users/renar_import.py`: restores an account from its own `users/export.py`
+  `.7z` export (profile/library/comments/social) — the write side of GDPR
+  Art. 20 data portability, so a lost account or a fresh install pointed at
+  an empty database gets everything back. Every row already carries its
+  own `tmdb_id` so there's no fuzzy TMDB matching; runs synchronously on one
+  thread. Merge semantics mirror the TV Time importer: existing rows are
+  only filled in or extended, never clobbered, so re-running is safe. Only
+  `following` is restored on the social side
+- `GET /import/sources`: lists `(kind, label)` for every registered
+  importer, feeding the frontend's "which are you importing from?" picker
+- `routers/imports.py` generalized from a single hardcoded TV Time importer
+  to a registry (`IMPORTERS`) of pluggable origins, dispatched by
+  auto-detecting the uploaded file's content rather than trusting the
+  filename. `POST /import/tvtime` and `GET /import/tvtime/status` are
+  replaced by `POST /import` (takes an optional `claimed_kind`, cross-checked
+  against detection and rejected on mismatch) and `GET /import/status`
+  (reports on whichever importer last ran for the caller)
+- `ImportJob` (models.py) now keyed by `(user_id, kind)` instead of just
+  `user_id` (migration `76058e1d65e8`, backfills existing rows to
+  `kind='tvtime'`), so an account can hold outcomes from more than one
+  import origin without one clobbering the other
+
+### Changed
+
+- `users/export.py`'s GDPR export is now a `.7z` archive with one JSON file
+  per category (`profile.json`, `library.json`, `comments.json`,
+  `social.json`) instead of a single `data.json` inside a `.zip` — mirrors
+  how Google Takeout and similar exports split by category. Comment entries
+  now also carry `id`, `parent_id`, `tmdb_id`, and `media_type` so
+  `renar_import.py` can restitch reply chains and match titles without
+  re-resolving them
+- `GET /export/data/download` now names the file
+  `renar-export-<built-at>.7z` (timestamp from the export's own build time,
+  via `Content-Disposition`) instead of a fixed `renar-export.zip`
 
 ## [0.6.0] - 2026-07-26
 

@@ -12,7 +12,7 @@ import csv
 import io
 import zipfile
 
-import renar_backend.routers.imports as imports_mod
+import renar_backend.users.tvtime_import as imports_mod
 from renar_backend.database import SessionLocal
 from renar_backend.models import Comment, EpisodeWatch, LibraryEntry, Title, WatchEvent
 
@@ -151,7 +151,7 @@ def _episode_keys(item_id: int) -> set[tuple[int, int]]:
 
 
 def _run(user_id: int, zip_bytes: bytes) -> dict:
-    imports_mod._run_import(user_id, zip_bytes)
+    imports_mod.run(user_id, zip_bytes)
     return imports_mod._progress[user_id]["summary"]
 
 

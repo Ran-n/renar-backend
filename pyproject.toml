@@ -1,6 +1,6 @@
 [project]
 name = "renar-backend"
-version = "0.6.0"
+version = "0.7.0"
 description = "FastAPI backend for Renar — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]
@@ -20,6 +20,7 @@ dependencies = [
     "pillow>=11.0",
     "blake3>=1.0",
     "psycopg[binary]>=3.2",
+    "py7zr>=0.22",
 ]
 
 [project.scripts]
