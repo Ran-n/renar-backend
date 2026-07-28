@@ -41,6 +41,9 @@ _INVITES_CSS = """
       font-size: .68rem; font-weight: 600; letter-spacing: .02em;
       border-radius: 9999px; padding: 2px 9px; white-space: nowrap;
     }
+    /* Two pills (a code both time-expired and use-exhausted) sit side by
+       side in the same cell, no extra row height. */
+    .status-pills { display: inline-flex; align-items: center; gap: .35rem; flex-wrap: nowrap; }
     .code-cell { display: flex; align-items: center; gap: .5rem; font-family: monospace; }
     .btn-copy {
       background: transparent; border: 1px solid var(--border); color: var(--text-3);
@@ -125,6 +128,27 @@ _INVITES_CSS = """
     }
     .invites-search:focus { outline: none; border-color: var(--accent); }
     .filter-group { display: flex; flex-wrap: wrap; gap: .5rem; }
+
+    /* Restore-expiry per-row popover: <summary> gets a native disclosure
+       marker by default (a triangle) — strip it so it reads the same as
+       the plain <button> "Restore" used for revoked codes. */
+    .restore-expiry { position: relative; display: inline-block; }
+    .restore-expiry summary {
+      list-style: none; cursor: pointer;
+    }
+    .restore-expiry summary::-webkit-details-marker { display: none; }
+    .restore-expiry summary::marker { content: ""; }
+    .restore-expiry-panel {
+      /* position:fixed (top/left set by JS, see positionRestorePanel) so it
+         escapes the table wrapper's overflow-x:auto clipping instead of
+         getting cut off, which position:absolute doesn't. */
+      position: fixed; z-index: 1000;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: .9rem; min-width: 240px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    }
+    .expiry-picker-form .chip-group { margin-bottom: .7rem; }
+    .expiry-picker-form .gen-custom-input { margin-bottom: .7rem; }
 """
 
 _INVITE_STATUS = {
@@ -135,14 +159,40 @@ _INVITE_STATUS = {
 }
 
 
-def _invite_state(c: InviteCode, now: datetime) -> str:
+def _parse_expires_at(expires_at: str | None) -> datetime | None:
+    if not expires_at:
+        return None
+    try:
+        return datetime.fromisoformat(expires_at).replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid expires_at format") from exc
+
+
+def _invite_state(c: InviteCode, now: datetime) -> tuple[str, bool, bool]:
+    """Returns (label, is_time_expired, is_use_exhausted).
+
+    The two booleans are independent facts and both can be true at once (a
+    code can pass its expires_at *and* hit its use cap). `label` is which of
+    the two to show in the single status pill: whichever boundary was
+    actually crossed first, using `last_used_at` (set the moment a
+    redemption pushes `uses` to `max_uses` — registration already refuses
+    once uses >= max_uses, so that's exactly the exhaustion instant) against
+    `expires_at`. Falls back to "expired" when a pre-migration exhausted
+    code has no `last_used_at` to compare.
+    """
     if c.revoked:
-        return "revoked"
-    if c.expires_at is not None and c.expires_at <= now:
-        return "expired"
-    if c.max_uses is not None and c.uses >= c.max_uses:
-        return "exhausted"
-    return "active"
+        return "revoked", False, False
+    is_expired = c.expires_at is not None and c.expires_at <= now
+    is_exhausted = c.max_uses is not None and c.uses >= c.max_uses
+    if is_expired and is_exhausted:
+        if c.last_used_at is not None and c.last_used_at < c.expires_at:
+            return "exhausted", is_expired, is_exhausted
+        return "expired", is_expired, is_exhausted
+    if is_expired:
+        return "expired", is_expired, is_exhausted
+    if is_exhausted:
+        return "exhausted", is_expired, is_exhausted
+    return "active", is_expired, is_exhausted
 
 
 def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
@@ -151,9 +201,24 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
     counts = dict.fromkeys(_INVITE_STATUS, 0)
     rows = ""
     for c in sorted(codes, key=lambda c: c.created_at, reverse=True):
-        state = _invite_state(c, now)
+        state, is_expired, is_exhausted = _invite_state(c, now)
         counts[state] += 1
         label, color = _INVITE_STATUS[state]
+        # A code can be both time-expired and use-exhausted at once; the
+        # "expired"/"exhausted" pill above already picks whichever happened
+        # first (for counts/filtering), but show both pills side by side
+        # here so the row itself doesn't hide the other true condition.
+        if not c.revoked and is_expired and is_exhausted:
+            exp_label, exp_color = _INVITE_STATUS["expired"]
+            exh_label, exh_color = _INVITE_STATUS["exhausted"]
+            status_cell = (
+                f'<div class="status-pills">'
+                f'<span class="status-pill" style="color:{exp_color};background:{exp_color}22">{exp_label}</span>'
+                f'<span class="status-pill" style="color:{exh_color};background:{exh_color}22">{exh_label}</span>'
+                f"</div>"
+            )
+        else:
+            status_cell = f'<span class="status-pill" style="color:{color};background:{color}22">{label}</span>'
         code_esc = html.escape(c.code)
         created_by_raw = c.created_by.username if c.created_by else (c.created_by_admin or "")
         created_by = html.escape(created_by_raw) if created_by_raw else "&mdash;"
@@ -168,7 +233,7 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
                 f"</div>"
             )
         revoke_btn = ""
-        if state not in ("revoked", "expired"):
+        if not c.revoked and not is_expired:
             revoke_btn = (
                 f'<form method="post" action="{_P}/invites/{c.id}/revoke"'
                 f" onsubmit=\"return confirm('Revoke invite [{code_esc}]?')\""
@@ -185,6 +250,33 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
                 f'<button class="btn-sm btn-good" type="submit">Restore</button>'
                 f"</form>"
             )
+        reset_uses_btn = ""
+        if is_exhausted and not is_expired:
+            reset_uses_btn = (
+                f'<form method="post" action="{_P}/invites/{c.id}/reset-uses" style="display:contents">'
+                f'<button class="btn-sm btn-good" type="submit">Reset uses</button>'
+                f"</form>"
+            )
+        restore_expiry_btn = ""
+        if is_expired:
+            restore_expiry_btn = f"""
+            <details class="restore-expiry">
+              <summary class="btn-sm btn-good">Restore</summary>
+              <div class="restore-expiry-panel">
+                <form method="post" action="{_P}/invites/{c.id}/restore-expiry" class="expiry-picker-form">
+                  <div class="chip-group expiry-chip-group" data-for="restore_expires_{c.id}">
+                    <button type="button" class="chip active" data-hours="24">24 hours</button>
+                    <button type="button" class="chip" data-hours="168">7 days</button>
+                    <button type="button" class="chip" data-hours="720">30 days</button>
+                    <button type="button" class="chip" data-hours="">Never</button>
+                    <button type="button" class="chip" data-custom="1">Custom&hellip;</button>
+                  </div>
+                  <input class="gen-custom-input" type="datetime-local"
+                         id="restore_expires_{c.id}" name="expires_at" value="{default_expires}" hidden>
+                  <button class="btn-sm btn-good" type="submit">Confirm</button>
+                </form>
+              </div>
+            </details>"""
         delete_btn = (
             f'<form method="post" action="{_P}/invites/{c.id}/delete"'
             f" onsubmit=\"return confirm('Permanently delete invite [{code_esc}]? This cannot be undone.')\""
@@ -199,12 +291,12 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
         <tr data-status="{state}" data-search="{search_esc}">
           <td class="td-label"><div class="code-cell"><span>{code_esc}</span>
             <button class="btn-copy" type="button" data-code="{code_esc}">Copy</button></div></td>
-          <td><span class="status-pill" style="color:{color};background:{color}22">{label}</span></td>
+          <td>{status_cell}</td>
           <td class="td-count" data-sort="{c.uses}">{uses_cell}</td>
           <td class="td-ts" data-sort="{expires_sort}">{expires}</td>
           <td class="td-ts" data-sort="{c.created_at.isoformat()}">{_fmt_ts(c.created_at)}</td>
           <td class="td-email">{created_by}</td>
-          <td><div class="td-actions">{revoke_btn}{restore_btn}{delete_btn}</div></td>
+          <td><div class="td-actions">{revoke_btn}{restore_btn}{reset_uses_btn}{restore_expiry_btn}{delete_btn}</div></td>
         </tr>"""
 
     empty_row = '<tr><td colspan="7" class="empty">No invite codes yet</td></tr>' if not rows else ""
@@ -461,7 +553,11 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
         swap('invites-tbody');
         swap('invites-stats');
         swap('pill-invites');
-        bindCopyButtons(document.getElementById('invites-tbody'));
+        var tbody = document.getElementById('invites-tbody');
+        bindCopyButtons(tbody);
+        bindChipGroups(tbody);
+        bindExpirySubmitFix(tbody);
+        bindRestorePanels(tbody);
         applyInviteFilters();
         if (_invSortCol !== null) {{
           invSortRows(_invSortCol, _invSortThs[_invSortCol].dataset.type, _invSortAsc);
@@ -475,46 +571,105 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
     }}
 
     // Chip groups: clicking a preset sets the paired hidden input's value;
-    // "Custom..." instead reveals that input for direct editing.
-    document.querySelectorAll('.chip-group').forEach(function (group) {{
-      var input = document.getElementById(group.dataset.for);
-      var chips = group.querySelectorAll('.chip');
-      chips.forEach(function (chip) {{
-        chip.addEventListener('click', function () {{
-          chips.forEach(function (c) {{ c.classList.remove('active'); }});
-          if (chip.dataset.custom) {{
-            chip.classList.add('active');
-            input.hidden = false;
-            input.value = '';
-            input.focus();
-            return;
-          }}
-          input.hidden = true;
-          if (input.type === 'datetime-local') {{
-            if (chip.dataset.hours) {{
-              var d = new Date(Date.now() + Number(chip.dataset.hours) * 3600000);
-              d.setSeconds(0, 0);
-              input.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-            }} else {{
+    // "Custom..." instead reveals that input for direct editing. Shared by
+    // the create-invite form and every per-row restore-expiry form, and
+    // re-bound after refreshInvites() swaps the table body in (new/changed
+    // rows bring their own unbound chip groups).
+    function bindChipGroups(root) {{
+      root.querySelectorAll('.chip-group').forEach(function (group) {{
+        if (group.dataset.bound) return;
+        group.dataset.bound = '1';
+        var input = document.getElementById(group.dataset.for);
+        var chips = group.querySelectorAll('.chip');
+        chips.forEach(function (chip) {{
+          chip.addEventListener('click', function () {{
+            chips.forEach(function (c) {{ c.classList.remove('active'); }});
+            if (chip.dataset.custom) {{
+              chip.classList.add('active');
+              input.hidden = false;
               input.value = '';
+              input.focus();
+              return;
             }}
-          }} else {{
-            input.value = chip.dataset.value;
-          }}
-          chip.classList.add('active');
+            input.hidden = true;
+            if (input.type === 'datetime-local') {{
+              if (chip.dataset.hours) {{
+                var d = new Date(Date.now() + Number(chip.dataset.hours) * 3600000);
+                d.setSeconds(0, 0);
+                input.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+              }} else {{
+                input.value = '';
+              }}
+            }} else {{
+              input.value = chip.dataset.value;
+            }}
+            chip.classList.add('active');
+          }});
         }});
       }});
-    }});
+    }}
+    bindChipGroups(document);
 
     // datetime-local has no timezone: its value is the user's local wall-clock
     // digits. The chip presets rely on that to *display* correctly, but the
     // server stores expires_at as UTC — convert to a real UTC instant here,
-    // right before submit, so "24 hours" actually means 24 hours.
-    document.getElementById('invite-form').addEventListener('submit', function () {{
-      var input = document.getElementById('expires_at');
-      if (input.value) {{
-        input.value = new Date(input.value).toISOString();
-      }}
+    // right before submit, so "24 hours" actually means 24 hours. Assigning
+    // a full ISO string (seconds/ms/"Z") straight back to a datetime-local
+    // input is silently rejected by the browser (resets to ""), so switch
+    // the input to plain text first. Covers the create-invite form and every
+    // per-row restore-expiry form; re-bound after refreshInvites() too.
+    function bindExpirySubmitFix(root) {{
+      root.querySelectorAll('#invite-form, .expiry-picker-form').forEach(function (form) {{
+        if (form.dataset.expiryFixBound) return;
+        form.dataset.expiryFixBound = '1';
+        form.addEventListener('submit', function () {{
+          var input = form.querySelector('input[type="datetime-local"]');
+          if (input && input.value) {{
+            var iso = new Date(input.value).toISOString();
+            input.type = 'text';
+            input.value = iso;
+          }}
+        }});
+      }});
+    }}
+    bindExpirySubmitFix(document);
+
+    // The restore-expiry popover is position:fixed (to escape the table
+    // wrapper's overflow-x:auto clipping — see .restore-expiry-panel), so
+    // its top/left have to be computed from the <summary> button's actual
+    // position on open, clamped to stay inside the viewport. Also closes
+    // any other open popover and closes on an outside click.
+    function positionRestorePanel(details) {{
+      var summary = details.querySelector('summary');
+      var panel = details.querySelector('.restore-expiry-panel');
+      if (!summary || !panel) return;
+      var rect = summary.getBoundingClientRect();
+      var panelWidth = panel.offsetWidth || 240;
+      var left = Math.min(rect.right - panelWidth, window.innerWidth - panelWidth - 8);
+      left = Math.max(8, left);
+      var top = Math.min(rect.bottom + 6, window.innerHeight - panel.offsetHeight - 8);
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+    }}
+    function bindRestorePanels(root) {{
+      root.querySelectorAll('details.restore-expiry').forEach(function (details) {{
+        if (details.dataset.bound) return;
+        details.dataset.bound = '1';
+        details.addEventListener('toggle', function () {{
+          if (details.open) {{
+            document.querySelectorAll('details.restore-expiry[open]').forEach(function (other) {{
+              if (other !== details) other.open = false;
+            }});
+            positionRestorePanel(details);
+          }}
+        }});
+      }});
+    }}
+    bindRestorePanels(document);
+    document.addEventListener('click', function (e) {{
+      document.querySelectorAll('details.restore-expiry[open]').forEach(function (details) {{
+        if (!details.contains(e.target)) details.open = false;
+      }});
     }});
   </script>
 </body>
@@ -560,12 +715,7 @@ def create_invite(
             raise HTTPException(status_code=422, detail="max_uses must be a whole number") from exc
         if parsed_max_uses < 1:
             raise HTTPException(status_code=422, detail="max_uses must be at least 1")
-    parsed_expires: datetime | None = None
-    if expires_at:
-        try:
-            parsed_expires = datetime.fromisoformat(expires_at).replace(tzinfo=UTC)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="Invalid expires_at format") from exc
+    parsed_expires = _parse_expires_at(expires_at)
     code = InviteCode(
         code=secrets.token_urlsafe(10),
         created_by_user_id=None,
@@ -616,6 +766,51 @@ def restore_invite(
     code.revoked = False
     db.commit()
     _log.info("admin=%s restored invite code id=%s code=%s", admin_user, code_id, code.code)
+    return RedirectResponse(f"{_P}/invites", status_code=303)
+
+
+@router.post("/invites/{code_id}/restore-expiry", include_in_schema=False)
+def restore_invite_expiry(
+    code_id: int,
+    expires_at: str | None = Form(default=None),
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    """Give a time-expired code a new expires_at (or None = never) and reset
+    its use count to 0 — a code that expired by time may also have been at
+    or near its use cap, so restoring it makes it fully usable again rather
+    than immediately falling straight into "exhausted"."""
+    code = db.get(InviteCode, code_id)
+    if not code:
+        raise HTTPException(status_code=404, detail="Invite code not found")
+    parsed_expires = _parse_expires_at(expires_at)
+    code.expires_at = parsed_expires
+    code.uses = 0
+    db.commit()
+    _log.info(
+        "admin=%s restored expired invite id=%s code=%s new_expires=%s",
+        admin_user,
+        code_id,
+        code.code,
+        parsed_expires,
+    )
+    return RedirectResponse(f"{_P}/invites", status_code=303)
+
+
+@router.post("/invites/{code_id}/reset-uses", include_in_schema=False)
+def reset_invite_uses(
+    code_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    """Reset a usage-exhausted code's use counter to 0; max_uses is left
+    untouched and the prior use count isn't preserved anywhere."""
+    code = db.get(InviteCode, code_id)
+    if not code:
+        raise HTTPException(status_code=404, detail="Invite code not found")
+    code.uses = 0
+    db.commit()
+    _log.info("admin=%s reset uses on invite id=%s code=%s", admin_user, code_id, code.code)
     return RedirectResponse(f"{_P}/invites", status_code=303)
 
 

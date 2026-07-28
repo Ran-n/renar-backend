@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/07/21 09:51:03.671413
+Revised: 2026/07/28 17:43:10.319754
 """
 
 import logging
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
+from ..events import publish as publish_event
 from ..media.image_service import gc_image, image_row_for
 from ..media.image_utils import decode_b64_image, normalize_jpeg
 from ..models import EmailConfirmationCode, InviteCode, LoginEvent, User, utcnow
@@ -225,6 +226,7 @@ def register(data: UserCreate, request: Request, background_tasks: BackgroundTas
     db.add(user)
     if invite is not None:
         invite.uses += 1
+        invite.last_used_at = utcnow()
     db.commit()
     db.refresh(user)
     if invite is not None:
@@ -499,6 +501,22 @@ def update_profile(
         user.has_seen_welcome = data.has_seen_welcome
     db.commit()
     db.refresh(user)
+    # push to every other open session on this account (see routers/events.py)
+    # so a language/theme/etc. change is picked up without waiting on a poll
+    if any(
+        f is not None
+        for f in (
+            data.language,
+            data.theme,
+            data.show_original_titles,
+            data.home_hero_enabled,
+            data.home_progress_style,
+            data.episode_label_style,
+            data.avatar_b64,
+            data.background_b64,
+        )
+    ):
+        publish_event(user.id, "settings_changed")
     return user
 
 

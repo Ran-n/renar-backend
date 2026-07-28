@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/27 15:58:17.285824
+Revised: 2026/07/28 12:54:39.869306
 """
 
 import enum
@@ -72,6 +72,12 @@ class Image(Base):
     hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # The TMDB alternate URL this was downloaded from, when it was set that
+    # way rather than uploaded — lets the frontend's alternates picker mark
+    # which tile is the current pick without re-deriving/guessing an image
+    # identity. Null for uploads (no source URL to record) and for images
+    # created before this column existed.
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class BannedIP(Base):
@@ -369,6 +375,12 @@ class InviteCode(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Timestamp of the most recent redemption. Registration already refuses a
+    # redemption once uses >= max_uses (routers/auth.py), so once a code is
+    # exhausted this is exactly the moment it became exhausted — lets the
+    # admin panel tell whether a code that's both past its expires_at and at
+    # its use cap hit one before the other.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_user_id])
 
@@ -713,6 +725,14 @@ class LibraryEntry(Base):
         return f"/images/{self.custom_poster_image.hash}" if self.custom_poster_image else None
 
     @property
+    def custom_poster_source_url(self) -> str | None:
+        """The TMDB alternate URL the current custom poster was picked from,
+        when known — lets the alternates picker highlight the active tile.
+        None for an uploaded poster or one set before Image.source_url
+        existed."""
+        return self.custom_poster_image.source_url if self.custom_poster_image else None
+
+    @property
     def poster_url(self) -> str | None:
         if self.custom_poster_image is not None and self.owner.is_premium:
             return self.custom_poster_url
@@ -723,6 +743,11 @@ class LibraryEntry(Base):
         """The stored override itself, regardless of premium state — the
         backdrop picker needs to show it even while premium is lapsed."""
         return f"/images/{self.custom_backdrop_image.hash}" if self.custom_backdrop_image else None
+
+    @property
+    def custom_backdrop_source_url(self) -> str | None:
+        """Same as `custom_poster_source_url`, for the backdrop override."""
+        return self.custom_backdrop_image.source_url if self.custom_backdrop_image else None
 
     @property
     def backdrop_url(self) -> str | None:

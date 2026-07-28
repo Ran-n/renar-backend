@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/21 09:51:02.906521
+Revised: 2026/07/28 17:43:10.515866
 """
 
 import asyncio
@@ -22,6 +22,7 @@ from .routers import (
     admin,
     auth,
     comments,
+    events,
     export,
     images,
     imports,
@@ -118,6 +119,7 @@ app.include_router(stats.router)
 app.include_router(social.router)
 app.include_router(comments.router)
 app.include_router(notifications.router)
+app.include_router(events.router)
 app.include_router(images.router)
 app.include_router(upcoming.router)
 app.include_router(imports.router)

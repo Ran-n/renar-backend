@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/07/21 09:51:04.330836
+Revised: 2026/07/28 12:54:40.129102
 """
 
 from datetime import datetime
@@ -317,8 +317,10 @@ class LibraryEntryOut(BaseModel):
     year: int | None = None
     poster_url: str | None = None  # custom override when set + owner premium
     custom_poster_url: str | None = None  # the stored override itself (picker UI)
+    custom_poster_source_url: str | None = None  # TMDB URL it was picked from, if known (picker UI)
     backdrop_url: str | None = None  # custom override when set + owner premium
     custom_backdrop_url: str | None = None  # the stored override itself (picker UI)
+    custom_backdrop_source_url: str | None = None  # TMDB URL it was picked from, if known (picker UI)
     tmdb_id: int | None = None
     runtime_minutes: int | None = None
     total_episodes: int | None = None

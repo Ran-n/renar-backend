@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/26 23:27:39.773676 )
+[//]: # (+ Revised: 	2026/07/28 17:43:09.945452 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -171,6 +171,21 @@ migration (`b9c3e1f84a2d`) created `max_uses` as `NOT NULL`; a follow-up
 (`ae65f1be8d32`) immediately made it nullable.  The model has **no Python-side
 default** for `max_uses` — a `default=1` would silently override an explicit
 `None` at flush time, so every caller passes the value explicitly.
+
+**A code can be both expired and exhausted; `last_used_at` decides which
+label — and which restore action — the admin panel shows.** `expires_at`
+and `uses >= max_uses` are checked independently
+(`routers/admin/invites.py::_invite_state`), and when both are true the row
+shows both pills rather than one hiding the other. But a single-pill
+"which one" (used for the status filter/count, and for deciding whether
+"Reset uses" or the combined "Restore" expiry-picker applies) needs an
+order: `InviteCode.last_used_at` (set on every redemption,
+`routers/auth.py::register`) against `expires_at` tells whether the code
+was exhausted before or after it expired, falling back to "expired" when a
+pre-migration exhausted code has no `last_used_at` to compare. Restoring a
+time-expired code always resets `uses` to 0 too — a code that expired by
+time may also have been at or near its use cap, so restoring only the date
+would leave it falling straight back into "exhausted".
 
 ### `app_counters.total_users`: the same pattern, for a different reason
 
@@ -380,6 +395,38 @@ the BLAKE3 hash of their bytes, in a git-style two-level directory fan-out
 or a re-uploaded avatar) is stored exactly once. The two-level fan-out keeps
 any single directory from accumulating thousands of entries, which degrades
 listing performance on most filesystems.
+
+### `images.source_url`: a best-effort provenance hint, not part of the content address
+
+`Image` is otherwise purely content-addressed (identity = hash of the
+bytes) — but when a custom poster/backdrop/episode-still is set from a
+TMDB alternate rather than an upload, `image_row_for()` also records the
+TMDB URL it was downloaded from, on whichever row the bytes resolve to,
+whenever that row doesn't have one yet — including a dedup hit against a
+row created before this column existed, or an upload-only row later
+matched by a TMDB pick with identical bytes. A row that already has a
+(possibly different) source_url is left alone: first-recorded wins rather
+than flip-flopping on every dedup hit.
+
+**Why the backfill-on-dedup-hit matters in practice:** this column shipped
+with no backfill for images set before it existed (see migration
+`40c05acfeddb`'s docstring) — those rows' `source_url` starts NULL and
+stays NULL forever *unless* something with a known source URL later dedups
+onto them. The obvious first thing a user tries after this feature ships
+is re-picking the exact alternate they already have set, which is exactly
+that case (identical bytes, now-known source URL) — without the backfill,
+that specific, most-likely-to-be-tried action would silently do nothing.
+
+**Why the column exists at all:** the renar-frontend alternates picker
+(`open_alternate_image_picker` in `views/ui.py`) needs to highlight
+whichever tile is the user's current pick. The re-hosted `/images/<hash>`
+URL it already exposes (`custom_poster_url` etc.) has no relationship to
+the TMDB CDN URLs the picker's grid is built from, so comparing them can
+never match — this
+column is what makes that comparison possible at all. It's deliberately
+just a hint (nullable, no backfill, may point at a stale/deleted TMDB
+path): losing it only means the highlight doesn't show, never a broken
+image or a wrong one.
 
 ### Postgres via `DATABASE_URL`; schema owned by Alembic
 
@@ -816,6 +863,46 @@ frontend's tap-to-zoom backdrop dialog, which requires a size larger than
 w780.
 
 ## API design
+
+### `GET /events`: Server-Sent Events push for account settings, in-memory single-worker pub/sub
+
+`routers/events.py` streams `settings_changed` events to every open
+session of the caller's account, so a language/theme/avatar/premium-style
+change made in one session shows up in every other open session (desktop,
+web tab, phone) within about a second — see renar-frontend's
+`docs/design-decisions.md` ("Account settings sync across open sessions")
+for the client side. `events.py` backs it with a plain in-memory
+`dict[user_id, set[asyncio.Queue]]`: `PATCH /auth/profile` and `PATCH
+/premium/style` call `publish()` after `db.commit()` when any
+rendering-affecting field actually changed; each open `/events` connection
+holds a `subscribe()`d queue and yields an SSE line whenever something
+lands in it, plus a heartbeat comment every 25s so idle connections/
+proxies don't time it out.
+
+Auth is resolved with its own short-lived `SessionLocal()` before the
+stream starts, not via the usual `Depends(get_current_user)` — that would
+hold a pooled DB connection open for as long as the SSE connection stays
+open (potentially hours), and the stream itself never touches the
+database again after that.
+
+**Why SSE, not a WebSocket:** the `websockets` package (needed for
+FastAPI's `WebSocket` support) has no prebuilt wheels for the frontend's
+Android/iOS build targets — see renar-frontend's `pyproject.toml`
+dependency-group comment for the identical problem with
+`uvicorn[standard]`'s native extras. SSE is a plain streamed HTTP `GET`,
+so the client can use `httpx`, a dependency it already ships everywhere.
+
+**Why in-memory, single-worker:** same tradeoff already made for the
+anti-abuse rate-limit counters (see "In-memory counters, persisted
+permabans" above) — a registry keyed by `user_id` living in this
+process's memory doesn't see connections held by other workers. Move to
+Redis pub/sub if the backend ever runs with more than one worker.
+
+**Not a general data-sync channel:** this only covers the account-settings
+fields explicitly wired to call `publish()` — not watch status, library
+changes, comments, or notifications. Those still rely on each client
+re-fetching on its own (poll on view load), a separate and larger problem
+tracked in `docs/backlog.md`.
 
 ### CORS restricted to browser origins; the app itself is unaffected
 

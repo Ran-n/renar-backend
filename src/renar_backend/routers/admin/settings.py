@@ -113,6 +113,31 @@ _SETTINGS_CSS = """
       cursor: pointer; font-family: inherit;
     }
     .settings-save:hover { filter: brightness(1.08); }
+
+    /* Exempt-IPs tag input: pills + a bare text field sharing one bordered
+       box, mirrored into a hidden comma-separated input for form submit. */
+    .tag-input {
+      display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+      padding: .4rem .5rem; min-height: 2.3rem;
+    }
+    .tag-input:focus-within { border-color: var(--accent); }
+    .tag-pill {
+      display: inline-flex; align-items: center; gap: .3rem;
+      background: rgba(250,189,47,.14); border: 1px solid var(--accent); color: var(--accent);
+      border-radius: 9999px; padding: .15rem .4rem .15rem .65rem; font-size: .78rem; font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap;
+    }
+    .tag-remove {
+      background: transparent; border: none; color: inherit; cursor: pointer;
+      font-size: .95rem; line-height: 1; padding: 0 .15rem; font-family: inherit; opacity: .7;
+    }
+    .tag-remove:hover { opacity: 1; }
+    .tag-input input[type=text] {
+      flex: 1 1 140px; min-width: 140px; background: transparent; border: none; color: var(--text);
+      font-size: .82rem; font-family: inherit; padding: .25rem 0;
+    }
+    .tag-input input[type=text]:focus { outline: none; }
 """
 
 
@@ -148,6 +173,11 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
     invite_dot = "#fabd2f" if ss.invite_only else "#928374"
     turnstile_dot = "#b8bb26" if ss.turnstile_enabled else "#928374"
     email_confirm_dot = "#b8bb26" if ss.email_confirmation_enabled else "#928374"
+    exempt_pills = "".join(
+        f'<span class="tag-pill" data-ip="{sv(ip)}">{sv(ip)}'
+        f'<button type="button" class="tag-remove" aria-label="Remove {sv(ip)}">&times;</button></span>'
+        for ip in ss.exempt_ips
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -353,9 +383,12 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
         </p>
         <div class="settings-grid" style="margin-top:.9rem">
           <div class="settings-field" style="grid-column: 1 / -1">
-            <label for="exempt_ips">Exempt IPs (comma-separated)</label>
-            <input type="text" id="exempt_ips" name="exempt_ips"
-                   value="{sv(", ".join(ss.exempt_ips))}" placeholder="127.0.0.1, ::1">
+            <label for="exempt_ips_input">Exempt IPs</label>
+            <div class="tag-input" id="exempt_ips_tags">
+              {exempt_pills}
+              <input type="text" id="exempt_ips_input" placeholder="Add an IP, press Enter">
+            </div>
+            <input type="hidden" id="exempt_ips" name="exempt_ips" value="{sv(", ".join(ss.exempt_ips))}">
           </div>
         </div>
         <p class="settings-hint">
@@ -403,6 +436,75 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
 
   </div>
 
+  <script>
+    // Exempt-IPs tag input: pills for each existing entry plus a bare text
+    // field in the same bordered box; Enter/comma commits the typed value
+    // as a new pill, Backspace on an empty field drops the last pill. The
+    // hidden #exempt_ips input (what the form actually submits) is kept in
+    // sync as a comma-separated list on every add/remove, same shape the
+    // backend already parses.
+    (function () {{
+      var container = document.getElementById('exempt_ips_tags');
+      var hidden = document.getElementById('exempt_ips');
+      var input = document.getElementById('exempt_ips_input');
+
+      function syncHidden() {{
+        var ips = Array.from(container.querySelectorAll('.tag-pill')).map(function (p) {{ return p.dataset.ip; }});
+        hidden.value = ips.join(', ');
+      }}
+
+      function bindRemove(btn) {{
+        btn.addEventListener('click', function () {{
+          btn.closest('.tag-pill').remove();
+          syncHidden();
+        }});
+      }}
+      container.querySelectorAll('.tag-remove').forEach(bindRemove);
+
+      function addPill(ip) {{
+        ip = ip.trim();
+        if (!ip) return;
+        var dup = Array.from(container.querySelectorAll('.tag-pill')).some(function (p) {{ return p.dataset.ip === ip; }});
+        if (dup) return;
+        var pill = document.createElement('span');
+        pill.className = 'tag-pill';
+        pill.dataset.ip = ip;
+        pill.appendChild(document.createTextNode(ip));
+        var rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'tag-remove';
+        rm.setAttribute('aria-label', 'Remove ' + ip);
+        rm.textContent = '×';
+        bindRemove(rm);
+        pill.appendChild(rm);
+        container.insertBefore(pill, input);
+        syncHidden();
+      }}
+
+      input.addEventListener('keydown', function (e) {{
+        if (e.key === 'Enter' || e.key === ',') {{
+          e.preventDefault();
+          addPill(input.value);
+          input.value = '';
+        }} else if (e.key === 'Backspace' && !input.value) {{
+          var pills = container.querySelectorAll('.tag-pill');
+          if (pills.length) {{
+            pills[pills.length - 1].remove();
+            syncHidden();
+          }}
+        }}
+      }});
+      input.addEventListener('blur', function () {{
+        if (input.value.trim()) {{
+          addPill(input.value);
+          input.value = '';
+        }}
+      }});
+      container.addEventListener('click', function (e) {{
+        if (e.target === container) input.focus();
+      }});
+    }})();
+  </script>
 </body>
 </html>"""
 

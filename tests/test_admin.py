@@ -7,6 +7,8 @@ Revised: 2026/07/17 18:08:59.133057
 Admin panel: HTTP Basic gate and the user-delete action.
 """
 
+from datetime import timedelta
+
 from conftest import ADMIN_BASIC as BASIC
 from conftest import PASSWORD
 
@@ -22,6 +24,7 @@ from renar_backend.models import (
     PeriodicTaskRun,
     SiteSettings,
     User,
+    utcnow,
 )
 
 
@@ -377,6 +380,33 @@ def test_admin_settings_post_updates_and_persists(client, admin_enabled):
         db.close()
 
 
+def test_admin_settings_page_renders_exempt_ip_pills(client, admin_enabled):
+    payload = {
+        "registration_open": "1",
+        "rate_limit_per_minute": "500",
+        "flood_ban_per_minute": "1800",
+        "auth_rate_limit_per_minute": "25",
+        "register_per_hour_per_ip": "15",
+        "login_backoff_threshold": "4",
+        "login_backoff_account_threshold": "20",
+        "login_backoff_minutes": "10",
+        "probe_ban_threshold": "8",
+        "probe_window_minutes": "7",
+        "ban_minutes": "45",
+        "strike_ban_threshold": "3",
+        "tmdb_db_cache_hours": "24",
+        "exempt_ips": "127.0.0.1, ::1",
+    }
+    client.post("/admin/settings", data=payload, auth=BASIC)
+
+    r = client.get("/admin/settings", auth=BASIC)
+    assert r.status_code == 200
+    # one pill per exempt IP, plus the hidden field the form actually submits
+    assert '<span class="tag-pill" data-ip="127.0.0.1">127.0.0.1' in r.text
+    assert '<span class="tag-pill" data-ip="::1">::1' in r.text
+    assert 'name="exempt_ips" value="127.0.0.1, ::1"' in r.text
+
+
 def test_admin_settings_invite_only_toggle(client, admin_enabled):
     payload = {
         "registration_open": "1",
@@ -729,6 +759,182 @@ def test_admin_delete_invite_removes_row(client, admin_enabled):
 def test_admin_delete_invite_missing_returns_404(client, admin_enabled):
     r = client.post("/admin/invites/999999/delete", auth=BASIC)
     assert r.status_code == 404
+
+
+def test_admin_invites_page_shows_reset_uses_when_only_exhausted(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code.uses = 1
+        code.last_used_at = utcnow()
+        # expires_at left None (never) — not expired, only exhausted
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.get("/admin/invites", auth=BASIC)
+    assert 'data-status="exhausted"' in r.text
+    assert "Reset uses" in r.text
+    assert '<details class="restore-expiry">' not in r.text
+
+
+def test_admin_reset_invite_uses_clears_uses(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code_id = code.id
+        code.uses = 1
+        code.last_used_at = utcnow()
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.post(f"/admin/invites/{code_id}/reset-uses", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        code = db.get(InviteCode, code_id)
+        assert code.uses == 0
+        assert code.max_uses == 1  # cap itself is untouched
+    finally:
+        db.close()
+
+
+def test_admin_reset_invite_uses_missing_returns_404(client, admin_enabled):
+    r = client.post("/admin/invites/999999/reset-uses", auth=BASIC)
+    assert r.status_code == 404
+
+
+def test_admin_restore_invite_expiry_sets_new_expiry_and_resets_uses(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code_id = code.id
+        code.uses = 5
+        code.expires_at = utcnow() - timedelta(days=1)  # already expired
+        db.commit()
+    finally:
+        db.close()
+
+    new_expires = (utcnow() + timedelta(days=30)).isoformat()
+    r = client.post(
+        f"/admin/invites/{code_id}/restore-expiry",
+        data={"expires_at": new_expires},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        code = db.get(InviteCode, code_id)
+        assert code.uses == 0
+        assert code.expires_at > utcnow()
+    finally:
+        db.close()
+
+
+def test_admin_restore_invite_expiry_blank_means_never(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code_id = code.id
+        code.expires_at = utcnow() - timedelta(days=1)
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.post(
+        f"/admin/invites/{code_id}/restore-expiry",
+        data={"expires_at": ""},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    db = SessionLocal()
+    try:
+        assert db.get(InviteCode, code_id).expires_at is None
+    finally:
+        db.close()
+
+
+def test_admin_restore_invite_expiry_missing_returns_404(client, admin_enabled):
+    r = client.post("/admin/invites/999999/restore-expiry", auth=BASIC, data={"expires_at": ""})
+    assert r.status_code == 404
+
+
+def test_admin_invites_page_labels_exhaustion_before_expiry(client, admin_enabled):
+    """A code that hit its use cap before it expired should show as
+    "Exhausted", not "Expired", even though the expiry check runs first."""
+    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code.uses = 1
+        # exhausted two days ago, expires only one day ago: exhaustion first
+        code.last_used_at = utcnow() - timedelta(days=2)
+        code.expires_at = utcnow() - timedelta(days=1)
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.get("/admin/invites", auth=BASIC)
+    assert 'data-status="exhausted"' in r.text
+    # also past expires_at, so the combined restore-expiry action (which
+    # resets both expires_at and uses together) shows instead of the
+    # uses-only reset button.
+    assert '<details class="restore-expiry">' in r.text
+    assert "Reset uses" not in r.text
+
+
+def test_admin_invites_page_shows_both_pills_when_expired_and_exhausted(client, admin_enabled):
+    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code.uses = 1
+        code.last_used_at = utcnow() - timedelta(days=2)
+        code.expires_at = utcnow() - timedelta(days=1)
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.get("/admin/invites", auth=BASIC)
+    assert '<div class="status-pills">' in r.text
+    assert ">Expired<" in r.text
+    assert ">Exhausted<" in r.text
+
+
+def test_admin_invites_page_labels_expiry_before_exhaustion(client, admin_enabled):
+    """A code that expired before it was ever fully used should still show
+    as "Expired", not "Exhausted"."""
+    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+
+    db = SessionLocal()
+    try:
+        code = db.query(InviteCode).first()
+        code.uses = 1
+        # expired two days ago, last used only one day ago: expiry first
+        code.expires_at = utcnow() - timedelta(days=2)
+        code.last_used_at = utcnow() - timedelta(days=1)
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.get("/admin/invites", auth=BASIC)
+    assert 'data-status="expired"' in r.text
 
 
 def test_revoked_invite_cannot_register(client, admin_enabled):
