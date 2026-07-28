@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/21 09:51:04.705794
+Revised: 2026/07/27 15:58:17.574219
 
 Periodic-task tracking: each background task (see TASKS) is independently
 enabled, independently scheduled, and reports its own run status — one
@@ -78,6 +78,14 @@ TASKS: list[TaskSpec] = [
         "email_confirmation_cleanup",
         "Email confirmation cleanup",
         "Delete accounts that never confirmed their email within 14 days.",
+        "Security",
+        360,
+    ),
+    TaskSpec(
+        "export_cleanup",
+        "Export cleanup",
+        "Delete ready personal-data exports past their account's expiry window "
+        "(free: 7 days, premium: 1 day) so the files don't sit on disk indefinitely.",
         "Security",
         360,
     ),

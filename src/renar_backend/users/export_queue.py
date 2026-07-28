@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/21 00:00:00.000000
-Revised: 2026/07/21 09:51:08.045732
+Revised: 2026/07/27 15:58:17.429981
 
 Priority queue for building personal-data exports (see users/export.py).
 
@@ -23,7 +23,7 @@ import logging
 import threading
 
 from ..database import SessionLocal
-from ..models import ExportJob, User
+from ..models import ExportJob, User, utcnow
 from .export import build_export, write_export
 
 _log = logging.getLogger(__name__)
@@ -44,6 +44,15 @@ _progress: dict[int, dict] = {}
 
 def status(user_id: int) -> dict | None:
     return _progress.get(user_id)
+
+
+def forget(user_id: int) -> None:
+    """Drop any cached progress for `user_id` — used by
+    users/export.py::purge_expired_exports so a stale in-memory "ready"
+    entry doesn't keep answering ready after the underlying file and DB row
+    are gone (see routers/export.py's export_status, which checks this
+    cache first)."""
+    _progress.pop(user_id, None)
 
 
 def enqueue(user_id: int, *, is_premium: bool) -> None:
@@ -93,6 +102,7 @@ def _run(user_id: int) -> None:
         if job is not None:
             job.finished = True
             job.error = None
+            job.completed_at = utcnow()
             db.commit()
         _progress[user_id] = {"state": "ready"}
     except Exception:

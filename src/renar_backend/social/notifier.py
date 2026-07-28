@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/07/21 09:51:04.582302
+Revised: 2026/07/27 16:39:30.147559
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -61,7 +61,7 @@ def check_new_episodes(db: Session, fetch=fetch_show) -> int:
         try:
             data = fetch(tmdb_id)
         except Exception as exc:
-            _log.warning("TMDB fetch failed for show %s: %s", tmdb_id, exc, exc_info=True)
+            _log.warning("TMDB fetch failed for show %s: %s", tmdb_id, exc)
             continue
         # the payload is already in hand — persist it (tmdb_cache + typed
         # Title columns: show_status, next_episode_air_date, ...) for free
@@ -151,7 +151,7 @@ def check_upcoming_films(db: Session, fetch=fetch_film) -> int:
         try:
             data = fetch(title.tmdb_id)
         except Exception as exc:
-            _log.warning("TMDB fetch failed for film %s: %s", title.tmdb_id, exc, exc_info=True)
+            _log.warning("TMDB fetch failed for film %s: %s", title.tmdb_id, exc)
             continue
         store_details(db, title, data)
         refreshed += 1
@@ -206,9 +206,7 @@ def resync_tmdb_metadata(db: Session, fetch_show=fetch_show, fetch_film=fetch_fi
         try:
             data = fetch(title.tmdb_id)
         except Exception as exc:
-            _log.warning(
-                "TMDB resync fetch failed for title %s (tmdb %s): %s", title.id, title.tmdb_id, exc, exc_info=True
-            )
+            _log.warning("TMDB resync fetch failed for title %s (tmdb %s): %s", title.id, title.tmdb_id, exc)
             continue
         store_details(db, title, data)
         refreshed += 1
@@ -332,6 +330,33 @@ async def _email_confirmation_cleanup_loop() -> None:
         await asyncio.sleep(task_runs.get_interval_minutes("email_confirmation_cleanup") * 60)
 
 
+def purge_expired_exports_once() -> int:
+    from ..users.export import purge_expired_exports  # local import: avoids a cycle at module load
+
+    db = SessionLocal()
+    try:
+        return purge_expired_exports(db)
+    finally:
+        db.close()
+
+
+async def _export_cleanup_loop() -> None:
+    await asyncio.sleep(15)
+    while True:
+        if not task_runs.is_enabled("export_cleanup"):
+            _log.info("export cleanup skipped: disabled")
+        else:
+            started = utcnow()
+            try:
+                n = await asyncio.to_thread(purge_expired_exports_once)
+                _log.info("export cleanup done: %d exports purged", n)
+                task_runs.record_run("export_cleanup", started, "ok", f"{n} exports purged")
+            except Exception:
+                _log.exception("export cleanup failed")
+                task_runs.record_run("export_cleanup", started, "error", "cleanup failed, see server logs")
+        await asyncio.sleep(task_runs.get_interval_minutes("export_cleanup") * 60)
+
+
 async def _tmdb_metadata_resync_loop() -> None:
     await asyncio.sleep(15)
     while True:
@@ -350,7 +375,7 @@ async def _tmdb_metadata_resync_loop() -> None:
 
 
 def start_periodic_tasks() -> list[asyncio.Task]:
-    """Launch the five independent per-task loops; each is paused/rescheduled
+    """Launch the six independent per-task loops; each is paused/rescheduled
     without affecting the others (see task_runs.py / admin Periodic Tasks page)."""
     return [
         asyncio.create_task(_episode_check_loop()),
@@ -358,4 +383,5 @@ def start_periodic_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_film_check_loop()),
         asyncio.create_task(_tmdb_metadata_resync_loop()),
         asyncio.create_task(_email_confirmation_cleanup_loop()),
+        asyncio.create_task(_export_cleanup_loop()),
     ]

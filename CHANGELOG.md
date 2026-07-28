@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/27 13:52:44.303992 )
+[//]: # (+ Revised: 	2026/07/28 09:58:52.501523 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- Export cooldown and expiry: `ExportJob.completed_at` (migration
+  `275461ed120c`, backfilled to `queued_at` for existing ready rows), set
+  when a build finishes (`export_queue.py::_run`). `POST /export/data`
+  now 429s with a "you can request a new one in N days/hours" message
+  (`routers/export.py::_format_retry_at`) while a ready export is still
+  within its account's expiry window; `GET /export/data/status` and
+  `/export/data/download` both fall back to `never_requested`/404 once
+  that window passes, via the new shared `users/export.py::export_is_ready`
+  (also closes a bug where a DB row could outlive its file and the two
+  endpoints would disagree). Window is tier-based
+  (`EXPORT_EXPIRY_DAYS_FREE` = 7, `EXPORT_EXPIRY_DAYS_PREMIUM` = 1 —
+  same compute-priority-only reasoning as the existing queue-order perk)
+- `users/export.py::purge_expired_exports()` deletes the file, `ExportJob`
+  row, and `export_queue` in-memory cache entry for every expired ready
+  export; run on a schedule by a new `export_cleanup` periodic task
+  (`social/notifier.py::_export_cleanup_loop`, `task_runs.py`, admin
+  Periodic Tasks page)
+- `export_queue.forget()` — drops a user's cached progress entry, used by
+  `purge_expired_exports` so a stale in-memory "ready" doesn't keep
+  answering ready after the file and row are gone
 
 ## [0.7.0] - 2026-07-27
 

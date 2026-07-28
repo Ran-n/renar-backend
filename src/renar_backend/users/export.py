@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/21 00:00:00.000000
-Revised: 2026/07/27 08:29:08.786267
+Revised: 2026/07/27 16:29:49.403374
 
 Builds a user's personal-data export (GDPR Art. 20 — the right to data
 portability): every account, library and social fact Renar stores about
@@ -22,21 +22,66 @@ directly and lists every field explicitly.
 import contextlib
 import io
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import py7zr
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import settings
-from ..models import Comment, Follow, LibraryEntry, Title, User
+from ..models import Comment, ExportJob, Follow, LibraryEntry, Title, User
 from ..social.comment_threads import resolve_root_scope
 
 EXPORTS_ROOT = Path(settings.media_dir) / "exports"
 
+# A ready export both blocks a fresh request (cooldown) and stops being
+# offered for download (expiry) after the same window — with a matching
+# cooldown and expiry, the moment re-requesting is allowed again is exactly
+# the moment the old one disappears, so there's no in-between state where a
+# stale-but-still-ready export and a fresh request could coexist. Premium
+# gets a shorter window (once a day) as a compute-priority perk, same
+# reasoning as export_queue's dequeue-order priority — the GDPR right
+# itself (that an export exists at all, ever) stays identical for everyone;
+# only how often a *fresh* one can be rebuilt differs.
+EXPORT_EXPIRY_DAYS_FREE = 7
+EXPORT_EXPIRY_DAYS_PREMIUM = 1
+
 
 def export_path(user_id: int) -> Path:
     return EXPORTS_ROOT / f"{user_id}.7z"
+
+
+def export_expiry_days(is_premium: bool) -> int:
+    return EXPORT_EXPIRY_DAYS_PREMIUM if is_premium else EXPORT_EXPIRY_DAYS_FREE
+
+
+def is_export_expired(completed_at: datetime | None, is_premium: bool = False) -> bool:
+    """True once `completed_at` is missing or older than this account's
+    tier-specific expiry window. Missing (None) covers a job that's
+    queued/processing/failed — never "ready", so always treated as
+    expired/absent rather than eternally valid."""
+    if completed_at is None:
+        return True
+    return datetime.now(UTC) - completed_at >= timedelta(days=export_expiry_days(is_premium))
+
+
+def export_is_ready(job: ExportJob | None, is_premium: bool) -> bool:
+    """The single source of truth for "ready" that routers/export.py's
+    status, download, and cooldown checks all share — a DB row saying
+    finished/unexpired is not enough on its own: the row can outlive its
+    file (deleted out of band, or written by an older build under a
+    different name/format — this is a real bug that shipped once already,
+    where export_status trusted the row alone and reported "ready" for a
+    row whose file was a leftover `.zip` from before the format became
+    `.7z`, while download_export's separate is_file() check correctly
+    404'd the same request). Checking the file here too means both
+    endpoints can never disagree again.
+    """
+    if job is None or not job.finished or job.error:
+        return False
+    if is_export_expired(job.completed_at, is_premium):
+        return False
+    return export_path(job.user_id).is_file()
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -172,3 +217,45 @@ def write_export(user_id: int, content: bytes) -> None:
 def delete_export(user_id: int) -> None:
     with contextlib.suppress(FileNotFoundError):
         export_path(user_id).unlink()
+
+
+def purge_expired_exports(db: Session) -> int:
+    """Delete the file and ExportJob row for every ready export past its
+    account's expiry window (shorter for premium — see
+    EXPORT_EXPIRY_DAYS_PREMIUM), so a forgotten download doesn't sit on disk
+    indefinitely — nothing else ever calls delete_export (see that
+    function's own history: it existed but was unreachable before this).
+    Returns the number of exports purged. Periodic-task entry point is
+    social/notifier.py's export cleanup loop; see task_runs.py for the
+    admin-configurable schedule/toggle.
+
+    Also drops each user's export_queue in-memory cache entry: that cache
+    never naturally clears within a running process (see
+    routers/export.py's export_status, which checks it first), so leaving
+    a stale "ready" entry there would keep answering ready even after the
+    file and row are both gone.
+    """
+    from . import export_queue  # local import: export_queue already imports from this module
+
+    # The SQL filter only narrows to the widest possible window (premium's
+    # shorter one) — an account's actual is_premium (a Python property
+    # derived from premium_until, not a plain column) decides the real
+    # cutoff per row below, since a query can't push a per-row-varying
+    # interval into a single WHERE clause.
+    cutoff = datetime.now(UTC) - timedelta(days=EXPORT_EXPIRY_DAYS_PREMIUM)
+    candidates = (
+        db.query(ExportJob, User)
+        .join(User, User.id == ExportJob.user_id)
+        .filter(ExportJob.finished.is_(True), ExportJob.error.is_(None), ExportJob.completed_at < cutoff)
+        .all()
+    )
+    purged = 0
+    for job, user in candidates:
+        if not is_export_expired(job.completed_at, user.is_premium):
+            continue
+        delete_export(job.user_id)
+        export_queue.forget(job.user_id)
+        db.delete(job)
+        purged += 1
+    db.commit()
+    return purged
