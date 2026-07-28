@@ -1,12 +1,31 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/07/28 10:20:44.473279 )
+[//]: # (+ Revised: 	2026/07/28 17:43:09.845123 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
 
 Known gaps and follow-ups, not yet scheduled.
+
+## Multi-session sync
+
+- **Done — `GET /events` (SSE) pushes account-settings changes to every
+  open session.** `routers/events.py` + `events.py`; `PATCH /auth/profile`
+  and `PATCH /premium/style` publish `settings_changed` after committing.
+  See `docs/design-decisions.md`'s "`GET /events`" entry for the design
+  (why SSE not a WebSocket, why in-memory single-worker) and
+  renar-frontend's `docs/backlog.md` "Multi-session sync" entry for the
+  full story and client side.
+
+- **Not covered: general data sync (watch status, library, comments,
+  notifications).** The `/events` push above is account-settings only.
+  Marking an episode watched, adding to the library, posting a comment, or
+  a new notification on one session still isn't reflected on another open
+  session until it re-fetches on its own (view re-entry, poll, etc.) — no
+  push for any of that yet. Extending the same `/events` channel with more
+  event types (e.g. `library_changed`) is the likely shape of a fix, but
+  scope/priority not decided.
 
 ## Performance / responsiveness
 

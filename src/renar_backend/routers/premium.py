@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.427427
-Revised: 2026/07/21 09:51:03.925683
+Revised: 2026/07/28 17:43:10.422243
 
 Premium account features: the color palette, the profile style (avatar ring
 + username colors) and the verified-badge request flow.
@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..events import publish as publish_event
 from ..models import User
 from ..schemas import PremiumStyleUpdate, UserOut
 from ..users.auth import get_current_user, require_premium
@@ -57,6 +58,8 @@ def update_style(
     db.commit()
     db.refresh(user)
     _log.info("user id=%s updated premium style %s", user.id, changes)
+    if changes:
+        publish_event(user.id, "settings_changed")
     return user
 
 

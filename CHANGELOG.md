@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/28 09:58:52.501523 )
+[//]: # (+ Revised: 	2026/07/28 21:23:28.819190 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.8.0] - 2026-07-28
+
+### Added
+
+- `Image.source_url` (migration `40c05acfeddb`): the TMDB alternate URL an
+  image was downloaded from, recorded by `image_row_for()` on whichever row
+  the bytes resolve to, whenever that row doesn't have one yet — including
+  a dedup hit against a row created before this column existed, or an
+  upload-only row later matched by a TMDB pick with identical bytes
+  (uploads themselves leave it `NULL`). The backfill-on-dedup-hit matters in
+  practice: this column shipped with no backfill, so re-picking the exact
+  alternate a user already had set — the obvious first thing to try — used
+  to silently do nothing until this was added. `LibraryEntry` exposes the
+  result as `custom_poster_source_url`/`custom_backdrop_source_url`, and
+  `set_custom_poster`/`set_custom_backdrop`/`set_custom_episode_still`
+  (`routers/media.py`) now pass `data.tmdb_url` through; `list_episodes`'
+  `custom_stills[]` gained the equivalent `still_source_url`. Lets
+  renar-frontend's alternates picker highlight whichever tile is the
+  current pick — comparing the re-hosted `/images/<hash>` URL against TMDB
+  CDN URLs could never match otherwise
+- `InviteCode.last_used_at` (migration `a73fd0cecbb5`): set on every
+  redemption (`routers/auth.py::register`). Used by the admin invites page
+  to tell whether a code that's both past its `expires_at` and at its
+  `max_uses` hit one boundary before the other, so the status pill (and
+  which restore action to offer) reflects what actually happened first
+- Admin invites page (`routers/admin/invites.py`): a code can now be both
+  time-expired and use-exhausted at once — the row shows both status pills
+  side by side instead of only one hiding the other. `POST
+  /invites/{id}/reset-uses` resets an exhausted-only code's `uses` to 0;
+  `POST /invites/{id}/restore-expiry` gives a time-expired code a new
+  `expires_at` (or "Never") and resets `uses` together, via a per-row
+  popover with the same 24h/7d/30d/Never/Custom chip presets as invite
+  creation
+- Admin settings page (`routers/admin/settings.py`): the exempt-IPs field
+  is now a tag input (pill per IP + a bare text field in the same box)
+  instead of a raw comma-separated text box, submitting the same
+  comma-separated value the backend already parses
+- `GET /events` (`routers/events.py`): Server-Sent Events stream pushing
+  `settings_changed` to every open session of the caller's account,
+  backed by an in-process pub/sub (`events.py`, single-worker only — see
+  `docs/design-decisions.md`). `PATCH /auth/profile` and `PATCH
+  /premium/style` (`routers/auth.py`, `routers/premium.py`) publish the
+  event after committing, so a language/theme/style change on one device
+  reaches every other open session without waiting on its next navigation
+  or app-resume. SSE chosen over a WebSocket since the `websockets`
+  package has no prebuilt wheels for renar-frontend's Android/iOS build
+  targets — see renar-frontend's CHANGELOG for the client side
+- `tests/test_events.py`: pub/sub unit coverage (subscribe/unsubscribe,
+  publish delivery, publish to an unknown/empty user, publish dropping
+  silently on a full queue) plus the `GET /events` auth gate; the stream's
+  own infinite generator isn't opened directly since the sync `TestClient`
+  can't hold it open and issue a second concurrent request without
+  deadlocking against it
+
+## [0.7.1] - 2026-07-28
 
 ### Added
 

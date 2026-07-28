@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.200759
-Revised: 2026/07/17 00:00:00.000000
+Revised: 2026/07/28 15:02:00.185814
 
 DB-side helpers for the content-addressed image store.
 
@@ -27,17 +27,29 @@ from .storage import delete_image, store_image
 _log = logging.getLogger(__name__)
 
 
-def image_row_for(raw: bytes, db: Session) -> Image:
+def image_row_for(raw: bytes, db: Session, source_url: str | None = None) -> Image:
     """Find-or-create the (deduplicated) image row for these bytes; the file
     is written to the store when missing. Race-safe: concurrent requests
-    for the same bytes converge on one row."""
+    for the same bytes converge on one row.
+
+    `source_url` (the TMDB alternate URL this was downloaded from, when
+    applicable) is recorded whenever the resolved row doesn't have one yet —
+    including a dedup hit against a row created before this column existed,
+    or an upload-only row later matched by a TMDB pick with the same bytes.
+    A row that already has a (possibly different) source_url is left alone:
+    first-recorded wins rather than flip-flopping on every dedup hit. It's a
+    best-effort hint for the frontend's "this is your current pick"
+    highlight in the alternates picker, not a guarantee."""
     hash_ = store_image(raw)  # no-op when the identical file already exists
     image = db.query(Image).filter_by(hash=hash_).first()
     if image is not None:
+        if source_url is not None and image.source_url is None:
+            image.source_url = source_url
+            db.flush()
         return image
     try:
         with db.begin_nested():
-            image = Image(hash=hash_, size_bytes=len(raw))
+            image = Image(hash=hash_, size_bytes=len(raw), source_url=source_url)
             db.add(image)
         db.flush()
         return image
@@ -45,6 +57,9 @@ def image_row_for(raw: bytes, db: Session) -> Image:
         image = db.query(Image).filter_by(hash=hash_).first()
         if image is None:
             raise
+        if source_url is not None and image.source_url is None:
+            image.source_url = source_url
+            db.flush()
         return image
 
 

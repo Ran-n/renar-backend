@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/07/28 10:36:46.257206
+Revised: 2026/07/28 12:54:39.957764
 """
 
 import logging
@@ -413,7 +413,7 @@ def set_custom_poster(
     the shared Title poster is never modified."""
     item = _get_owned_item(item_id, user, db)
     raw = _resolve_raw_image(data)
-    new_id = image_row_for(normalize_jpeg(raw, POSTER_MAX), db).id
+    new_id = image_row_for(normalize_jpeg(raw, POSTER_MAX), db, source_url=data.tmdb_url).id
     _swap_image(item, "custom_poster_image_id", new_id, db)
     db.commit()
     db.refresh(item)
@@ -451,7 +451,7 @@ def set_custom_backdrop(
     the shared Title backdrop is never modified."""
     item = _get_owned_item(item_id, user, db)
     raw = _resolve_raw_image(data)
-    new_id = image_row_for(normalize_jpeg(raw, BACKDROP_MAX), db).id
+    new_id = image_row_for(normalize_jpeg(raw, BACKDROP_MAX), db, source_url=data.tmdb_url).id
     _swap_image(item, "custom_backdrop_image_id", new_id, db)
     db.commit()
     db.refresh(item)
@@ -509,7 +509,7 @@ def set_custom_episode_still(
     item = _get_owned_item(item_id, user, db)
     raw = _resolve_raw_image(data)
     still = _get_custom_still(item, season, episode, db)
-    img = image_row_for(normalize_jpeg(raw, BACKDROP_MAX), db)
+    img = image_row_for(normalize_jpeg(raw, BACKDROP_MAX), db, source_url=data.tmdb_url)
     old_image_id = still.still_image_id if still else None
     if still is None:
         still = EpisodeCustomStill(media_item_id=item.id, season=season, episode=episode, still_image_id=img.id)
@@ -520,7 +520,7 @@ def set_custom_episode_still(
         db.flush()  # GC must see the new reference
         gc_image(old_image_id, db)
     db.commit()
-    return {"still_url": f"/images/{img.hash}"}
+    return {"still_url": f"/images/{img.hash}", "still_source_url": img.source_url}
 
 
 @router.delete("/{item_id}/episodes/{season}/{episode}/still")
@@ -541,7 +541,7 @@ def clear_custom_episode_still(
         db.flush()
         gc_image(old_image_id, db)
     db.commit()
-    return {"still_url": None}
+    return {"still_url": None, "still_source_url": None}
 
 
 # ---------- per-episode tracking ----------
@@ -641,7 +641,12 @@ def list_episodes(
     # as the item-level poster/backdrop overrides)
     custom_stills = (
         [
-            {"season": s.season, "episode": s.episode, "still_url": f"/images/{s.still_image.hash}"}
+            {
+                "season": s.season,
+                "episode": s.episode,
+                "still_url": f"/images/{s.still_image.hash}",
+                "still_source_url": s.still_image.source_url,
+            }
             for s in db.query(EpisodeCustomStill).filter(EpisodeCustomStill.media_item_id == item.id).all()
         ]
         if item.owner.is_premium

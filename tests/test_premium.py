@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.607537
-Revised: 2026/07/21 09:51:05.731046
+Revised: 2026/07/28 15:02:00.276076
 
 Premium accounts: badge derivation, style colors, verification requests,
 custom posters (upload + GC) and the admin grant/revoke/verify actions.
@@ -404,6 +404,50 @@ def test_delete_entry_gcs_poster_image(client, alice):
     client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
     assert client.delete(f"/media/{item['id']}", headers=headers).status_code == 204
     assert _image_count() == 0
+
+
+def test_set_poster_from_tmdb_records_source_url(client, alice, monkeypatch):
+    """Picking a TMDB alternate (vs. uploading) should leave a trail back to
+    the URL it came from, so the frontend's alternates picker can highlight
+    the currently-active tile."""
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    url = "https://image.tmdb.org/t/p/w500/abc.jpg"
+    monkeypatch.setattr("renar_backend.routers.media.fetch_poster_bytes", lambda u: base64.b64decode(_png_b64()))
+
+    r = client.put(f"/media/{item['id']}/poster", json={"tmdb_url": url}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["custom_poster_source_url"] == url
+
+    # an upload has no source URL to record
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64((30, 30, 200))}, headers=headers)
+    assert client.get(f"/media/{item['id']}", headers=headers).json()["custom_poster_source_url"] is None
+
+
+def test_set_poster_from_tmdb_backfills_source_url_on_dedup_hit(client, alice, monkeypatch):
+    """A dedup hit against an existing (upload-created) image row should
+    still record the source URL if that row didn't have one yet — otherwise
+    re-picking the exact same TMDB alternate a user already has set (a very
+    likely first thing to try after this feature shipped, on an image set
+    before this column existed) would silently never gain a source_url."""
+    user, headers = alice
+    _set_premium(user["id"])
+    item = _add_film(client, headers)
+    png_bytes = base64.b64decode(_png_b64())
+
+    # upload-created row: no source_url
+    client.put(f"/media/{item['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
+    assert client.get(f"/media/{item['id']}", headers=headers).json()["custom_poster_source_url"] is None
+
+    # a TMDB pick that happens to produce byte-identical content dedups onto
+    # that same row, and should backfill its source_url
+    url = "https://image.tmdb.org/t/p/w500/dedup.jpg"
+    monkeypatch.setattr("renar_backend.routers.media.fetch_poster_bytes", lambda u: png_bytes)
+    r = client.put(f"/media/{item['id']}/poster", json={"tmdb_url": url}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["custom_poster_source_url"] == url
+    assert _image_count() == 1  # still deduped onto one row, not a second
 
 
 def test_shared_image_survives_poster_gc(client, alice):
