@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/27 09:51:03.045699
+Revised: 2026/07/27 15:58:17.285824
 """
 
 import enum
@@ -1048,16 +1048,22 @@ class ImportJob(Base):
 class ExportJob(Base):
     """Durable marker for a user's personal-data export (GDPR Art. 20 — the
     right to data portability). Every user can request one regardless of
-    premium status; `queued_at` only feeds the worker's priority queue (see
-    users/export_queue.py) — premium requests are dequeued first because
-    they're paying for compute priority, never as a way to withhold the
-    export itself, which stays free and available to everyone.
+    premium status — `is_premium` only feeds the worker's priority queue
+    (see users/export_queue.py) — premium requests are dequeued first
+    because they're paying for compute priority, never as a way to withhold
+    the export itself, which stays free and available to everyone.
 
     Same shape as ImportJob and for the same reason: routers/export.py keeps
     live progress in an in-memory dict that doesn't survive a restart, so a
     status poll after one needs this row to tell "queued job got dropped by
     the restart" apart from "never requested". The finished export file
     itself lives on disk (users/export.py::export_path), not in this row.
+
+    `queued_at` is bumped on every request, not just the first — it's the
+    "last requested" timestamp, not a creation timestamp. `completed_at` is
+    set only on a successful finish and drives both the request cooldown and
+    the ready-export expiry (see users/export.py::is_export_expired and
+    migration 275461ed120c); it stays None while queued/processing/failed.
     """
 
     __tablename__ = "export_jobs"
@@ -1066,6 +1072,7 @@ class ExportJob(Base):
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished: Mapped[bool] = mapped_column(Boolean, default=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # Alembic migrations are the source of truth for real deployments, but tests
