@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.262466
-Revised: 2026/07/22 17:09:33.636308
+Revised: 2026/07/28 10:20:35.347592
 
 Per-episode tracking: set/unset, bulk, progress sync, rewatches, ratings.
 """
@@ -95,6 +95,102 @@ def test_set_episode_on_other_users_show_not_found(client, alice, bob):
     show = _show(client, alice_headers)
     r = client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True}, headers=bob_headers)
     assert r.status_code == 404
+
+
+def test_set_episode_future_air_date_rejected(client, alice, monkeypatch):
+    _, headers = alice
+    show = _show(client, headers, media_type="tv_show", tmdb_id=70523)
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    future = date.today() + timedelta(days=10)
+    monkeypatch.setattr(
+        tmdb_store,
+        "tmdb_get",
+        lambda path, params=None, cache=True: _season_payload(
+            (1, "Future Ep", future.isoformat()),
+        ),
+    )
+    assert client.get("/upcoming/history", headers=headers).status_code == 200  # seeds Episode catalog
+
+    r = client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+    assert r.status_code == 422
+    assert "not aired" in r.json()["detail"].lower()
+
+
+def test_set_episode_past_air_date_allowed(client, alice, monkeypatch):
+    _, headers = alice
+    show = _show(client, headers, media_type="tv_show", tmdb_id=70523)
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    past = date.today() - timedelta(days=3)
+    monkeypatch.setattr(
+        tmdb_store,
+        "tmdb_get",
+        lambda path, params=None, cache=True: _season_payload(
+            (1, "Aired Ep", past.isoformat()),
+        ),
+    )
+    assert client.get("/upcoming/history", headers=headers).status_code == 200
+
+    r = client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+    assert r.status_code == 200
+
+
+def test_set_episode_no_catalog_row_allowed(client, alice):
+    """Episode not in our catalog (no tmdb_id / no Episode row) → no guard."""
+    _, headers = alice
+    show = _show(client, headers)  # no tmdb_id
+    r = client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+    assert r.status_code == 200
+
+
+def test_set_episode_null_air_date_allowed(client, alice, monkeypatch):
+    """Episode in catalog but air_date is NULL → no guard (treat as possibly aired)."""
+    _, headers = alice
+    show = _show(client, headers, media_type="tv_show", tmdb_id=70523)
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    monkeypatch.setattr(
+        tmdb_store,
+        "tmdb_get",
+        lambda path, params=None, cache=True: _season_payload(
+            (1, "Unknown Date", None),
+        ),
+    )
+    assert client.get("/upcoming/history", headers=headers).status_code == 200
+
+    r = client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+    assert r.status_code == 200
+
+
+def test_bulk_episodes_future_air_date_rejected(client, alice, monkeypatch):
+    _, headers = alice
+    show = _show(client, headers, media_type="tv_show", tmdb_id=70523, total_episodes=3)
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    past = date.today() - timedelta(days=3)
+    future = date.today() + timedelta(days=10)
+    monkeypatch.setattr(
+        tmdb_store,
+        "tmdb_get",
+        lambda path, params=None, cache=True: _season_payload(
+            (1, "Aired", past.isoformat()),
+            (2, "Future", future.isoformat()),
+        ),
+    )
+    assert client.get("/upcoming/history", headers=headers).status_code == 200
+
+    r = client.post(
+        f"/media/{show['id']}/episodes/bulk",
+        json={"season": 1, "episodes": [1, 2]},
+        headers=headers,
+    )
+    assert r.status_code == 422
+    assert "not aired" in r.json()["detail"].lower()
+
+    # Only the aired episode (ep 1) can be marked
+    r = client.post(
+        f"/media/{show['id']}/episodes/bulk",
+        json={"season": 1, "episodes": [1]},
+        headers=headers,
+    )
+    assert r.status_code == 200
 
 
 def test_watching_all_episodes_completes_show(client, alice):
