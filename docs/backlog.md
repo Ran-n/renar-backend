@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/07/27 13:50:25.209636 )
+[//]: # (+ Revised: 	2026/07/28 10:20:44.473279 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -434,12 +434,12 @@ import outcomes don't clobber each other.
 
 ## Bugs
 
-- **Block marking future (unaired) episodes as watched — server-side enforcement.**
-  `PUT /media/{id}/episodes/{season}/{episode}` → `set_episode()` in `media.py`
-  must reject watch requests for episodes whose `air_date` is a future date (422
-  with a clear message). If the episode has no known air date, allow it (treat as
-  possibly aired/leaked). The frontend also guards this, but the backend must
-  enforce it independently so the constraint can't be bypassed via the API.
+- **Block marking future (unaired) episodes as watched — server-side enforcement — fixed.**
+  `_assert_not_future_episode()` helper in `routers/media.py` called from both
+  `set_episode` (single toggle) and `bulk_episodes` before any `EpisodeWatch` rows
+  are written. Raises 422 when the `Episode` catalog row exists and its `air_date`
+  is a future date. No catalog row or NULL air_date → allowed (treat as possibly
+  aired/untracked). Six tests added to `tests/test_episodes.py`.
 
 - **Show fully up-to-date with aired episodes must not appear in "Watch Next".**
   `list_media()` with `order_by="last_watched"` powers the "Continue Watching"

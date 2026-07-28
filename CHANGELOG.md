@@ -35,6 +35,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `purge_expired_exports` so a stale in-memory "ready" doesn't keep
   answering ready after the file and row are gone
 
+### Fixed
+
+- Marking future (unaired) episodes as watched was only blocked client-side;
+  `PUT /media/{id}/episodes/{season}/{episode}` and
+  `POST /media/{id}/episodes/bulk` accepted the same request straight against
+  the API. Added `routers/media.py::_assert_not_future_episode()`, called
+  before either endpoint writes an `EpisodeWatch` row, raising 422 when the
+  episode exists in the `Episode` catalog with a known future `air_date`
+  (missing catalog row or `NULL` air date is still allowed, treated as
+  possibly aired/untracked). Six new tests in `tests/test_episodes.py`.
+
 ## [0.7.0] - 2026-07-27
 
 ### Added

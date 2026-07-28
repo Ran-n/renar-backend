@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/07/26 19:01:22.261390
+Revised: 2026/07/28 10:36:46.257206
 """
 
 import logging
@@ -734,6 +734,28 @@ def undo_rewatch(
     return _ratings_summary(item, db)
 
 
+def _assert_not_future_episode(item: LibraryEntry, season: int, episode_number: int, db: Session) -> None:
+    """Raise 422 if the episode's air_date is a future date.
+
+    Only fires when the episode exists in our catalog AND has a known air_date
+    that hasn't arrived yet.  Missing catalog row or NULL air_date → allowed
+    (treat as possibly aired or untracked). Unset on the unwatch path — only
+    called when marking an episode as watched.
+    """
+    if item.title_id is None:
+        return
+    ep = (
+        db.query(Episode)
+        .filter(Episode.title_id == item.title_id, Episode.season == season, Episode.episode_number == episode_number)
+        .first()
+    )
+    if ep is not None and ep.air_date is not None and ep.air_date > date.today():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"S{season:02d}E{episode_number:02d} has not aired yet (air date: {ep.air_date})",
+        )
+
+
 @router.put("/{item_id}/episodes/{season}/{episode}")
 def set_episode(
     item_id: int,
@@ -754,6 +776,7 @@ def set_episode(
         .first()
     )
     if data.watched:
+        _assert_not_future_episode(item, season, episode, db)
         if watch is None:
             watch = EpisodeWatch(media_item_id=item.id, season=season, episode=episode)
             db.add(watch)
@@ -773,6 +796,9 @@ def bulk_episodes(
     user: User = Depends(get_current_user),
 ):
     item = _get_owned_item(item_id, user, db)
+    if data.watched:
+        for ep in data.episodes:
+            _assert_not_future_episode(item, data.season, ep, db)
     existing = {
         w.episode: w
         for w in db.query(EpisodeWatch).filter(
