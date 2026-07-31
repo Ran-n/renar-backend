@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/07/28 17:43:09.845123 )
+[//]: # (+ Revised: 	2026/07/31 19:02:53.096097 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -304,40 +304,148 @@ import outcomes don't clobber each other.
 
 - **Real email confirmation on registration — done.** `users/email_confirmation.py`
   (codes, bcrypt hashing, Brevo send with a logged-not-sent fallback while
-  `BREVO_API_KEY` is unset, resend throttle, 14-day cleanup loop) plus
-  `routers/auth.py`'s `/auth/confirm-email` and `/auth/resend-confirmation`
-  (credential-based, not token-based — an account past the login grace
-  period has no token to authenticate with otherwise), `/auth/change-unconfirmed-email`
-  (fix a typo'd address before the first confirmation — direct rewrite, no
-  old-address approval needed since there's no current owner to protect
-  yet), the two-step email-change flow in `update_profile`, and the 7-day
-  login grace period before an unconfirmed account is blocked.
-  `User.email_confirmed` defaults to `False` for every row including
-  existing users. This was built specifically to close the ranking-inflation
-  gap noted under the Turnstile item below: `_compute_ranking`
-  (`routers/stats.py`) and `app_counters.total_users` (`db_triggers.py`) now
-  only count confirmed users. **Grandfathering (migration `ffffe2b24717`):**
-  the original "no grandfathering" decision had a real bug — the login
-  grace period is measured from `User.created_at`, so any account already
-  older than 7 days at migration time got zero actual grace and would be
-  blocked at its very next login, silently locking out an entire established
-  user base on rollout day. Fixed with `User.email_confirmation_grandfathered`,
-  backfilled `True` for every account that existed before this feature
-  shipped: exempts the login-gate block and the 14-day cleanup deletion
-  permanently, without marking the account `email_confirmed` — it still
-  doesn't count toward ranking until it actually confirms, which is the
-  entire point. Only accounts created *after* rollout are ever subject to
-  the block/cleanup. **Admin kill switch:** `SiteSettings.email_confirmation_enabled`
-  (Site Settings page, same pattern as `turnstile_enabled`) — off skips the
-  code step for new registrations entirely and immediately bulk-confirms
-  every currently-unconfirmed account (so nobody stays silently excluded
-  from ranking or blocked at login once the feature is off); the settings
-  page also surfaces a warning when `BREVO_API_KEY` is unset, since that's
-  the reason codes aren't actually being emailed yet. Not yet done: real
-  sending is still off (`BREVO_API_KEY` unset) pending the subdomain/DNS
-  work in the Infrastructure section; the Brevo bounce/complaint webhook;
-  and the admin panel has no live toggle for the grace-period/cleanup
-  windows (currently fixed constants in `users/email_confirmation.py`).
+  `BREVO_API_KEY` is unset, resend throttle, cleanup loop) plus
+  `routers/auth.py`'s `/auth/confirm-email` + `/auth/resend-confirmation`
+  (credential-based — an account past the login grace period has no token to
+  authenticate with otherwise) and their bearer-token twins
+  `/auth/confirm-email-session` + `/auth/resend-confirmation-session` (for a
+  still-logged-in but unconfirmed session, e.g. a restored session inside
+  the grace period, where re-asking for the password would be redundant),
+  `/auth/change-unconfirmed-email(-session)` (fix a typo'd address before
+  the first confirmation — direct rewrite, no old-address approval needed
+  since there's no current owner to protect yet), the two-step email-change
+  flow in `update_profile`, and a login grace period before an unconfirmed
+  account is blocked. `User.email_confirmed` defaults to `False` for every
+  row including existing users. This was built specifically to close the
+  ranking-inflation gap noted under the Turnstile item below:
+  `_compute_ranking` (`routers/stats.py`) and `app_counters.total_users`
+  (`db_triggers.py`) now only count confirmed users.
+
+  **Pre-existing accounts:** the original `email_confirmation_grandfathered`
+  flag (migration `ffffe2b24717`) exempted every account that existed before
+  rollout from the login-gate block and cleanup deletion without marking it
+  `email_confirmed`. A later migration replaced that with a simpler,
+  permanent fix: every account that existed at rollout time was bulk-marked
+  `email_confirmed = True` directly, and the `email_confirmation_grandfathered`
+  column was dropped.
+
+  **`email_confirmed` vs. `email_confirmation_bypassed`:** the same "mark it
+  confirmed outright, don't track a separate exemption" approach now also
+  covers new accounts that register while confirmation is off, and any
+  account an admin's kill-switch toggle bulk-confirms — see below. Both
+  cases additionally set `User.email_confirmation_bypassed = True`
+  (migration `6d15f435ffcf`), a purely informational marker: nothing
+  re-gates on it, but the admin user list's email tooltip distinguishes a
+  real OTP round trip ("email confirmed") from one that never happened
+  ("email confirmed (bypassed: ...)"), and the profile screen offers a
+  bypassed account a **voluntary** "Verify email" tile — reusing the
+  `-session` endpoints above, with the `email_confirmed` guard on them
+  loosened to let a bypassed account through — that clears the flag once
+  they complete a real code round trip. Only accounts created *after*
+  rollout, with the feature on and never bulk-confirmed, are ever subject
+  to the grace-period block/cleanup.
+
+  **Admin kill switch:** `SiteSettings.email_confirmation_enabled` (Site
+  Settings page, same pattern as `turnstile_enabled`) — off skips the code
+  step for new registrations entirely (bypassed) and immediately
+  bulk-confirms every currently-unconfirmed account (bypassed too, so
+  nobody stays silently excluded from ranking or blocked at login once the
+  feature is off); re-enabling it does not retroactively re-lock anyone.
+  The Site Settings page also has a full Email section now: sender
+  name/address, confirmation-code TTL, grace-period days, and cleanup-days
+  are all admin-configurable (previously fixed constants), plus a warning
+  when `BREVO_API_KEY` is unset, since that's the reason codes aren't
+  actually being emailed yet. Not yet done: real sending is still off
+  (`BREVO_API_KEY` unset by default) pending the subdomain/DNS work in the
+  Infrastructure section; the Brevo bounce/complaint webhook.
+
+- **Design the registration flow around the email-confirmation toggle
+  flipping on/off — user priority (2026-07-29).** The toggle
+  (`SiteSettings.email_confirmation_enabled`) and its two bulk-confirm/
+  bypass mechanics above were each added reactively, one migration at a
+  time (`ffffe2b24717` grandfathering → `1b63409d9417` dropping it for a
+  direct bulk `email_confirmed = True` → `6d15f435ffcf` adding
+  `email_confirmation_bypassed`), rather than designed as one flow up
+  front. Worth a proper pass rather than another one-off patch.
+
+  **What shipped in the 2026-07-29 session** (context for the open
+  questions below — all already covered in more detail in the "Real email
+  confirmation" entry above and `docs/design-decisions.md`'s
+  "`email_confirmed` is authoritative" entry):
+  - Backend: migration `4b2026dc80cd` (email sender name/address and
+    confirmation-code TTL moved from fixed constants onto `SiteSettings`)
+    and migration `68156a912acf` (grace-period days and cleanup-days,
+    same move), both admin-editable on the Site Settings page; migration
+    `1b63409d9417` (dropped `email_confirmation_grandfathered`,
+    bulk-marked every pre-rollout account `email_confirmed = True`
+    directly); migration `6d15f435ffcf` (added
+    `User.email_confirmation_bypassed`, set at registration when the
+    toggle is off and at the admin's bulk-confirm-on-disable). New
+    `/auth/confirm-email-session`, `/auth/resend-confirmation-session`,
+    `/auth/change-unconfirmed-email-session` (bearer-token twins of the
+    existing credential-based endpoints, for a still-logged-in but
+    unconfirmed session); `_resend_confirmation`/`_confirm_email_code`'s
+    "already confirmed" guard loosened to let a *bypassed* account through
+    (and clear the flag on a real completed round trip), so the voluntary
+    flow below has something to call. `routers/admin/users.py`: the email
+    cell's tooltip now distinguishes a real OTP round trip from a bypassed
+    one; `routers/admin/settings.py` grew the new Email section.
+  - Frontend: `confirm_email_view.py` reworked to support session mode
+    (`use_session`), client-side code-expiry countdown, reactive
+    stale/expired-code detection, and four distinct framings via
+    `confirm_reason` (`register`, `login_reminder`, `login_blocked`,
+    and the new `voluntary`). New `profile_view.py` "Verify email" tile,
+    shown only when `/auth/me` reports `email_confirmation_bypassed`,
+    routing into the same view in voluntary/session mode. `UserOut` gained
+    `email_confirmation_bypassed` so the client can see it at all.
+  - Tests: `tests/test_email_confirmation.py` grew coverage for the bypass
+    flag being set on both paths (registration-time, bulk-confirm-on-disable),
+    re-enabling not retroactively re-locking anyone, a real OTP round trip
+    leaving the flag `False`, and the new voluntary-confirmation-via-session
+    path (`test_bypassed_account_can_request_and_complete_voluntary_confirmation`,
+    `test_genuinely_confirmed_account_still_rejects_resend`). Full backend
+    suite (552 tests) green.
+  - Docs: this backlog entry and the "Real email confirmation" entry above
+    it, plus a matching pair of entries in renar-frontend's `docs/backlog.md`
+    and both repos' `docs/design-decisions.md` — see those for the
+    reasoning behind each piece, not repeated here.
+
+  Open questions for the actual design pass:
+  - **Toggle-flip races.** `register()` reads
+    `ss.email_confirmation_enabled` once to decide `email_confirmed`/
+    `email_confirmation_bypassed` at insert time; the admin's bulk-confirm
+    on disable is a separate, later `UPDATE ... WHERE email_confirmed IS
+    false`. A registration committing between those two isn't provably
+    impossible — worth confirming there's no window where a row is
+    inserted unconfirmed (feature still reads as "on" to `register()`)
+    just as the bulk-confirm's `WHERE` clause is evaluated, and it's
+    skipped by one commit's worth of timing.
+  - **Re-enabling never re-locks anyone, on purpose
+    (`test_reenabling_feature_does_not_unconfirm_bulk_confirmed_users`)**
+    — is that the right permanent policy, or should there be a way to
+    later require bypassed accounts to actually verify (e.g. if the site
+    moves from invite-only/low-trust to open registration and wants to
+    tighten retroactively)? Right now the only way back to "really
+    confirmed" is the voluntary profile tile, which nothing nudges anyone
+    toward.
+  - **Ranking currently doesn't distinguish real vs. bypassed
+    confirmation** — `_compute_ranking` only checks `email_confirmed`,
+    so a bypassed account (never proved ownership) ranks exactly like a
+    verified one. Intentional per `docs/design-decisions.md`'s
+    "`email_confirmed` is authoritative" entry, but worth an explicit
+    product decision on whether that's acceptable long-term, especially
+    if the toggle gets flipped off temporarily just to onboard a batch of
+    users quickly.
+  - **No visibility into how many accounts are bypassed vs. really
+    confirmed**, other than reading each row's tooltip one at a time in
+    the admin user list — no aggregate count/filter, unlike `total_users`
+    or the ranking-eligible count.
+  - **The voluntary "Verify email" tile (renar-frontend's
+    `profile_view.py`) is entirely passive** — shown, never surfaced via
+    notification/reminder/badge. Decide whether that's sufficient or
+    whether bypassed accounts should get any kind of nudge, and if so
+    how that squares with "no obligation" being the whole point of the
+    tile.
 
 - **Soft delete with a 30-day grace period for account deletion.**
   `DELETE /auth/me` (`routers/auth.py:520-525`) currently calls
@@ -476,6 +584,18 @@ import outcomes don't clobber each other.
   all before this ordering rule is applied. The ordering currently sorts by
   `last_watched` descending; a secondary sort key is needed for shows with at
   least one unwatched aired episode whose `air_date > last_watched_at`.
+
+- **`/auth/me` doesn't expose how many grace-period days an unconfirmed
+  account has left.** Flagged from the frontend side (renar-frontend's
+  `docs/backlog.md`, 2026-07-30 sweep): `confirm_email_view.py`'s
+  `login_reminder`/`login_blocked` copy always shows the *full*
+  `SiteSettings.email_confirmation_grace_days` value ("you have 7 days
+  left") since the frontend has no way to compute the actual remaining
+  count — it knows `days` as a hardcoded mirror constant, not
+  `user.created_at`. A `grace_days_remaining`-style field on `UserOut`
+  (or folded into the `email_not_confirmed` 403's detail) would let the
+  frontend show the real number instead of a static one that's wrong
+  from day 2 onward.
 
 ## Features
 

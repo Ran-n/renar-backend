@@ -66,6 +66,11 @@ def _make_defaults() -> SiteSettings:
         trust_proxy_headers=settings.trust_proxy_headers,
         exempt_ips=settings.exempt_ips,
         tmdb_db_cache_hours=settings.tmdb_db_cache_hours,
+        email_sender_address=settings.email_sender_address,
+        email_sender_name=settings.email_sender_name,
+        confirmation_code_ttl_minutes=settings.confirmation_code_ttl_minutes,
+        email_confirmation_grace_days=settings.email_confirmation_grace_days,
+        unconfirmed_account_cleanup_days=settings.unconfirmed_account_cleanup_days,
     )
 
 

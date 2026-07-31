@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/21 09:51:03.416908
+Revised: 2026/07/29 16:13:44.002226
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
@@ -287,7 +287,7 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
         else (
             '<p class="settings-warning">&#x26A0; BREVO_API_KEY is not set in this server\'s .env &mdash; '
             "confirmation codes are logged to the server console instead of actually emailed. "
-            "Set it (and EMAIL_SENDER_ADDRESS) and restart to send real emails.</p>"
+            "Set it and restart, then configure sender name/address below.</p>"
         )
     }
       </div>
@@ -410,6 +410,55 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
           How long a persisted TMDB payload (details/season/credits of a tracked
           title) is served without re-contacting TMDB. Older copies refresh on
           access and are served stale only while TMDB is unreachable.
+        </p>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x2709;</span>Email</div>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <label for="email_sender_name">Sender name</label>
+            <input type="text" id="email_sender_name" name="email_sender_name"
+                   value="{sv(ss.email_sender_name)}" maxlength="100" required>
+          </div>
+          <div class="settings-field">
+            <label for="email_sender_address">Sender address</label>
+            <input type="text" id="email_sender_address" name="email_sender_address"
+                   value="{sv(ss.email_sender_address)}" maxlength="200" required>
+          </div>
+          <div class="settings-field">
+            <label for="confirmation_code_ttl">Confirmation code lifetime (minutes)</label>
+            <input type="number" id="confirmation_code_ttl" name="confirmation_code_ttl_minutes"
+                   value="{nv(ss.confirmation_code_ttl_minutes)}" min="1" max="1440" required>
+          </div>
+          <div class="settings-field">
+            <label for="email_confirmation_grace_days">Login grace period (days)</label>
+            <input type="number" id="email_confirmation_grace_days" name="email_confirmation_grace_days"
+                   value="{nv(ss.email_confirmation_grace_days)}" min="1" max="365" required>
+          </div>
+          <div class="settings-field">
+            <label for="unconfirmed_account_cleanup_days">Unconfirmed account cleanup (days)</label>
+            <input type="number" id="unconfirmed_account_cleanup_days" name="unconfirmed_account_cleanup_days"
+                   value="{nv(ss.unconfirmed_account_cleanup_days)}" min="1" max="365" required>
+          </div>
+        </div>
+        <p class="settings-hint">
+          Grace period: how long an unconfirmed account can still log in before being blocked.
+          Cleanup: how long an unconfirmed account is kept before being deleted entirely. Cleanup
+          should stay longer than the grace period, or accounts get deleted before ever being blocked.
+        </p>
+        {
+        ""
+        if settings.brevo_api_key
+        else (
+            '<p class="settings-warning">&#x26A0; BREVO_API_KEY is not set in this server\'s .env '
+            "&mdash; confirmation codes are logged to the server console instead of actually emailed. "
+            "Set it in .env and restart to send real emails; the fields above take effect immediately "
+            "once it is.</p>"
+        )
+    }
+        <p class="settings-hint">
+          Sender address must be on a domain verified with Brevo, or delivery will fail.
         </p>
       </div>
 
@@ -538,6 +587,11 @@ def save_settings(
     trust_proxy_headers: str | None = Form(default=None),
     exempt_ips: str = Form(default=""),
     tmdb_db_cache_hours: int = Form(...),
+    email_sender_name: str = Form(...),
+    email_sender_address: str = Form(...),
+    confirmation_code_ttl_minutes: int = Form(...),
+    email_confirmation_grace_days: int = Form(...),
+    unconfirmed_account_cleanup_days: int = Form(...),
     admin_user: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
@@ -557,7 +611,10 @@ def save_settings(
         confirmed_count = (
             db.query(User)
             .filter(User.email_confirmed.is_(False))
-            .update({User.email_confirmed: True}, synchronize_session=False)
+            .update(
+                {User.email_confirmed: True, User.email_confirmation_bypassed: True},
+                synchronize_session=False,
+            )
         )
         if confirmed_count:
             _log.info("admin disabled email confirmation: bulk-confirmed %d accounts", confirmed_count)
@@ -575,6 +632,11 @@ def save_settings(
     ss.trust_proxy_headers = trust_proxy_headers == "1"
     ss.exempt_ips = [ip.strip() for ip in exempt_ips.split(",") if ip.strip()]
     ss.tmdb_db_cache_hours = tmdb_db_cache_hours
+    ss.email_sender_name = email_sender_name.strip()
+    ss.email_sender_address = email_sender_address.strip()
+    ss.confirmation_code_ttl_minutes = confirmation_code_ttl_minutes
+    ss.email_confirmation_grace_days = email_confirmation_grace_days
+    ss.unconfirmed_account_cleanup_days = unconfirmed_account_cleanup_days
     db.commit()
     _site_settings_mod.invalidate()
     _log.info(

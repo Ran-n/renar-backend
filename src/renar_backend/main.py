@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/28 17:43:10.515866
+Revised: 2026/07/29 12:37:37.673660
 """
 
 import asyncio
@@ -13,6 +13,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
+import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -139,3 +140,36 @@ def home():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+class _ShutdownCancellationSilencer:
+    """Swallows the CancelledError that tears through an open connection
+    (e.g. the SSE stream in routers/events.py) when the process is Ctrl+C'd.
+
+    asyncio.CancelledError (and anyio.WouldBlock, raised as its proximate
+    cause here) are BaseException subclasses, so they skip every
+    `except Exception` in the FastAPI/Starlette stack — including
+    ServerErrorMiddleware — and land straight in uvicorn's run_asgi, which
+    logs them as "Exception in ASGI application" with a multi-frame
+    traceback. The interrupt itself is expected and harmless; only the
+    traceback is noise, so it's downgraded to one clean log line here,
+    at the one layer outside the FastAPI middleware stack uvicorn calls
+    directly.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await self.app(scope, receive, send)
+        except (asyncio.CancelledError, anyio.WouldBlock):
+            if scope["type"] != "http":
+                raise
+            _log.info("connection torn down by shutdown: %s %s", scope.get("method"), scope.get("path"))
+
+
+# What uvicorn actually serves. Kept separate from `app` so tests
+# (TestClient(app), dependency_overrides, ...) keep using the plain
+# FastAPI instance untouched.
+asgi_app = _ShutdownCancellationSilencer(app)

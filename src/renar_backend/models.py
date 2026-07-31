@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/07/28 12:54:39.869306
+Revised: 2026/07/29 16:13:43.810023
 """
 
 import enum
@@ -133,20 +133,20 @@ class User(Base):
     # True once the user has completed a code-confirmation round trip proving
     # ownership of `email` (see users/email_confirmation.py). Indexed: it's
     # filtered on every /stats/ranking request (routers/stats.py._compute_ranking)
-    # to keep unconfirmed/throwaway accounts out of the leaderboard. Existing
-    # rows default to False on migration (see email_confirmation_grandfathered
-    # below for why that doesn't lock them out of login).
+    # to keep unconfirmed/throwaway accounts out of the leaderboard. Backfilled
+    # to True for every pre-existing account by migration (see its docstring
+    # for why: an account-age-based grace period would otherwise lock out an
+    # established user base on day one).
     email_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
-    # True for every account that existed before this feature shipped
-    # (backfilled by migration ffffe2b24717 — see its docstring). Exempts an
-    # account from the login-gate grace-period block (routers/auth.py's
-    # login) and from the 14-day unconfirmed-account cleanup
-    # (users/email_confirmation.py's cleanup_unconfirmed_accounts) WITHOUT
-    # marking it email_confirmed — it still doesn't count toward
-    # /stats/ranking until it actually confirms. Never set for a newly
-    # registered account; the login/cleanup exemption applies once, forever,
-    # to whatever existed at rollout, not to accounts created afterward.
-    email_confirmation_grandfathered: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # True when email_confirmed was set to True without the user ever
+    # completing the code round trip: either they registered while
+    # SiteSettings.email_confirmation_enabled was off (routers/auth.py's
+    # register), or an admin disabled that toggle while this account was
+    # still unconfirmed (routers/admin/settings.py's bulk-confirm). Purely
+    # informational — nothing re-gates on it — so an admin auditing the user
+    # list can tell "confirmed via the real flow" from "confirmed because
+    # the requirement was off at the time."
+    email_confirmation_bypassed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # Set while an email-change is awaiting its two-step confirmation
     # (see routers/auth.py's update_profile) — `email` itself only ever
     # changes once the new address's own code is confirmed.
@@ -324,6 +324,13 @@ class SiteSettings(Base):
     # without contacting TMDB; older ones refresh on access and are served
     # stale only while TMDB is unreachable (see tmdb/tmdb_store.py::_is_fresh).
     tmdb_db_cache_hours: Mapped[int] = mapped_column(Integer, default=24)
+    # Transactional email (see users/email_confirmation.py) — seeded from
+    # config.py's BREVO_API_KEY-adjacent settings, then owned live here.
+    email_sender_address: Mapped[str] = mapped_column(String, default="noreply@renar.app")
+    email_sender_name: Mapped[str] = mapped_column(String, default="Renar")
+    confirmation_code_ttl_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    email_confirmation_grace_days: Mapped[int] = mapped_column(Integer, default=7)
+    unconfirmed_account_cleanup_days: Mapped[int] = mapped_column(Integer, default=14)
 
 
 class PeriodicTaskRun(Base):

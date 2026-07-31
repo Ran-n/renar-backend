@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/07/28 17:43:10.319754
+Revised: 2026/07/29 16:13:43.913143
 """
 
 import logging
@@ -22,8 +22,10 @@ from ..models import EmailConfirmationCode, InviteCode, LoginEvent, User, utcnow
 from ..schemas import (
     ChangeUnconfirmedEmailRequest,
     ChangeUnconfirmedEmailResult,
+    ChangeUnconfirmedEmailSessionRequest,
     ConfirmEmailRequest,
     ConfirmEmailResult,
+    ConfirmEmailSessionRequest,
     PasswordChange,
     ProfileUpdate,
     RegistrationStatus,
@@ -38,7 +40,6 @@ from ..site_settings import get_site_settings
 from ..users import accounts
 from ..users.auth import create_access_token, get_current_user, hash_password, verify_password
 from ..users.email_confirmation import (
-    EMAIL_CONFIRMATION_GRACE_DAYS,
     MAX_ATTEMPTS,
     check_resend_allowed,
     create_and_send_code,
@@ -222,6 +223,7 @@ def register(data: UserCreate, request: Request, background_tasks: BackgroundTas
         # creating an account that can never be gated on it (see
         # SiteSettings.email_confirmation_enabled's docstring in models.py).
         email_confirmed=not ss.email_confirmation_enabled,
+        email_confirmation_bypassed=not ss.email_confirmation_enabled,
     )
     db.add(user)
     if invite is not None:
@@ -262,17 +264,12 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account has been banned")
     if (
         not user.email_confirmed
-        and not user.email_confirmation_grandfathered
-        and (utcnow() - user.created_at).days >= EMAIL_CONFIRMATION_GRACE_DAYS
+        and (utcnow() - user.created_at).days >= get_site_settings(db).email_confirmation_grace_days
     ):
         # distinct, machine-checkable detail (not a generic message) so the
         # frontend routes to the confirm-email screen instead of a dead end —
         # see users/email_confirmation.py's module docstring for why this
         # exists (closing the ranking-exploit gap a captcha alone doesn't).
-        # email_confirmation_grandfathered exempts every account that
-        # existed before this feature shipped — see migration
-        # ffffe2b24717's docstring for why an account-age-based grace
-        # period would otherwise lock out an established user base on day one.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="email_not_confirmed")
     now = utcnow()
     user.last_active_at = now
@@ -301,12 +298,7 @@ def _authenticate_for_confirmation(username: str, password: str, ip: str, db: Se
     return user
 
 
-@router.post("/confirm-email", response_model=ConfirmEmailResult)
-def confirm_email(
-    data: ConfirmEmailRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
-):
-    user = _authenticate_for_confirmation(data.username, data.password, client_ip(request), db)
-
+def _confirm_email_code(user: User, code: str, db: Session, background_tasks: BackgroundTasks) -> ConfirmEmailResult:
     code_row = (
         db.query(EmailConfirmationCode)
         .filter(EmailConfirmationCode.user_id == user.id, EmailConfirmationCode.consumed_at.is_(None))
@@ -321,7 +313,7 @@ def confirm_email(
         code_row.consumed_at = utcnow()
         db.commit()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Too many attempts — request a new code")
-    if not verify_code(data.code, code_row.code_hash):
+    if not verify_code(code, code_row.code_hash):
         code_row.attempts += 1
         db.commit()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect code")
@@ -329,6 +321,11 @@ def confirm_email(
     code_row.consumed_at = utcnow()
     if code_row.purpose == "register":
         user.email_confirmed = True
+        # A bypassed account voluntarily completing the real flow (see
+        # _resend_confirmation) graduates to a genuine confirmation —
+        # nothing was obligatory here, but once they've done it for real
+        # the "never verified" caveat no longer applies.
+        user.email_confirmation_bypassed = False
         db.commit()
         return ConfirmEmailResult(status="confirmed")
     if code_row.purpose == "change_authorize":
@@ -343,6 +340,48 @@ def confirm_email(
     user.email_confirmed = True
     db.commit()
     return ConfirmEmailResult(status="confirmed")
+
+
+@router.post("/confirm-email", response_model=ConfirmEmailResult)
+def confirm_email(
+    data: ConfirmEmailRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
+):
+    user = _authenticate_for_confirmation(data.username, data.password, client_ip(request), db)
+    return _confirm_email_code(user, data.code, db, background_tasks)
+
+
+@router.post("/confirm-email-session", response_model=ConfirmEmailResult)
+def confirm_email_session(
+    data: ConfirmEmailSessionRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Same as /confirm-email but for a user who's already holding a valid
+    token — the still-logged-in-but-unconfirmed case (e.g. a restored
+    session), where asking for the password again would be redundant since
+    the token already proves identity. Only reachable while the token is
+    valid, i.e. inside the grace period; /confirm-email's credential check
+    stays the only route once that expires and the token is gone."""
+    return _confirm_email_code(user, data.code, db, background_tasks)
+
+
+def _change_unconfirmed_email(
+    user: User, email: str, db: Session, background_tasks: BackgroundTasks
+) -> ChangeUnconfirmedEmailResult:
+    if user.email_confirmed or user.pending_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already confirmed — use the profile email-change flow instead",
+        )
+
+    new_email = _normalize_email(email)
+    if new_email != user.email and db.query(User).filter(User.email == new_email).first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already taken")
+
+    user.email = new_email
+    create_and_send_code(db, user, "register", user.email, background_tasks)
+    return ChangeUnconfirmedEmailResult(email=user.email)
 
 
 @router.post("/change-unconfirmed-email", response_model=ChangeUnconfirmedEmailResult)
@@ -367,37 +406,42 @@ def change_unconfirmed_email(
     flight (`pending_email` set) — both cases must go through the two-step
     flow instead."""
     user = _authenticate_for_confirmation(data.username, data.password, client_ip(request), db)
-    if user.email_confirmed or user.pending_email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already confirmed — use the profile email-change flow instead",
-        )
-
-    new_email = _normalize_email(data.email)
-    if new_email != user.email and db.query(User).filter(User.email == new_email).first():
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already taken")
-
-    user.email = new_email
-    create_and_send_code(db, user, "register", user.email, background_tasks)
-    return ChangeUnconfirmedEmailResult(email=user.email)
+    return _change_unconfirmed_email(user, data.email, db, background_tasks)
 
 
-@router.post("/resend-confirmation", status_code=status.HTTP_204_NO_CONTENT)
-def resend_confirmation(
-    data: ResendConfirmationRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
+@router.post("/change-unconfirmed-email-session", response_model=ChangeUnconfirmedEmailResult)
+def change_unconfirmed_email_session(
+    data: ChangeUnconfirmedEmailSessionRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    user = _authenticate_for_confirmation(data.username, data.password, client_ip(request), db)
-    if user.email_confirmed and not user.pending_email:
+    """Same as /change-unconfirmed-email but for a user who's already holding
+    a valid token — the still-logged-in-but-unconfirmed case (e.g. a restored
+    session), where asking for the password again would be redundant since
+    the token already proves identity. Only reachable while the token is
+    valid, i.e. inside the grace period; /change-unconfirmed-email's
+    credential check stays the only route once that expires and the token is
+    gone."""
+    return _change_unconfirmed_email(user, data.email, db, background_tasks)
+
+
+def _resend_confirmation(user: User, db: Session, background_tasks: BackgroundTasks) -> None:
+    # A bypassed account (registered while confirmation wasn't required) is
+    # already `email_confirmed`, but never proved ownership for real — let it
+    # through so the profile's optional "verify your email" action has
+    # something to call. Only a genuinely-confirmed account is rejected here.
+    if user.email_confirmed and not user.email_confirmation_bypassed and not user.pending_email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already confirmed")
 
-    retry_after = check_resend_allowed(data.username)
+    retry_after = check_resend_allowed(user.username)
     if retry_after is not None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many resend requests. Please wait before trying again.",
             headers={"Retry-After": str(retry_after)},
         )
-    note_resend(data.username)
+    note_resend(user.username)
 
     if user.pending_email:
         latest = (
@@ -412,6 +456,25 @@ def resend_confirmation(
             create_and_send_code(db, user, "change_authorize", user.email, background_tasks)
     else:
         create_and_send_code(db, user, "register", user.email, background_tasks)
+
+
+@router.post("/resend-confirmation", status_code=status.HTTP_204_NO_CONTENT)
+def resend_confirmation(
+    data: ResendConfirmationRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
+):
+    user = _authenticate_for_confirmation(data.username, data.password, client_ip(request), db)
+    _resend_confirmation(user, db, background_tasks)
+
+
+@router.post("/resend-confirmation-session", status_code=status.HTTP_204_NO_CONTENT)
+def resend_confirmation_session(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Bearer-token variant of /resend-confirmation — see
+    confirm_email_session's docstring."""
+    _resend_confirmation(user, db, background_tasks)
 
 
 @router.get("/me", response_model=UserOut)

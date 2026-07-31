@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.543016
-Revised: 2026/07/17 20:02:06.415134
+Revised: 2026/07/29 17:38:11.922503
 
 Write-through persistence for TMDB data (see TmdbCache in models.py).
 
@@ -108,21 +108,31 @@ def localized_titles(db: Session, title_ids: list[int], language: str) -> dict[i
 def warm_title_translations(title_ids: list[int], language: str) -> None:
     """Fire-and-forget: fetch+cache `language` detail payloads for titles that
     don't have one yet, so the *next* list_media call can localize them.
-    Runs in a FastAPI BackgroundTasks callback (own DB session, after the
-    response is already sent) — never blocks the request that triggered it.
+    Runs in a FastAPI BackgroundTasks callback, after the response is already
+    sent — never blocks the request that triggered it.
+
+    Each title gets its own short-lived DB session, opened only for the read
+    check and the write; the pooled connection is released before the TMDB
+    HTTP round-trip for the *next* title, instead of one session held for the
+    whole loop's worth of network calls (that starved the pool under load —
+    see pool exhaustion incident 2026-07-29).
     """
     from ..database import SessionLocal  # local import: avoids a cycle at module load
 
     with SessionLocal() as db:
         titles = db.query(Title).filter(Title.id.in_(title_ids), Title.tmdb_id.isnot(None)).all()
-        for title in titles:
-            if title.media_type.value not in TMDB_KIND:
+        title_infos = [(t.id, t.media_type) for t in titles if t.media_type.value in TMDB_KIND]
+
+    for title_id, media_type in title_infos:
+        with SessionLocal() as db:
+            title = db.get(Title, title_id)
+            if title is None:
                 continue
-            path = f"/{TMDB_KIND[title.media_type.value]}/{title.tmdb_id}"
+            path = f"/{TMDB_KIND[media_type.value]}/{title.tmdb_id}"
             try:
-                cached_tmdb(db, title.media_type, title.tmdb_id, "details", path, language=language)
+                cached_tmdb(db, media_type, title.tmdb_id, "details", path, language=language)
             except HTTPException as exc:
-                _log.warning("translation warm-up skipped for title %s (%s): %s", title.id, language, exc.detail)
+                _log.warning("translation warm-up skipped for title %s (%s): %s", title_id, language, exc.detail)
 
 
 def sync_title_details(db: Session, title: Title, data: dict) -> None:

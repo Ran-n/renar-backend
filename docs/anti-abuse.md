@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.135465 )
-[//]: # (+ Revised: 	2026/07/18 00:26:59.648486 )
+[//]: # (+ Revised: 	2026/07/29 17:42:13.299280 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Anti-abuse system
@@ -212,6 +212,17 @@ The anti-abuse tunables — twelve numeric limits, `trust_proxy_headers`,
 same pattern as `app_counters`) so they can be changed from the admin panel at
 `<ADMIN_PATH>/settings` without a server restart. `abuse_guard_enabled` is the
 one deliberate exception — see "Operating it" above.
+
+The same row also owns email confirmation's tunables:
+`email_sender_address`/`email_sender_name` (the `From` header on Brevo
+sends), `confirmation_code_ttl_minutes` (how long a code stays valid),
+`email_confirmation_grace_days` (how long a new, unconfirmed account can
+still log in before `/auth/login` 403s with `email_not_confirmed`), and
+`unconfirmed_account_cleanup_days` (age at which the cleanup loop purges an
+account that never confirmed) — see `users/email_confirmation.py` and
+`SiteSettings` in `models.py`. All five are seeded from `config.py`
+defaults on first read, same as the anti-abuse tunables above, and edited
+from the same `<ADMIN_PATH>/settings` page's Email section.
 
 `src/renar_backend/site_settings.py` provides:
 

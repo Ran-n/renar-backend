@@ -31,19 +31,19 @@ import bcrypt
 import httpx
 from sqlalchemy.orm import Session
 
+from .. import site_settings
 from ..config import settings
 from ..models import EmailConfirmationCode, User, utcnow
 
 _log = logging.getLogger(__name__)
 
 CODE_LENGTH = 6
-CODE_TTL_MINUTES = 15
 MAX_ATTEMPTS = 8  # past this, a code is treated as burned regardless of expires_at
-CLEANUP_AFTER_DAYS = 14  # unconfirmed accounts older than this are removed, see cleanup_loop
-# Login isn't blocked immediately for an unconfirmed account, only once this
-# many days pass with no confirmation (routers/auth.py's login) — shorter
-# than CLEANUP_AFTER_DAYS so nobody is deleted before ever being blocked.
-EMAIL_CONFIRMATION_GRACE_DAYS = 7
+# Grace period (routers/auth.py's login) and cleanup age (cleanup_unconfirmed_accounts
+# below) are both admin-tunable now — see site_settings.py's email_confirmation_grace_days
+# / unconfirmed_account_cleanup_days. Grace should stay shorter than cleanup so nobody
+# is deleted before ever being blocked at login, but that's an admin-panel convention,
+# not an enforced invariant here.
 
 BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
 
@@ -56,6 +56,59 @@ _SUBJECTS = {
     "change_authorize": "Confirm your Renar email change",
     "change_confirm": "Confirm your new Renar email address",
 }
+
+_INTROS = {
+    "register": "Welcome to Renar! Use the code below to confirm your account.",
+    "change_authorize": (
+        "We received a request to change the email address on your Renar account. "
+        "Use the code below to authorize the change."
+    ),
+    "change_confirm": "Use the code below to confirm your new email address on Renar.",
+}
+_DEFAULT_INTRO = "Use the code below to confirm your email on Renar."
+
+# Hosted in the (public) Ran-n/media repo, not this one — renar-frontend is
+# private, so a raw.githubusercontent.com link to an asset in it 404s for
+# anyone without repo access, including Brevo/the recipient's mail client.
+# Static, not the drawing-mark animation (renar_1.gif): Gmail's web renderer
+# ignores a GIF's loop-count metadata and always loops it forever, so the
+# one-shot "draws once" effect isn't achievable there. True PNG alpha (not
+# renar_0.png's boxed icon) — a hosted PNG's transparency renders fine in
+# Gmail, unlike a data: URI, which Gmail strips outright.
+_LOGO_URL = "https://raw.githubusercontent.com/Ran-n/media/main/companies/renar_2.png"
+
+# Gruvbox dark, same palette as the app (branding/themes.py) — inline styles
+# and a table layout because email clients don't reliably support <style>
+# blocks or flexbox/grid.
+_HTML_TEMPLATE = """\
+<!doctype html>
+<html>
+  <body style="margin:0;padding:32px 16px;background:#282828;font-family:Verdana,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+      <table role="presentation" width="480" cellpadding="0" cellspacing="0"
+             style="max-width:480px;background:#3c3836;border-radius:12px;">
+        <tr><td style="padding:36px 32px 4px;text-align:center;">
+          <img src="{logo_url}" width="96" height="96" alt="" style="display:block;margin:0 auto;">
+        </td></tr>
+        <tr><td style="padding:8px 32px 0;text-align:center;">
+          <span style="font-size:26px;font-weight:bold;color:#fabd2f;letter-spacing:1px;">Renar</span>
+        </td></tr>
+        <tr><td style="padding:16px 32px 0;text-align:center;color:#ebdbb2;font-size:15px;line-height:1.5;">
+          {intro}
+        </td></tr>
+        <tr><td style="padding:24px 32px;text-align:center;">
+          <span style="display:inline-block;background:#282828;border:1px solid #504945;border-radius:8px;
+                       padding:14px 24px;font-family:'Courier New',monospace;font-size:30px;font-weight:bold;
+                       letter-spacing:8px;color:#fabd2f;">{code}</span>
+        </td></tr>
+        <tr><td style="padding:0 32px 32px;text-align:center;color:#a89984;font-size:13px;line-height:1.5;">
+          This code expires in {ttl} minutes. If you didn't request this, you can safely ignore this email.
+        </td></tr>
+      </table>
+    </td></tr></table>
+  </body>
+</html>
+"""
 
 
 def generate_code() -> str:
@@ -86,11 +139,19 @@ def send_confirmation_email(to_address: str, code: str, language: str, purpose: 
             code,
         )
         return
+    ss = site_settings.current()
+    intro = _INTROS.get(purpose, _DEFAULT_INTRO)
     payload = {
-        "sender": {"email": settings.email_sender_address},
+        "sender": {"name": ss.email_sender_name, "email": ss.email_sender_address},
         "to": [{"email": to_address}],
         "subject": _SUBJECTS.get(purpose, "Confirm your Renar email"),
-        "textContent": f"Your confirmation code is: {code}\n\nThis code expires in {CODE_TTL_MINUTES} minutes.",
+        "htmlContent": _HTML_TEMPLATE.format(
+            intro=intro, code=code, ttl=ss.confirmation_code_ttl_minutes, logo_url=_LOGO_URL
+        ),
+        "textContent": (
+            f"{intro}\n\nYour confirmation code is: {code}\n\n"
+            f"This code expires in {ss.confirmation_code_ttl_minutes} minutes."
+        ),
     }
     try:
         resp = _http_client.post(
@@ -99,6 +160,13 @@ def send_confirmation_email(to_address: str, code: str, language: str, purpose: 
             json=payload,
         )
         resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        _log.error(
+            "could not send confirmation email to %s via Brevo: %s %s",
+            to_address,
+            exc.response.status_code,
+            exc.response.text,
+        )
     except httpx.HTTPError:
         _log.exception("could not send confirmation email to %s via Brevo", to_address)
 
@@ -120,7 +188,7 @@ def create_and_send_code(db: Session, user: User, purpose: str, target_email: st
             user_id=user.id,
             code_hash=hash_code(code),
             purpose=purpose,
-            expires_at=utcnow() + timedelta(minutes=CODE_TTL_MINUTES),
+            expires_at=utcnow() + timedelta(minutes=site_settings.current().confirmation_code_ttl_minutes),
         )
     )
     db.commit()
@@ -169,26 +237,19 @@ def note_resend(username: str) -> None:
 
 
 def cleanup_unconfirmed_accounts(db: Session) -> int:
-    """Delete email_confirmed=False users older than CLEANUP_AFTER_DAYS, so a
+    """Delete email_confirmed=False users older than unconfirmed_account_cleanup_days, so a
     never-confirmed signup doesn't squat a username/email forever (uniqueness
     is checked at registration regardless of confirmation status). Returns
     the number of rows deleted. Reuses accounts.delete_account — a plain
     db.delete(user) would trip over the FK-safe ordering that helper already
-    handles (comments, notifications, etc. don't cascade at the DB level).
-
-    Excludes email_confirmation_grandfathered accounts (every account that
-    existed before this feature shipped, see migration ffffe2b24717) — they
-    never asked to be confirmed in the first place, so deleting one just for
-    staying unconfirmed would destroy a real, pre-existing account rather
-    than reclaim a throwaway signup."""
+    handles (comments, notifications, etc. don't cascade at the DB level)."""
     from . import accounts  # local import: avoids a cycle at module load
 
-    cutoff = datetime.now(UTC) - timedelta(days=CLEANUP_AFTER_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=site_settings.current().unconfirmed_account_cleanup_days)
     stale = (
         db.query(User)
         .filter(
             User.email_confirmed.is_(False),
-            User.email_confirmation_grandfathered.is_(False),
             User.created_at < cutoff,
         )
         .all()

@@ -19,7 +19,7 @@ copy .env.example .env   # then edit SECRET_KEY
 
 ```powershell
 uv run alembic upgrade head   # apply database migrations (first run and after every pull)
-uv run uvicorn renar_backend.main:app --reload
+uv run uvicorn renar_backend.main:asgi_app --reload
 ```
 
 ## HTTPS
@@ -28,7 +28,7 @@ Local development runs over plain HTTP (traffic never leaves the machine /
 home network). For TLS, uvicorn supports it natively — no proxy needed:
 
 ```powershell
-uv run uvicorn renar_backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem
+uv run uvicorn renar_backend.main:asgi_app --ssl-keyfile key.pem --ssl-certfile cert.pem
 ```
 
 A public deployment should get certificates from the platform or Let's Encrypt.
