@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/28 21:23:28.819190 )
+[//]: # (+ Revised: 	2026/07/31 19:29:38.590323 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.9.0] - 2026-07-31
+
+### Added
+
+- `User.email_confirmation_bypassed` (migration `6d15f435ffcf`): marks
+  accounts whose `email_confirmed` was set to `True` without a real OTP
+  round trip — registered while `SiteSettings.email_confirmation_enabled`
+  was off, or bulk-confirmed when an admin disabled that toggle. Purely
+  informational (nothing re-gates on it); the admin user list's email
+  tooltip now distinguishes "email confirmed" from "email confirmed
+  (bypassed: OTP was off at signup or when disabled)".
+- `/auth/confirm-email-session`, `/auth/resend-confirmation-session`,
+  `/auth/change-unconfirmed-email-session`: bearer-token twins of the
+  existing credential-based email-confirmation endpoints, for a
+  still-logged-in but unconfirmed session (e.g. a restored session inside
+  the grace period) where re-asking for the password would be redundant.
+  `UserOut` gained `email_confirmation_bypassed` so the client can see it.
+- Site Settings page grew an Email section: sender name/address,
+  confirmation-code lifetime, login grace period, and unconfirmed-account
+  cleanup age are now admin-editable (`SiteSettings.email_sender_address`/
+  `email_sender_name`/`confirmation_code_ttl_minutes`, migration
+  `4b2026dc80cd`; `email_confirmation_grace_days`/
+  `unconfirmed_account_cleanup_days`, migration `68156a912acf`) instead of
+  fixed constants in `users/email_confirmation.py`.
+
+### Changed
+
+- `routers/media.py`'s `_ratings_summary` now also returns the item's own
+  `item_status`/`item_episodes_watched`/`item_current_season`/
+  `item_current_episode` — fields a rating/watch toggle can silently
+  auto-promote or demote (status changing on an episode toggle) — so a
+  caller already holding the rating-summary response can update its own
+  copy of the item without a follow-up `GET`. (Consumed by
+  renar-frontend's `title_view.py`'s new `apply_item_status` helper.)
+- `bulk_episodes`'s future-episode guard now runs one query for the whole
+  batch (`_assert_no_future_episodes`) instead of one query per episode —
+  up to ~24 queries for a full season down to 1.
+- Admin user list/detail: premium and verified badges render as their
+  actual brand SVG icon (matching the app) instead of a text pill; the
+  "grandfathered" pill is gone (see the `email_confirmation_bypassed`
+  entry above — the concept it named no longer exists); the email cell is
+  now color-coded by confirmation state with a tooltip explaining why;
+  granting the verified badge now asks for confirmation before submitting.
+
+### Fixed
+
+- Uvicorn logged a full "Exception in ASGI application" traceback for
+  every open connection (notably the `/events` SSE stream) torn down by a
+  Ctrl+C/shutdown — `asyncio.CancelledError`/`anyio.WouldBlock` are
+  `BaseException` subclasses and skip every `except Exception` in the
+  FastAPI/Starlette stack. `main.py`'s new `_ShutdownCancellationSilencer`
+  wraps the app (served as `asgi_app`, kept separate from `app` so tests
+  keep using the plain `FastAPI` instance) and downgrades it to one clean
+  log line.
+- `tmdb/tmdb_store.py`'s `warm_title_translations` held one DB session open
+  for its entire loop of per-title TMDB HTTP round trips, starving the
+  connection pool under load (incident 2026-07-29). Each title now gets
+  its own short-lived session, released before the next title's network
+  call.
 
 ## [0.8.0] - 2026-07-28
 

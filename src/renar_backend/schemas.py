@@ -89,6 +89,15 @@ class ResendConfirmationRequest(BaseModel):
     password: str
 
 
+class ConfirmEmailSessionRequest(BaseModel):
+    """Bearer-token variant of ConfirmEmailRequest, for a user who's already
+    holding a valid token (still inside the login grace period) — see
+    routers/auth.py's confirm_email_session docstring for why this doesn't
+    weaken the credential-based endpoint's guarantees."""
+
+    code: str = Field(min_length=6, max_length=6)
+
+
 class ChangeUnconfirmedEmailRequest(BaseModel):
     """Fixing a typo'd address before the account has ever been confirmed —
     see routers/auth.py's change_unconfirmed_email docstring for why this is
@@ -97,6 +106,16 @@ class ChangeUnconfirmedEmailRequest(BaseModel):
 
     username: str
     password: str
+    email: EmailStr
+
+
+class ChangeUnconfirmedEmailSessionRequest(BaseModel):
+    """Bearer-token variant of ChangeUnconfirmedEmailRequest, for a user
+    who's already holding a valid token (still inside the login grace
+    period) — see routers/auth.py's change_unconfirmed_email_session
+    docstring for why this doesn't weaken the credential-based endpoint's
+    guarantees."""
+
     email: EmailStr
 
 
@@ -128,6 +147,11 @@ class UserOut(BaseModel):
     premium_until: datetime | None = None
     is_premium: bool = False
     email_confirmed: bool = False
+    # True when email_confirmed was set without the real code round trip
+    # (registered while confirmation wasn't required) — lets the client offer
+    # a voluntary, non-blocking "verify your email" action (see
+    # routers/auth.py's _resend_confirmation / _confirm_email_code).
+    email_confirmation_bypassed: bool = False
     verified: bool = False
     verification_requested: bool = False
     badge: str | None = None

@@ -74,7 +74,7 @@ def _log_config() -> dict:
 def run():
     ensure_port_free(_HOST, _PORT)
     uvicorn.run(
-        "renar_backend.main:app",
+        "renar_backend.main:asgi_app",
         host=_HOST,
         port=_PORT,
         reload=True,

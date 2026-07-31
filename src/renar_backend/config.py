@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/07/21 09:51:02.641591
+Revised: 2026/07/29 13:55:30.394418
 """
 
 from pathlib import Path
@@ -44,7 +44,13 @@ class Settings(BaseSettings):
     # users/email_confirmation.py::send_confirmation_email — so this stays safe
     # to leave unset until a verified sending domain exists.
     brevo_api_key: str = ""
-    email_sender_address: str = "noreply@renar.breren.com"
+    # Seed defaults only — the admin panel (<ADMIN_PATH>/settings) owns the
+    # live value from first read onward, same as the anti-abuse knobs below.
+    email_sender_address: str = "noreply@renar.app"
+    email_sender_name: str = "Renar"
+    confirmation_code_ttl_minutes: int = 15
+    email_confirmation_grace_days: int = 7  # days before an unconfirmed account is blocked at login
+    unconfirmed_account_cleanup_days: int = 14  # days before an unconfirmed account is deleted
     media_dir: str = "./media"  # root of the content-addressed file store
     admin_username: str = ""  # admin panel stays 503 until both are set
     admin_password: str = ""

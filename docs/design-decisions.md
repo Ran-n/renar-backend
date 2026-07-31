@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/28 17:43:09.945452 )
+[//]: # (+ Revised: 	2026/07/31 13:58:21.314663 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -354,6 +354,36 @@ its reports) — there is no dismiss/ack workflow.
 count next to the comment in the existing admin table is the whole
 workflow, and the unique constraint keeps one user from inflating it.
 
+### `email_confirmed` is authoritative; `email_confirmation_bypassed` is a footnote
+
+Three ways an account ends up with `email_confirmed = True`: a real OTP
+round trip (`_confirm_email_code`), registering while
+`SiteSettings.email_confirmation_enabled` is off, or an admin flipping that
+toggle off while the account was still unconfirmed (bulk-confirms
+everyone pending at that moment). The first is a proof of ownership; the
+other two are policy decisions that happen to produce the same boolean.
+
+Rather than track that distinction with a second gate (the earlier
+`email_confirmation_grandfathered` design — exempt from the login block and
+cleanup, but still not `email_confirmed`, so still excluded from ranking),
+`email_confirmed` stays a single source of truth: every downstream
+consumer (`_compute_ranking`, the login grace-period block, the cleanup
+job) only ever checks that one column. `email_confirmation_bypassed`
+records *how* it got set to `True`, but nothing re-gates on it — it is read
+in exactly two places: the admin user list's tooltip (so an admin can tell
+"confirmed for real" from "confirmed because the requirement didn't
+apply"), and `_resend_confirmation`/`_confirm_email_code`'s guard, which
+normally refuses to re-confirm an already-confirmed account but lets a
+bypassed one through — so `profile_view`'s "Verify email" tile can offer a
+bypassed account the chance to complete a real round trip later, purely
+voluntarily. Completing it clears the flag; nothing about the account's
+capabilities changes either way.
+
+**Why:** a second gate means every ranking/login/cleanup check has to
+remember to OR it in, and a bug there silently re-admits unverified
+accounts. A single authoritative boolean plus an informational footnote
+can't drift out of sync with itself.
+
 ### Account deletion has exactly one purge path (`accounts.delete_account`)
 
 Self-service deletion (`DELETE /auth/me`) and the admin panel's delete-user
@@ -594,6 +624,31 @@ code path, and gating on "somebody tracks it" keeps growth bounded.
 Vote averages are deliberately *not* trusted from old copies of typed
 data — they change constantly and are read from the payload like
 everything else, stale only during outages.
+
+### `warm_title_translations` opens one DB session per title, not one for the whole loop
+
+`warm_title_translations` (fire-and-forget `BackgroundTasks` callback that
+warms non-English detail translations for a batch of titles after a
+`list_media` response is sent) used to open a single `SessionLocal()` for
+the entire batch, then loop over every title calling `cached_tmdb` — which
+does a live TMDB HTTP fetch on a cache miss — all under that one checked-out
+connection. On a page of untranslated titles this held a pooled connection
+for the sum of every TMDB round-trip in the batch, not just one, and since
+it fires on ordinary list requests it could exhaust the pool (`pool_size=5`,
+`max_overflow=10`) under concurrent traffic — surfaced 2026-07-29 as
+`sqlalchemy.exc.TimeoutError: QueuePool limit ... reached`. It now opens a
+short-lived session per title (the ID list is read once, then each title's
+read-check-and-write happens in its own `with SessionLocal()`), releasing
+the connection back to the pool between titles instead of for the whole
+batch.
+
+**Why not batch the DB work into fewer round-trips instead:** the number of
+sessions was never the problem — each is a cheap indexed read/write. The
+problem was one session spanning every TMDB fetch in the loop; per-title
+sessions bound the hold time to a single TMDB call, matching the same
+principle already applied to the image proxy (see [TMDB image proxy does
+not hold a DB connection across the network
+fetch](#tmdb-image-proxy-does-not-hold-a-db-connection-across-the-network-fetch)).
 
 ### Ended shows are not polled by the notifier
 
@@ -1117,3 +1172,26 @@ domain subpackages. Files at the root that are cross-cutting
 the image store pipeline touches `storage`, `image_service` and
 `image_cache` but never `tmdb_store` or `auth`. Grouping by what-changes-
 together keeps diffs local to one package.
+
+### Shutdown/cancellation noise is silenced at the ASGI layer, not with an `except Exception`
+
+Ctrl+C'ing the server while a connection is open (notably `routers/events.py`'s
+long-lived `/events` SSE stream) used to log a full multi-frame "Exception
+in ASGI application" traceback per open connection, even though the
+interrupt is expected and harmless.
+
+**Why not just catch it where the stream is written:** `asyncio.CancelledError`
+(and `anyio.WouldBlock`, its proximate cause here) are `BaseException`
+subclasses, not `Exception` — they skip every `except Exception` in the
+FastAPI/Starlette middleware stack, including Starlette's own
+`ServerErrorMiddleware`, and land straight in uvicorn's `run_asgi`, which
+is the layer that actually logs the traceback. No handler inside the
+FastAPI app itself — a route, a dependency, even middleware — sees this
+exception in time to downgrade it; it has to be caught at the raw ASGI
+callable uvicorn invokes directly.
+
+`main.py`'s `_ShutdownCancellationSilencer` wraps `app` at that outer layer
+and replaces the traceback with one clean info-level log line. It's served
+as a separate `asgi_app` (uvicorn's actual target) rather than wrapping
+`app` in place, so tests (`TestClient(app)`, `dependency_overrides`, ...)
+keep using the plain, unwrapped `FastAPI` instance.

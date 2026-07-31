@@ -612,6 +612,14 @@ def _ratings_summary(item: LibraryEntry, db: Session) -> dict:
         "combined_score": combined,
         "rated_episodes": len(ep_ratings),
         "rewatch_count": rewatch_count,
+        # item fields _sync_progress may have just changed (status can
+        # auto-promote/demote on an episode toggle) — carried here so a
+        # caller can update its own copy of the item without a follow-up
+        # GET just to pick up the new status/progress
+        "item_status": item.status,
+        "item_episodes_watched": item.episodes_watched,
+        "item_current_season": item.current_season,
+        "item_current_episode": item.current_episode,
     }
 
 
@@ -761,6 +769,31 @@ def _assert_not_future_episode(item: LibraryEntry, season: int, episode_number: 
         )
 
 
+def _assert_no_future_episodes(item: LibraryEntry, season: int, episode_numbers: list[int], db: Session) -> None:
+    """Batch form of `_assert_not_future_episode` for marking a whole season
+    at once — one query for every episode in the batch instead of one query
+    per episode (up to ~24 for a full season)."""
+    if item.title_id is None or not episode_numbers:
+        return
+    future = (
+        db.query(Episode)
+        .filter(
+            Episode.title_id == item.title_id,
+            Episode.season == season,
+            Episode.episode_number.in_(episode_numbers),
+            Episode.air_date.isnot(None),
+            Episode.air_date > date.today(),
+        )
+        .order_by(Episode.episode_number)
+        .first()
+    )
+    if future is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"S{season:02d}E{future.episode_number:02d} has not aired yet (air date: {future.air_date})",
+        )
+
+
 @router.put("/{item_id}/episodes/{season}/{episode}")
 def set_episode(
     item_id: int,
@@ -802,8 +835,7 @@ def bulk_episodes(
 ):
     item = _get_owned_item(item_id, user, db)
     if data.watched:
-        for ep in data.episodes:
-            _assert_not_future_episode(item, data.season, ep, db)
+        _assert_no_future_episodes(item, data.season, data.episodes, db)
     existing = {
         w.episode: w
         for w in db.query(EpisodeWatch).filter(

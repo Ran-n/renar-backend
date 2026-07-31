@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/21 20:57:25.419445
+Revised: 2026/07/29 16:09:56.207783
 
 Shared HTML/CSS primitives for the admin control panel.
 
@@ -191,6 +191,8 @@ _PAGE_CSS = """
     .td-count { color: var(--text-2); font-variant-numeric: tabular-nums; font-size: .88rem; }
     .td-ts { color: var(--text-3); font-size: .78rem; line-height: 1.35; }
     .td-email { color: var(--text-2); font-size: .82rem; }
+    .email-confirmed { color: #b8bb26; }
+    .email-unconfirmed { color: var(--orange); }
     .empty { color: var(--text-3); text-align: center; padding: 3rem; font-size: .85rem; }
     .td-actions { display: flex; align-items: center; gap: .35rem; white-space: nowrap; }
 

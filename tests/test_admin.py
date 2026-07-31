@@ -362,6 +362,11 @@ def test_admin_settings_post_updates_and_persists(client, admin_enabled):
         "ban_minutes": "45",
         "strike_ban_threshold": "3",
         "tmdb_db_cache_hours": "24",
+        "email_sender_name": "Renar",
+        "email_sender_address": "noreply@renar.app",
+        "confirmation_code_ttl_minutes": "15",
+        "email_confirmation_grace_days": "7",
+        "unconfirmed_account_cleanup_days": "14",
         # invite_only omitted → False (unchecked checkbox)
     }
     r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
@@ -395,6 +400,11 @@ def test_admin_settings_page_renders_exempt_ip_pills(client, admin_enabled):
         "ban_minutes": "45",
         "strike_ban_threshold": "3",
         "tmdb_db_cache_hours": "24",
+        "email_sender_name": "Renar",
+        "email_sender_address": "noreply@renar.app",
+        "confirmation_code_ttl_minutes": "15",
+        "email_confirmation_grace_days": "7",
+        "unconfirmed_account_cleanup_days": "14",
         "exempt_ips": "127.0.0.1, ::1",
     }
     client.post("/admin/settings", data=payload, auth=BASIC)
@@ -423,6 +433,11 @@ def test_admin_settings_invite_only_toggle(client, admin_enabled):
         "ban_minutes": "60",
         "strike_ban_threshold": "5",
         "tmdb_db_cache_hours": "24",
+        "email_sender_name": "Renar",
+        "email_sender_address": "noreply@renar.app",
+        "confirmation_code_ttl_minutes": "15",
+        "email_confirmation_grace_days": "7",
+        "unconfirmed_account_cleanup_days": "14",
     }
     r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
     assert r.status_code == 303
@@ -956,6 +971,11 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
         "ban_minutes": "60",
         "strike_ban_threshold": "5",
         "tmdb_db_cache_hours": "24",
+        "email_sender_name": "Renar",
+        "email_sender_address": "noreply@renar.app",
+        "confirmation_code_ttl_minutes": "15",
+        "email_confirmation_grace_days": "7",
+        "unconfirmed_account_cleanup_days": "14",
     }
     client.post("/admin/settings", data=payload_settings, auth=BASIC)
     site_settings.invalidate()

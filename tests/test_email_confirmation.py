@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 13:10:00.000000
-Revised: 2026/07/21 09:51:08.297553
+Revised: 2026/07/29 16:37:38.103793
 
 Registration/email-change confirmation codes (users/email_confirmation.py,
 routers/auth.py's /auth/confirm-email + /auth/resend-confirmation) and the
@@ -18,6 +18,7 @@ import pytest
 from conftest import ADMIN_BASIC as BASIC
 from conftest import PASSWORD
 
+from renar_backend import site_settings
 from renar_backend.database import SessionLocal
 from renar_backend.models import AppCounters, EmailConfirmationCode, SiteSettings, User, utcnow
 from renar_backend.users import email_confirmation as ec
@@ -40,6 +41,11 @@ _BASE_SETTINGS_PAYLOAD = {
     "ban_minutes": "60",
     "strike_ban_threshold": "5",
     "tmdb_db_cache_hours": "24",
+    "email_sender_name": "Renar",
+    "email_sender_address": "noreply@renar.app",
+    "confirmation_code_ttl_minutes": "15",
+    "email_confirmation_grace_days": "7",
+    "unconfirmed_account_cleanup_days": "14",
 }
 
 
@@ -108,6 +114,7 @@ def test_confirm_email_with_correct_code_confirms(client, fixed_code):
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "confirmed"
     assert _get_user(user["id"]).email_confirmed is True
+    assert _get_user(user["id"]).email_confirmation_bypassed is False  # real OTP round trip, not a bypass
 
 
 def test_confirm_email_wrong_code_increments_attempts_and_fails(client, fixed_code):
@@ -216,6 +223,77 @@ def test_resend_confirmation_already_confirmed_400(client, fixed_code):
     assert r.status_code == 400
 
 
+# ---------- confirm-email-session / resend-confirmation-session (already
+# logged in — e.g. a restored session, still inside the grace period) ----------
+
+
+def _login_token(client, username: str = "alice", password: str = PASSWORD) -> str:
+    r = client.post("/auth/login", data={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return r.json()["access_token"]
+
+
+def test_confirm_email_session_with_correct_code_confirms(client, fixed_code):
+    user = _raw_register(client)
+    token = _login_token(client)
+    r = client.post(
+        "/auth/confirm-email-session",
+        json={"code": fixed_code},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "confirmed"
+    assert _get_user(user["id"]).email_confirmed is True
+
+
+def test_confirm_email_session_wrong_code_fails(client, fixed_code):
+    user = _raw_register(client)
+    token = _login_token(client)
+    r = client.post(
+        "/auth/confirm-email-session",
+        json={"code": "000000"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 400
+    assert _get_user(user["id"]).email_confirmed is False
+
+
+def test_confirm_email_session_requires_auth(client, fixed_code):
+    _raw_register(client)
+    r = client.post("/auth/confirm-email-session", json={"code": fixed_code})
+    assert r.status_code == 401
+
+
+def test_resend_confirmation_session_invalidates_prior_code(client, monkeypatch):
+    codes_issued = iter(["111111", "222222"])
+    monkeypatch.setattr(ec, "generate_code", lambda: next(codes_issued))
+    _raw_register(client)
+    token = _login_token(client)
+
+    r = client.post("/auth/resend-confirmation-session", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 204
+
+    # the OLD code no longer works, the NEW one does
+    r = client.post(
+        "/auth/confirm-email-session",
+        json={"code": "111111"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 400
+    r = client.post(
+        "/auth/confirm-email-session",
+        json={"code": "222222"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200
+
+
+def test_resend_confirmation_session_requires_auth(client):
+    _raw_register(client)
+    r = client.post("/auth/resend-confirmation-session")
+    assert r.status_code == 401
+
+
 # ---------- change-unconfirmed-email (fixing a typo before first confirm) ----------
 
 
@@ -279,6 +357,51 @@ def test_change_unconfirmed_email_rejects_taken_address(client, fixed_code):
     assert r.status_code == 409
 
 
+# ---------- change-unconfirmed-email-session (same, but already logged in) ----------
+
+
+def test_change_unconfirmed_email_session_before_first_confirm(client, monkeypatch):
+    codes_issued = iter(["111111", "222222"])
+    monkeypatch.setattr(ec, "generate_code", lambda: next(codes_issued))
+    user = _raw_register(client, "alice", email="typo@example.com")
+    token = _login_token(client)
+
+    r = client.post(
+        "/auth/change-unconfirmed-email-session",
+        json={"email": "Fixed@Example.com"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["email"] == "fixed@example.com"
+    assert _get_user(user["id"]).email == "fixed@example.com"
+
+    r = client.post(
+        "/auth/confirm-email-session",
+        json={"code": "222222"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200
+    assert _get_user(user["id"]).email_confirmed is True
+
+
+def test_change_unconfirmed_email_session_requires_auth(client):
+    _raw_register(client)
+    r = client.post("/auth/change-unconfirmed-email-session", json={"email": "new@example.com"})
+    assert r.status_code == 401
+
+
+def test_change_unconfirmed_email_session_rejects_once_confirmed(client, fixed_code):
+    _raw_register(client)
+    token = _login_token(client)
+    client.post("/auth/confirm-email-session", json={"code": fixed_code}, headers={"Authorization": f"Bearer {token}"})
+    r = client.post(
+        "/auth/change-unconfirmed-email-session",
+        json={"email": "somewhere-else@example.com"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 400
+
+
 # ---------- login grace period ----------
 
 
@@ -290,7 +413,7 @@ def test_login_within_grace_period_succeeds_unconfirmed(client):
 
 def test_login_after_grace_period_blocked(client):
     user = _raw_register(client)
-    _set_created_at(user["id"], utcnow() - timedelta(days=ec.EMAIL_CONFIRMATION_GRACE_DAYS + 1))
+    _set_created_at(user["id"], utcnow() - timedelta(days=site_settings.current().email_confirmation_grace_days + 1))
     r = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
     assert r.status_code == 403
     assert r.json()["detail"] == "email_not_confirmed"
@@ -299,88 +422,18 @@ def test_login_after_grace_period_blocked(client):
 def test_login_after_grace_period_succeeds_once_confirmed(client, fixed_code):
     user = _raw_register(client)
     client.post("/auth/confirm-email", json={"username": "alice", "password": PASSWORD, "code": fixed_code})
-    _set_created_at(user["id"], utcnow() - timedelta(days=ec.EMAIL_CONFIRMATION_GRACE_DAYS + 1))
+    _set_created_at(user["id"], utcnow() - timedelta(days=site_settings.current().email_confirmation_grace_days + 1))
     r = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
     assert r.status_code == 200
 
 
-# ---------- grandfathering (accounts that predate this feature) ----------
-
-
-def _set_grandfathered(user_id: int, value: bool = True) -> None:
-    db = SessionLocal()
-    try:
-        db.get(User, user_id).email_confirmation_grandfathered = value
-        db.commit()
-    finally:
-        db.close()
-
-
-def test_grandfathered_account_never_blocked_at_login(client):
-    """Regression: an account whose created_at already predates the grace
-    period at the moment this feature was migrated in must never be blocked
-    — see migration ffffe2b24717's docstring for the bug this prevents
-    (measuring grace from created_at would give a pre-existing user base
-    zero actual grace period on rollout day)."""
-    user = _raw_register(client)
-    _set_grandfathered(user["id"])
-    _set_created_at(user["id"], utcnow() - timedelta(days=365))  # far past any grace period
-    r = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
-    assert r.status_code == 200
-
-
-def test_non_grandfathered_account_still_blocked_at_login(client):
-    """The exemption must be per-account, not a global bypass — a freshly
-    registered account (grandfathered=False, the default) is still gated
-    normally."""
+def test_account_still_blocked_at_login_past_grace(client):
+    """A freshly registered, still-unconfirmed account is gated once its
+    grace period elapses — no exemption applies."""
     user = _raw_register(client)
     _set_created_at(user["id"], utcnow() - timedelta(days=365))
     r = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
     assert r.status_code == 403
-
-
-def test_grandfathered_account_still_excluded_from_ranking_until_confirmed(client):
-    """Grandfathering exempts the login block and cleanup, not the ranking
-    filter — the whole point of the feature is who counts on the
-    leaderboard, and that's unaffected by when the account was created."""
-    user = _raw_register(client)
-    _set_grandfathered(user["id"])
-    headers = _login_headers(client, "alice")
-    db = SessionLocal()
-    try:
-        db.get(User, user["id"]).premium_until = utcnow() + timedelta(days=30)
-        db.commit()
-    finally:
-        db.close()
-    r = client.get("/stats/ranking", headers=headers).json()
-    assert r["total_users"] == 0  # still not confirmed — doesn't count
-
-
-def test_cleanup_exempts_grandfathered_accounts(client):
-    user = _raw_register(client)
-    _set_grandfathered(user["id"])
-    _set_created_at(user["id"], utcnow() - timedelta(days=ec.CLEANUP_AFTER_DAYS + 1))
-
-    db = SessionLocal()
-    try:
-        removed = ec.cleanup_unconfirmed_accounts(db)
-    finally:
-        db.close()
-    assert removed == 0
-    assert _get_user(user["id"]) is not None
-
-
-def test_cleanup_still_removes_non_grandfathered_stale_accounts(client):
-    user = _raw_register(client)  # grandfathered=False (default) — a real new signup
-    _set_created_at(user["id"], utcnow() - timedelta(days=ec.CLEANUP_AFTER_DAYS + 1))
-
-    db = SessionLocal()
-    try:
-        removed = ec.cleanup_unconfirmed_accounts(db)
-    finally:
-        db.close()
-    assert removed == 1
-    assert _get_user(user["id"]) is None
 
 
 # ---------- email normalization ----------
@@ -537,7 +590,7 @@ def test_self_delete_with_pending_confirmation_code_does_not_fkey_violate(client
 
 def test_cleanup_removes_stale_unconfirmed_accounts(client):
     user = _raw_register(client)
-    _set_created_at(user["id"], utcnow() - timedelta(days=ec.CLEANUP_AFTER_DAYS + 1))
+    _set_created_at(user["id"], utcnow() - timedelta(days=site_settings.current().unconfirmed_account_cleanup_days + 1))
 
     db = SessionLocal()
     try:
@@ -551,7 +604,7 @@ def test_cleanup_removes_stale_unconfirmed_accounts(client):
 def test_cleanup_keeps_confirmed_accounts_regardless_of_age(client, fixed_code):
     user = _raw_register(client)
     client.post("/auth/confirm-email", json={"username": "alice", "password": PASSWORD, "code": fixed_code})
-    _set_created_at(user["id"], utcnow() - timedelta(days=ec.CLEANUP_AFTER_DAYS + 1))
+    _set_created_at(user["id"], utcnow() - timedelta(days=site_settings.current().unconfirmed_account_cleanup_days + 1))
 
     db = SessionLocal()
     try:
@@ -587,6 +640,7 @@ def test_new_registration_auto_confirmed_when_feature_disabled(client, admin_ena
     _set_email_confirmation_enabled(client, False)
     user = _raw_register(client)
     assert _get_user(user["id"]).email_confirmed is True
+    assert _get_user(user["id"]).email_confirmation_bypassed is True
 
     db = SessionLocal()
     try:
@@ -599,6 +653,7 @@ def test_new_registration_auto_confirmed_when_feature_disabled(client, admin_ena
 def test_disabling_feature_bulk_confirms_existing_unconfirmed_users(client, admin_enabled):
     user = _raw_register(client)  # feature still on by default — starts unconfirmed
     assert _get_user(user["id"]).email_confirmed is False
+    assert _get_user(user["id"]).email_confirmation_bypassed is False
 
     before = SessionLocal()
     try:
@@ -610,6 +665,7 @@ def test_disabling_feature_bulk_confirms_existing_unconfirmed_users(client, admi
     _set_email_confirmation_enabled(client, False)
 
     assert _get_user(user["id"]).email_confirmed is True
+    assert _get_user(user["id"]).email_confirmation_bypassed is True
     after = SessionLocal()
     try:
         assert after.get(AppCounters, 1).total_users == 1  # trigger fired for the bulk UPDATE too
@@ -630,3 +686,41 @@ def test_reenabling_feature_does_not_unconfirm_bulk_confirmed_users(client, admi
         assert db.get(SiteSettings, 1).email_confirmation_enabled is True
     finally:
         db.close()
+
+
+# ---------- voluntary confirmation for a bypassed account (profile's "Verify
+# email" tile — see routers/auth.py's _resend_confirmation /
+# _confirm_email_code and User.email_confirmation_bypassed's docstring) ----------
+
+
+def test_bypassed_account_can_request_and_complete_voluntary_confirmation(client, admin_enabled, fixed_code):
+    _set_email_confirmation_enabled(client, False)
+    user = _raw_register(client)
+    assert _get_user(user["id"]).email_confirmed is True
+    assert _get_user(user["id"]).email_confirmation_bypassed is True
+
+    token = _login_token(client)
+    r = client.post("/auth/resend-confirmation-session", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 204, r.text
+
+    r = client.post(
+        "/auth/confirm-email-session",
+        json={"code": fixed_code},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "confirmed"
+    assert _get_user(user["id"]).email_confirmed is True
+    assert _get_user(user["id"]).email_confirmation_bypassed is False  # graduated to a real OTP round trip
+
+
+def test_genuinely_confirmed_account_still_rejects_resend(client, fixed_code):
+    """Contrast case: only a bypassed account gets the voluntary path — a
+    real confirmation still can't be "resent" (nothing to prove twice)."""
+    user = _raw_register(client)
+    client.post("/auth/confirm-email", json={"username": "alice", "password": PASSWORD, "code": fixed_code})
+    assert _get_user(user["id"]).email_confirmation_bypassed is False
+
+    token = _login_token(client)
+    r = client.post("/auth/resend-confirmation-session", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 400

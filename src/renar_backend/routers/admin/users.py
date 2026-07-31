@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/21 20:57:05.966922
+Revised: 2026/07/29 16:16:46.639144
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -67,28 +67,65 @@ _USERS_PAGE_SIZE = 200
 # lapse. datetime.max itself doesn't round-trip through every DB driver.
 PREMIUM_FOREVER = datetime(9999, 1, 1, tzinfo=UTC)
 
+# Inline copies of renar_frontend's badge_premium.svg / badge_verified.svg —
+# the admin pages have no static-asset pipeline, so the markup is embedded
+# directly rather than referencing the frontend package.
+_PREMIUM_BADGE_SVG = (
+    '<svg viewBox="0 -1.25 24 24" width="{size}" height="{size}" style="vertical-align:middle">'
+    '<defs><linearGradient id="xg-premium-{uid}" x1="12" y1="1.5" x2="12" y2="20.5"'
+    ' gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FFD65C"/>'
+    '<stop offset="0.55" stop-color="#FFB224"/><stop offset="1" stop-color="#E88A00"/></linearGradient></defs>'
+    '<circle cx="2.7" cy="6" r="1.7" fill="url(#xg-premium-{uid})"/>'
+    '<circle cx="12" cy="3.2" r="1.9" fill="url(#xg-premium-{uid})"/>'
+    '<circle cx="21.3" cy="6" r="1.7" fill="url(#xg-premium-{uid})"/>'
+    '<path fill="url(#xg-premium-{uid})" d="M2.7 8.1 L7.7 11.5 L12 5.6 L16.3 11.5 L21.3 8.1 L19.8 16.3 L4.2 16.3 Z"/>'
+    '<rect x="4.2" y="17.5" width="15.6" height="2.7" rx="1.35" fill="url(#xg-premium-{uid})"/>'
+    '<path fill="#FFF6DC" d="M12 9.4 L14.1 12 L12 14.6 L9.9 12 Z"/></svg>'
+)
+_VERIFIED_BADGE_SVG = (
+    '<svg viewBox="0 0 24 24" width="{size}" height="{size}" style="vertical-align:middle">'
+    '<defs><linearGradient id="xg-verified-{uid}" x1="12" y1="1.5" x2="12" y2="22.5"'
+    ' gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#38B6FF"/>'
+    '<stop offset="1" stop-color="#0072DB"/></linearGradient></defs>'
+    '<path fill="url(#xg-verified-{uid})" d="M23 12l-2.44-2.79.34-3.69-3.61-.82-1.89-3.2L12 2.96 8.6 1.5 6.71 4.69'
+    'l-3.61.81.34 3.7L1 12l2.44 2.79-.34 3.7 3.61.82 1.89 3.2 3.4-1.47 3.4 1.46 1.89-3.19 3.61-.82-.34-3.69L23 12z"/>'
+    '<path fill="#fff" d="M10.09 16.72l-3.8-3.81 1.48-1.48 2.32 2.33 5.85-5.87 1.48 1.48-7.33 7.35z"/></svg>'
+)
 
-def _premium_pills(user: User) -> str:
+
+def _premium_pills(user: User, size: int = 16) -> str:
     """Stored premium/verified state (shown even while lapsed — the admin
-    needs to see what is on the account, not what currently renders)."""
+    needs to see what is on the account, not what currently renders).
+    Premium/verified render as their brand badge icon (matching the app),
+    not a text pill — "verification requested" has no icon and stays text."""
     pills = ""
     if user.verified:
-        pills += ' <span class="pill" style="margin-left:.4rem">verified</span>'
+        svg = _VERIFIED_BADGE_SVG.format(size=size, uid=user.id)
+        pills += f' <span style="margin-left:.4rem" title="verified">{svg}</span>'
     elif user.is_premium:
-        pills += ' <span class="pill" style="margin-left:.4rem">premium</span>'
+        svg = _PREMIUM_BADGE_SVG.format(size=size, uid=user.id)
+        pills += f' <span style="margin-left:.4rem" title="premium">{svg}</span>'
     if user.verification_requested:
         pills += ' <span class="pill" style="margin-left:.4rem">verification requested</span>'
-    # email_confirmed backs /stats/ranking's percentile filter (see
-    # routers/stats.py._compute_ranking) — surfaced here so an admin can see
-    # at a glance why an account isn't showing up on the leaderboard.
-    if user.email_confirmed:
-        pills += ' <span class="pill" style="margin-left:.4rem">email confirmed</span>'
-    elif user.email_confirmation_grandfathered:
-        # predates the feature — exempt from the login-gate block and the
-        # cleanup deletion, but still correctly absent from the ranking pill
-        # above until it actually confirms (see migration ffffe2b24717).
-        pills += ' <span class="pill" style="margin-left:.4rem">grandfathered</span>'
     return pills
+
+
+def _email_class(user: User) -> str:
+    """CSS class coloring the email by confirmation state — backs
+    /stats/ranking's percentile filter (see routers/stats.py._compute_ranking),
+    surfaced here so an admin can see at a glance why an account isn't
+    showing up on the leaderboard."""
+    return "email-confirmed" if user.email_confirmed else "email-unconfirmed"
+
+
+def _email_title(user: User) -> str:
+    """Tooltip for the email cell — distinguishes a real OTP round trip from
+    User.email_confirmation_bypassed (see its docstring in models.py)."""
+    if not user.email_confirmed:
+        return "email not confirmed"
+    if user.email_confirmation_bypassed:
+        return "email confirmed (bypassed: OTP was off at signup or when disabled)"
+    return "email confirmed"
 
 
 def _render_premium_actions(user: User) -> str:
@@ -118,14 +155,16 @@ def _render_premium_actions(user: User) -> str:
         )
     elif user.verification_requested:
         verify_action = (
-            f'<form method="post" action="{_P}/users/{uid}/verify" style="display:contents">'
+            f'<form method="post" action="{_P}/users/{uid}/verify" style="display:contents"'
+            f" onsubmit=\"return confirm('Grant verified badge to [{name_esc}]?')\">"
             f'<button class="btn-sm btn-good" type="submit">Approve verification</button></form>'
             f'<form method="post" action="{_P}/users/{uid}/verify/deny" style="display:contents">'
             f'<button class="btn-sm" type="submit">Deny request</button></form>'
         )
     else:
         verify_action = (
-            f'<form method="post" action="{_P}/users/{uid}/verify" style="display:contents">'
+            f'<form method="post" action="{_P}/users/{uid}/verify" style="display:contents"'
+            f" onsubmit=\"return confirm('Grant verified badge to [{name_esc}]?')\">"
             f'<button class="btn-sm btn-good" type="submit">Grant verified</button></form>'
         )
     return f"""
@@ -235,6 +274,7 @@ def _render_user_detail(
         avatar = f'<span class="detail-avatar-fallback">{name_esc[:1].upper()}</span>'
     banned_badge = '<span class="pill">banned</span>' if user.banned else ""
     banned_badge += _premium_pills(user)
+    email_title = _email_title(user)
 
     tiles = "".join([
         _stat_tile("Logins", len(login_ts)),
@@ -287,7 +327,9 @@ def _render_user_detail(
       {avatar}
       <div class="detail-id">
         <div class="detail-name">{name_esc}{banned_badge}</div>
-        <div class="detail-email">{html.escape(user.email)}</div>
+        <div class="detail-email">
+          <span class="{_email_class(user)}" title="{email_title}">{html.escape(user.email)}</span>
+        </div>
         <div class="detail-meta">
           <div>Joined {_fmt_ts(user.created_at)}</div>
           <div>Last login {_fmt_ts(max(login_ts, default=None))}</div>
@@ -339,6 +381,7 @@ def _render_users(
               <button class="btn-sm" type="submit">Ban</button>
             </form>"""
         badge += _premium_pills(u)
+        email_title = _email_title(u)
         n_comments = comment_counts.get(u.id, 0)
         comments_cell = str(n_comments)
         if n_comments:
@@ -346,7 +389,7 @@ def _render_users(
         rows += f"""
         <tr>
           <td class="td-label"><div class="user-cell">{avatar}<span>{name_link}{badge}</span></div></td>
-          <td class="td-email">{html.escape(u.email)}</td>
+          <td class="td-email"><span class="{_email_class(u)}" title="{email_title}">{html.escape(u.email)}</span></td>
           <td class="td-count">{item_counts.get(u.id, 0)}</td>
           <td class="td-count">{comments_cell}</td>
           <td class="td-count">{login_counts.get(u.id, 0)}</td>

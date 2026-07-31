@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.275749 )
-[//]: # (+ Revised: 	2026/07/26 23:28:15.024902 )
+[//]: # (+ Revised: 	2026/07/31 13:46:32.708844 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Environment variables
@@ -38,6 +38,24 @@ Tasks page (`<ADMIN_PATH>/periodic-tasks`), stored in the database.
 |---|---|---|
 | `MEDIA_DIR` | `./media` | Root folder for the content-addressed file store (avatars, cached posters/covers). |
 
+## CAPTCHA
+
+| Variable | Default | What it does |
+|---|---|---|
+| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | empty | [Cloudflare Turnstile](https://dash.cloudflare.com/?to=/:account/turnstile) keys, checked on `/auth/register`. Leaving both empty skips the check entirely (dev default). The on/off switch itself is `SiteSettings.turnstile_enabled` (admin panel, seeded from this same `TURNSTILE_*`-adjacent config), not an env var — disabling it falls back to IP rate-limiting only, no keys needed. **Stays in `.env`** (real secrets). |
+
+## Email
+
+| Variable | Default | What it does |
+|---|---|---|
+| `BREVO_API_KEY` | empty | API key for [Brevo](https://www.brevo.com) transactional email, used to send registration/email-change confirmation codes. Empty means the code is logged to the server console instead of sent — safe to leave unset until a verified sending domain is ready. **Stays in `.env`** (a real secret, not runtime-tunable). |
+
+Sender name/address, confirmation-code lifetime, the login grace period, and
+the unconfirmed-account cleanup age are **seed defaults only** — see
+[anti-abuse.md — DB-backed settings](anti-abuse.md#db-backed-runtime-settings)
+for how that seeding works. All four live in `site_settings` from first boot
+onward and are edited from `{ADMIN_PATH}/settings`, not `.env`.
+
 ## Admin panel
 
 | Variable | Default | What it does |
@@ -58,13 +76,13 @@ that point on the database owns them.  Quick reference:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `RENAR_ABUSE_GUARD_ENABLED` | `true` | Master switch for all rate limiting/banning. Tests turn it off since test traffic all comes from one IP. **Stays in `.env`** (infrastructure flag, not runtime-tunable). |
+| `ABUSE_GUARD_ENABLED` | `true` | Master switch for all rate limiting/banning. Tests turn it off since test traffic all comes from one IP. **Stays in `.env`** (infrastructure flag, not runtime-tunable). |
 | `ENABLE_DOCS` | `false` | Serves `/docs` and `/openapi.json` when `true`. Leave off in any internet-facing deployment — it hands a full API map to scanners. **Stays in `.env`**. |
 | `REGISTRATION_OPEN` | `true` | **Seed default only.** The live value is in `site_settings.registration_open`, editable from `{ADMIN_PATH}/settings`. |
 | `TRUST_PROXY_HEADERS` | `false` | **Seed default only.** Live value in `site_settings`, editable from `{ADMIN_PATH}/settings`. Set `true` **only** when running behind a reverse proxy/CDN (nginx, Caddy, Cloudflare) — it makes the app trust `X-Forwarded-For` for the real client IP. Leave `false` otherwise; that header is client-controlled and trusting it without a proxy lets anyone spoof their IP to dodge rate limits — the same caution applies whether it's set here or flipped in the panel. |
 | `EXEMPT_IPS` | `["127.0.0.1", "::1"]` | **Seed default only.** Live value in `site_settings`, editable from `{ADMIN_PATH}/settings` as a comma-separated list. IPs that skip rate limiting/banning entirely — for monitoring or local tooling only, never a shared/public IP. |
-| `RENAR_RATE_LIMIT_PER_MINUTE` | `600` | **Seed default only.** Live value in `site_settings`. |
-| `RENAR_FLOOD_BAN_PER_MINUTE` | `2000` | **Seed default only.** Live value in `site_settings`. |
+| `RATE_LIMIT_PER_MINUTE` | `600` | **Seed default only.** Live value in `site_settings`. |
+| `FLOOD_BAN_PER_MINUTE` | `2000` | **Seed default only.** Live value in `site_settings`. |
 | `AUTH_RATE_LIMIT_PER_MINUTE` | `30` | **Seed default only.** Live value in `site_settings`. |
 | `REGISTER_PER_HOUR_PER_IP` | `20` | **Seed default only.** Live value in `site_settings`. |
 | `LOGIN_BACKOFF_THRESHOLD` | `5` | **Seed default only.** Live value in `site_settings`. |
@@ -72,7 +90,7 @@ that point on the database owns them.  Quick reference:
 | `LOGIN_BACKOFF_MINUTES` | `15` | **Seed default only.** Live value in `site_settings`. |
 | `PROBE_BAN_THRESHOLD` | `12` | **Seed default only.** Live value in `site_settings`. |
 | `PROBE_WINDOW_MINUTES` | `10` | **Seed default only.** Live value in `site_settings`. |
-| `RENAR_BAN_MINUTES` | `60` | **Seed default only.** Live value in `site_settings`. |
+| `BAN_MINUTES` | `60` | **Seed default only.** Live value in `site_settings`. |
 | `STRIKE_BAN_THRESHOLD` | `5` | **Seed default only.** Live value in `site_settings`. |
 | `TMDB_DB_CACHE_HOURS` | `24` | **Seed default only.** Live value in `site_settings.tmdb_db_cache_hours`, editable from `{ADMIN_PATH}/settings`. How long a persisted TMDB payload (details/season/credits of a tracked title, stored in the `tmdb_cache` table) is served without re-contacting TMDB. Older copies refresh on access and are served stale only while TMDB is unreachable. |
 
