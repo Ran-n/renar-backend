@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:14.175174
-Revised: 2026/07/21 09:51:05.098938
+Revised: 2026/08/02 18:29:48.783439
 
 Premium feature rules: the color palette users may pick from and the
 derivation of the "flair" (badge + colors) every user payload carries.
@@ -46,14 +46,21 @@ PALETTE: tuple[str, ...] = (
 FREE_THEMES: frozenset[str] = frozenset({"gruvbox"})
 THEME_NAMES: frozenset[str] = FREE_THEMES | frozenset({
     "gruvbox_hard",
-    "gruvbox_soft",
     "gruvbox_light",
     "midnight",
     "light",
     "nord",
     "dracula",
     "solarized_light",
+    "solarized_dark",
     "catppuccin",
+    "monokai",
+    "one_dark",
+    "everforest",
+    "everforest_light",
+    "catppuccin_latte",
+    "ayu_dark",
+    "ayu_light",
 })
 
 

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/07/31 19:29:38.590323 )
+[//]: # (+ Revised: 	2026/08/03 08:23:15.754492 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- `users/premium.py`'s `THEME_NAMES` expanded: eight new built-in premium
+  themes added (`solarized_dark`, `monokai`, `one_dark`, `everforest`,
+  `everforest_light`, `catppuccin_latte`, `ayu_dark`, `ayu_light`);
+  `gruvbox_soft` removed (the icon asset was dropped from the frontend in
+  the same pass). Stored `theme` values that no longer appear in
+  `THEME_NAMES` are not retroactively invalidated — only the next `PATCH
+  /premium/style` that touches `theme` would fail a validation check.
+
+### Fixed
+
+- `__main__.py`'s uvicorn `run()` call now passes
+  `timeout_graceful_shutdown=5`. Without it, a `Ctrl+C` while any `/events`
+  (SSE) client was still connected caused uvicorn to log "Waiting for
+  connections to close" and hang indefinitely — the SSE stream holds its
+  HTTP connection open until the client disconnects, so uvicorn's default
+  behavior was to wait for every frontend session to close before the
+  process could exit. Five seconds is long enough for in-flight non-SSE
+  requests to drain and short enough not to be noticeable in dev use.
+  (The companion `_ShutdownCancellationSilencer` in `main.py`, shipped in
+  0.9.0, addresses the traceback noise from torn-down connections; this
+  addresses the hang that forced a second `Ctrl+C`.)
+
+### Removed
+
+- Three Alembic migrations ship in this release whose net schema effect is
+  zero: `a1c9e4f7b3d2` (added `custom_themes` table, `users.custom_theme_id`
+  FK, `site_settings.premium_custom_themes_enabled`), `aa0b78014ee0` (added
+  `custom_themes.theme_colors`), and `02638e4154de` (drops all of the
+  above). The custom-themes backend design was reverted before any release;
+  the feature is handled frontend-only instead (see
+  `docs/design-decisions.md` "Custom themes are frontend-only, not a backend
+  resource"). Operators running `alembic upgrade head` will see all three
+  execute in sequence; the resulting schema is identical to the pre-`a1c9e4f7b3d2`
+  head.
 
 ## [0.9.0] - 2026-07-31
 

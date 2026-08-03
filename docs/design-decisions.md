@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/07/31 13:58:21.314663 )
+[//]: # (+ Revised: 	2026/08/03 08:23:15.844405 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -861,6 +861,26 @@ client renders it consistently. Keeping (not deleting) customizations on
 lapse means resubscribing restores everything instantly — the gentle
 behavior users expect from subscriptions.
 
+### Custom themes are frontend-only, not a backend resource
+
+There is no `CustomTheme` model, no `/custom-themes` router, and no
+`users.custom_theme_id` column — a user-built theme (seed color, accent
+overrides, Material `theme_colors` overrides) lives entirely in the
+frontend's own SharedPreferences (see `branding.themes.save_custom_theme`
+in the frontend repo). The backend never validates, stores, or serves one.
+
+**Why:** a custom theme only ever renders on its own owner's client — the
+worst case of a bad seed color is an ugly app for the person who chose it,
+not an "unreadable on someone else's feed" risk like `ring_color`/
+`name_color` (the palette rule above exists for exactly that risk).
+Nothing about the feature needs a server round trip: no cross-device sync,
+no server-side sharing (import is a locally-decoded share code, same as
+before), and no admin moderation surface to build out (see the now-removed
+backlog entry about reporting theme labels — moot once labels never leave
+the device). Removed 2026-08-02 via migration `02638e4154de`, which reverses
+`a1c9e4f7b3d2`/`aa0b78014ee0` in full. The three migrations ship together
+in the next release; their net schema effect is zero.
+
 ### Custom posters are per-entry image-store rows, never Title edits
 
 A premium user's poster override lives on their `library_entries` row
@@ -1110,6 +1130,30 @@ to the repo root (derived from `__file__`), never to the CWD. A relative
 another directory — hot-reload watched a nonexistent `src`, settings fell
 back to defaults, media landed in a stray folder. None of them errored;
 they just behaved differently depending on where the command was typed.
+
+### `timeout_graceful_shutdown=5` prevents an indefinite Ctrl+C hang
+
+uvicorn's `__main__.py:run()` passes `timeout_graceful_shutdown=5` to
+`uvicorn.run()`. Without it, pressing `Ctrl+C` while any `/events` SSE
+client was still connected caused uvicorn to print "Waiting for connections
+to close" and block until every open SSE stream disconnected — which, by
+design, never happens until the *client* side closes it. The practical
+effect was that stopping the dev server required a second `Ctrl+C` (force
+kill) every time a frontend session was open.
+
+**Why 5 s, not 0:** a zero (or very short) timeout would preempt in-flight
+non-streaming requests that started just before the signal — an HTTP upload
+or a long TMDB fetch could be cut off mid-transaction. Five seconds is long
+enough for any realistic non-SSE request to drain and short enough to be
+imperceptible as a shutdown delay.
+
+**Relationship to `_ShutdownCancellationSilencer`:** the silencer (see
+"Shutdown/cancellation noise is silenced at the ASGI layer" below)
+addresses the *traceback noise* that appears when uvicorn cancels open
+connections; `timeout_graceful_shutdown` addresses whether the process
+actually *exits* promptly. Both are needed: without the timeout the process
+hangs; without the silencer, exiting after the timeout floods the log with
+"Exception in ASGI application" tracebacks per torn-down SSE connection.
 
 ### Startup port probe + orphan watchdog (`_devserver.py`)
 

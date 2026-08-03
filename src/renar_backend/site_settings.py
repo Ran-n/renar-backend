@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 13:30:00.000000
-Revised: 2026/07/21 09:51:04.457016
+Revised: 2026/08/02 18:29:48.977769
 
 Runtime-tunable site settings backed by the `site_settings` singleton row.
 

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 00:00:00.000000
-Revised: 2026/07/21 09:51:07.520417
+Revised: 2026/08/02 18:29:48.881541
 
 Admin premium-features page: one card per premium perk, each with its own
 instant on/off switch (SiteSettings.premium_<feature>_enabled). Independent

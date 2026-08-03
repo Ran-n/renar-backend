@@ -1,24 +1,22 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/07/31 19:02:53.096097 )
+[//]: # (+ Revised: 	2026/08/02 18:29:49.172047 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
 
 Known gaps and follow-ups, not yet scheduled.
 
+Every entry is tagged `[Blocking for 1.0]` or `[Future]` right after the
+opening `- **`. "1.0" means the next major version bump (first stable/public
+release), not the next minor/patch. Resolved entries are deleted outright,
+not marked done/fixed — the historical record lives in git history,
+CHANGELOG.md, and `docs/design-decisions.md` instead.
+
 ## Multi-session sync
 
-- **Done — `GET /events` (SSE) pushes account-settings changes to every
-  open session.** `routers/events.py` + `events.py`; `PATCH /auth/profile`
-  and `PATCH /premium/style` publish `settings_changed` after committing.
-  See `docs/design-decisions.md`'s "`GET /events`" entry for the design
-  (why SSE not a WebSocket, why in-memory single-worker) and
-  renar-frontend's `docs/backlog.md` "Multi-session sync" entry for the
-  full story and client side.
-
-- **Not covered: general data sync (watch status, library, comments,
+- **[Blocking for 1.0] Not covered: general data sync (watch status, library, comments,
   notifications).** The `/events` push above is account-settings only.
   Marking an episode watched, adding to the library, posting a comment, or
   a new notification on one session still isn't reflected on another open
@@ -26,91 +24,6 @@ Known gaps and follow-ups, not yet scheduled.
   push for any of that yet. Extending the same `/events` channel with more
   event types (e.g. `library_changed`) is the likely shape of a fix, but
   scope/priority not decided.
-
-## Performance / responsiveness
-
-- **Reduce endpoint latency so the frontend feels snappier — done.**
-  Audited the hot endpoints (library listing, explore, title/episode
-  detail, profile/social, comments) for N+1 queries, missing eager loads,
-  and missing indexes. Fixed:
-  - **Comments N+1 (the big one).** `routers/comments.py`'s `_comment_out`
-    walked `Comment.author`/`.likes`/`.reports`/`.replies` — all lazy
-    relationships — recursively per node; rendering 100 root comments with
-    replies fired on the order of hundreds to thousands of queries. Added
-    `social/comment_threads.load_thread()`: one recursive CTE to collect
-    every comment in a thread (roots + all nested replies), then three
-    `selectinload`s for author/likes/reports — fixed query count regardless
-    of thread size/depth. `_comment_out` now takes a
-    `children_by_parent` dict built from that batch instead of touching
-    `Comment.replies`.
-  - **`routers/social.py`'s `activity_feed`** wasn't eager-loading
-    `title_ref`/genres/custom poster-backdrop images, so `item.poster_url`
-    etc. lazy-loaded per row (up to 50/request). Added `WITH_TITLE_GENRES`
-    to its query, same as `list_media`/`get_stats`/`user_media` already had.
-  - **Missing composite indexes on `Notification`.** Replaced the
-    low-cardinality standalone `read` index with
-    `(user_id, read)` (backs `list_notifications`'/`unread_count`'s filter)
-    and `(user_id, created_at)` (backs the default listing order) — same
-    pattern as `LibraryEntry`'s existing composite indexes. Migration
-    `45a9dba29ff9`.
-  - `list_media`, `get_stats`, `user_media` were already using
-    `WITH_TITLE_GENRES` + `prefetch_episode_cache`, so no N+1 there.
-  - TMDB-derived metadata caching already exists (`tmdb_http.py`'s
-    in-memory cache + `tmdb_store.py`'s DB-persisted `TmdbCache`) — this
-    part of the original ask was already done, not new work.
-
-  **`list_media` had no default limit** — an omitted `limit`/`offset`
-  returned the caller's entire library unbounded. Fixed: `list_media` now
-  defaults to `_DEFAULT_LIST_LIMIT = 60` (matches the frontend's existing
-  `library_view.py` page size) when the caller doesn't pass `limit`. That
-  required auditing every frontend caller that relied on the old unbounded
-  default first (see `renar-frontend`'s now-closed mirror entry) — two of
-  the four call sites were actually using `list_media` to build a
-  full-library lookup, not a paginated listing, and would have silently
-  broken (false "not in library" / false "not found") the moment a large
-  library got capped:
-  - `routers/media.py`'s new **`GET /media/keys`** — a lean, unbounded
-    `(media_type, tmdb_id, title, author, url)` projection (no
-    `WITH_TITLE_GENRES` joins, no full `LibraryEntryOut` shape) for
-    Explore's "already in my library" icon overlay, which genuinely needs
-    every entry, not a page.
-  - `routers/media.py`'s new **`GET /media/by_tmdb`** — single-item lookup
-    by `(media_type, tmdb_id)` for the title detail page, replacing a
-    linear scan over the caller's (previously unbounded) full library.
-  - The Home "continue watching" row's `list_media(status_filter=
-    "watching")` call now passes an explicit `limit=6` — the most it ever
-    renders — instead of relying on the backend handing back everything.
-
-  `get_stats` intentionally still has no `limit`/`offset` at all: it
-  aggregates totals (watch minutes, genre counts, streaks, ratings) across
-  the *entire* library to produce a single correct number, so pagination
-  doesn't apply to it the way it does to a listing endpoint — this wasn't a
-  gap, just an imprecise description in the original audit note.
-
-## Flagged during 2026-07-21 full sweep — fixed
-
-- **`users/auth.py`'s `get_current_user` wrote to the DB (`_touch_activity`,
-  commit) on every authenticated request — fixed.** Every current reader of
-  `last_active_at` (admin analytics' `active_today`/`active_7d`, the admin
-  user-detail page, the GDPR export) only needs day-level accuracy, so
-  `_touch_activity` now skips the write when the existing value is already
-  younger than `_ACTIVITY_TOUCH_INTERVAL` (15 minutes) — cuts the write
-  volume by ~two orders of magnitude for an active user without changing
-  anything any reader sees.
-
-- **`tmdb/tmdb_http.py` sends the TMDB v3 API key as a URL query
-  parameter — investigated 2026-07-21, already correct, no code change.**
-  Checked against TMDB's own auth docs
-  (https://developer.themoviedb.org/reference/authentication): the
-  `Authorization: Bearer` header only accepts a Read Access Token (the
-  separate JWT-shaped credential), never the legacy v3 API key — TMDB
-  states outright that a v3 key "only works when passed as a query
-  parameter, rather than in an Authorization header." `tmdb_get` already
-  branches correctly (JWT-shaped key → `Bearer` header, legacy key →
-  `api_key` query param), so the query-param path for v3 keys is required
-  by TMDB, not a latent bug. The logging-leak risk this entry raised is
-  real in the abstract but only for a URL-logging client/middleware that
-  doesn't already exist in this codebase.
 
 ## Import system (`routers/imports.py`)
 
@@ -127,31 +40,9 @@ every registered origin for the frontend's source picker
 `user_id` (migration `76058e1d65e8`), so an account's TV Time and Renar
 import outcomes don't clobber each other.
 
-- **Renar-native import — added.** `users/renar_import.py` is the write
-  side of GDPR Art. 20 data portability: restores an account from its own
-  `users/export.py` `.7z` export (profile/library/comments/social), so a
-  lost account or a fresh install can get everything back rather than just
-  a document to look at. Every row already carries its own `tmdb_id`, so
-  there's no fuzzy TMDB matching — it runs synchronously on one thread
-  rather than fanning out across a worker pool like the TV Time importer.
-  Merge semantics mirror the TV Time importer: an existing row is only
-  filled in or extended, never clobbered, so re-running (or importing into
-  an account that already has data) is safe. Only `following` is restored
-  on the social side — `followers` isn't this account's to recreate. A
-  reply's parent is only reconstructed when it's also one of this user's
-  own exported comments (same self-reply-only limitation as the TV Time
-  importer, documented below).
-
 ### TV Time import
 
-- **Infra failures counted as "skipped" — fixed.** `_upsert_library_entry`
-  now returns a fourth `error` flag, set only when its `except Exception`
-  fires (a real infra failure), never for an ordinary dedupe skip. Callers
-  tally it into a separate `summary["errors"]` counter instead of folding it
-  into `skipped`, and [import_view.py](../../renar-frontend/src/renar_frontend/views/profile/import_view.py)
-  surfaces it as a red "{n} failed due to a server error" line.
-
-- **Transient TMDB failures permanently degrade an entry — reconcile now
+- **[Blocking for 1.0] Transient TMDB failures permanently degrade an entry — reconcile now
   backfills.** If a TMDB lookup fails (rate limit, outage) the row imports
   unmatched (no `tmdb_id`, poster, or episode counts). `catalog/titles.py`'s
   new `backfill_title_tmdb_id` is now called from both reconcile paths in
@@ -166,92 +57,28 @@ import outcomes don't clobber each other.
   when there's no `tmdb_id` match). No retry/backoff on 429s either, and 8
   concurrent workers make bursts more likely.
 
-- **Server restart mid-import fails silently — fixed.** Progress still lives
-  in the in-memory `_progress` dict (fine for normal polling), but a new
-  durable `ImportJob` row (models.py, migration `b2f7a6d391ea`) is now
-  written at job start and at completion/failure. `GET /import/status`
-  (was `/import/tvtime/status`) falls back to it whenever `_progress` has nothing for the user (a new
-  process after a restart): `finished=False` there means the job never
-  reported back, so the endpoint now returns an explicit "Import was
-  interrupted by a server restart" error instead of a fabricated "Never run"
-  success.
-
-- **Comments — added.** `show_comment.csv`/`episode_comment.csv` were
-  previously ignored entirely, even though they're genuine user content
-  (unlike e.g. `user_statistics.csv`, which Renar recomputes itself). Both
-  are now read and inserted as root `Comment` rows, scoped only to shows
-  matched during the same run (`items_by_tvdb`) — a comment on an untracked
-  show is skipped rather than triggering its own TMDB match/library add.
-  `episode_comment.csv` has no `tv_show_id` column, only `tv_show_name`, so
-  it's matched via a name -> tvdb_id map built from `user_tv_show_data.csv`'s
-  own rows; a name collision there would misfile a comment onto the wrong
-  show, though TV Time show names are effectively unique in practice.
-  `Comment` has no external TV Time id, so re-runs dedupe by
-  `(title_id, season, episode, text)` for root comments and by
-  `(parent_id, text)` for replies instead. **Reply threads
-  (`parent_comment_id`):** reconstructed when the parent is *also* one of
-  this user's own exported comments — `tvtime_id_to_comment_id` maps every
-  resolved comment's original TV Time id to its new `Comment.id`, retried in
-  passes so multi-level self-reply chains resolve regardless of row order,
-  and replies onto a comment from a previous import run still resolve since
-  a dedupe hit populates the map too. A reply whose parent never resolves —
-  the common case, replying to another TV Time user, who by definition isn't
-  in this user's own export — is dropped rather than filed as a fake root
-  comment, since that would misrepresent what it actually is. Still not
-  imported: per-episode emotion/star votes
-  (`emotions-v2-prod-votes.csv`, `ratings-v2-prod-votes.csv` — Renar only
-  gets the whole-show rating from `tv_show_rate.csv`), custom poster/fanart
-  picks (`user_custom_show_image.csv`), and user-made lists
-  (`lists-prod-lists.csv`) — none of these have an equivalent Renar model
-  yet.
-
-- **Rewatches — added.** `rewatched_episode.csv` was previously ignored.
-  Renar *does* have a rewatch concept — `WatchEvent` (models.py) is a
-  separate, append-only log next to `EpisodeWatch`'s "currently watched"
-  row; `POST /media/{item_id}/rewatch` and `routers/media.py`'s
-  `rewatch_count` fields already read/write it (an earlier pass at this
-  backlog entry wrongly said Renar had no rewatch concept — it does, this
-  was just never wired into the importer). TV Time's `cpt` column is that
-  show's own rewatch count per episode; import means topping each episode's
-  `WatchEvent` row count up to `cpt`, not overwriting it, so a rewatch
-  logged manually (or via the app's own endpoint) survives a re-import, and
-  re-running only ever inserts the shortfall. Matched via the same
-  name -> tvdb_id map as `episode_comment.csv` (no `tv_show_id` column here
-  either). A rewaked-but-never-marked-watched episode gets its
-  `EpisodeWatch` row created too, matching what the app's own rewatch
-  endpoint already does. TV Time gives one timestamp per row, not one per
-  rewatch, so every synthesized event for a `cpt` > 1 row shares it.
-
-- **Import coverage panel — added.** [import_view.py](../../renar-frontend/src/renar_frontend/views/profile/import_view.py)
-  now has a "What gets imported?" button opening a dialog that lists every
-  category that is and isn't imported, with a one-line reason for each
-  omission (no equivalent Renar feature yet, deliberately excluded as
-  account/session data, or can't be reconstructed from a single user's
-  export). Static content, not server-fetched — it describes the importer's
-  fixed behavior, so it only needs updating here in lockstep with
-  `routers/imports.py` itself.
-
-- **Minor: concurrent reconciles of the same entry are last-write-wins.**
+- **[Blocking for 1.0] Minor: concurrent reconciles of the same entry are last-write-wins.**
   Two rows racing to reconcile into the same `LibraryEntry` aren't
   serialized — harmless today since both reconcile functions are monotonic
   (favorite only flips true, rating only fills when empty), but worth a note
   if reconcile logic grows less monotonic later.
 
-- **Minor: `_progress` entries are never pruned.** Negligible memory; clears
+- **[Blocking for 1.0] Minor: `_progress` entries are never pruned.** Negligible memory; clears
   on process restart. Not worth fixing unless it becomes visible.
 
-- **Planned: "watched on" (streaming source) and custom lists.** Two of the
-  "no matching feature yet" items are now actually queued, not permanent
-  gaps — see the "Custom lists" and "Watched-on / streaming source
-  tracking" entries under Features below. Once those Renar-side features
-  exist, this importer needs matching read-and-map logic:
+- **[Blocking for 1.0] Planned: custom-lists import mapping.** Once the
+  "Custom lists" feature (Features below) exists, this importer needs
+  read-and-map logic for `lists-prod-lists.csv`.
+
+- **[Future] Planned: "watched on" (streaming source) import mapping.**
+  Once the "Watched-on / streaming source tracking" feature (Features
+  below) exists, this importer needs matching read-and-map logic:
   `watched_on_episode.csv`/`followed_tv_show_source.csv` (source id per
   episode/show watch — both files are confirmed present in a real GDPR
   export carrying `watched_on_source_id`; the field exists, only the enum
   isn't documented anywhere in the export itself, so its meaning needs
   reverse-engineering, e.g. by cross-checking a few known-source watches in
-  a real account against the app's UI) for watched-on, and
-  `lists-prod-lists.csv` for custom lists. Explicitly decided *not* to build
+  a real account against the app's UI). Explicitly decided *not* to build
   in this pass: per-episode emotion reactions (`episode_emotion.csv`,
   `tv_show_user_emotion_count.csv`) — real discrete `emotion_id` values do
   exist in the export (unlike star votes, which don't carry a value at
@@ -262,7 +89,7 @@ import outcomes don't clobber each other.
 
 ## Features
 
-- **Custom lists.** User-made collections of shows/movies (TV Time has these
+- **[Blocking for 1.0] Custom lists.** User-made collections of shows/movies (TV Time has these
   as user-made lists — `lists-prod-lists.csv` in a GDPR export). No
   equivalent model exists yet: needs a `List`/`ListItem` table (or similar),
   ownership, ordering, CRUD endpoints, and UI (create/rename/delete a list,
@@ -271,7 +98,7 @@ import outcomes don't clobber each other.
   or private-only; does the TV Time importer target this once it exists (see
   the TV Time import section above).
 
-- **Watched-on / streaming source tracking — user priority (2026-07-21).**
+- **[Future] Watched-on / streaming source tracking — user priority (2026-07-21).**
   Record which platform/service an episode or movie was watched on (TV Time
   has `watched_on_source_id` per episode watch, and a per-show
   followed-source too). No field for this exists on
@@ -283,7 +110,7 @@ import outcomes don't clobber each other.
   import section above) before it can map source ids to whatever this ends
   up being.
 
-- **Ranking only covers total overall watch time; no badges/achievements
+- **[Future] Ranking only covers total overall watch time; no badges/achievements
   exist yet.** `routers/stats.py:205-210`'s `RANKING_METRICS` currently
   registers a single metric, `watch_time` (total minutes across
   everything). The ranking system is pluggable by design (add a
@@ -302,64 +129,7 @@ import outcomes don't clobber each other.
   which per-category rankings to add first, and what the badge set /
   unlock conditions look like.
 
-- **Real email confirmation on registration — done.** `users/email_confirmation.py`
-  (codes, bcrypt hashing, Brevo send with a logged-not-sent fallback while
-  `BREVO_API_KEY` is unset, resend throttle, cleanup loop) plus
-  `routers/auth.py`'s `/auth/confirm-email` + `/auth/resend-confirmation`
-  (credential-based — an account past the login grace period has no token to
-  authenticate with otherwise) and their bearer-token twins
-  `/auth/confirm-email-session` + `/auth/resend-confirmation-session` (for a
-  still-logged-in but unconfirmed session, e.g. a restored session inside
-  the grace period, where re-asking for the password would be redundant),
-  `/auth/change-unconfirmed-email(-session)` (fix a typo'd address before
-  the first confirmation — direct rewrite, no old-address approval needed
-  since there's no current owner to protect yet), the two-step email-change
-  flow in `update_profile`, and a login grace period before an unconfirmed
-  account is blocked. `User.email_confirmed` defaults to `False` for every
-  row including existing users. This was built specifically to close the
-  ranking-inflation gap noted under the Turnstile item below:
-  `_compute_ranking` (`routers/stats.py`) and `app_counters.total_users`
-  (`db_triggers.py`) now only count confirmed users.
-
-  **Pre-existing accounts:** the original `email_confirmation_grandfathered`
-  flag (migration `ffffe2b24717`) exempted every account that existed before
-  rollout from the login-gate block and cleanup deletion without marking it
-  `email_confirmed`. A later migration replaced that with a simpler,
-  permanent fix: every account that existed at rollout time was bulk-marked
-  `email_confirmed = True` directly, and the `email_confirmation_grandfathered`
-  column was dropped.
-
-  **`email_confirmed` vs. `email_confirmation_bypassed`:** the same "mark it
-  confirmed outright, don't track a separate exemption" approach now also
-  covers new accounts that register while confirmation is off, and any
-  account an admin's kill-switch toggle bulk-confirms — see below. Both
-  cases additionally set `User.email_confirmation_bypassed = True`
-  (migration `6d15f435ffcf`), a purely informational marker: nothing
-  re-gates on it, but the admin user list's email tooltip distinguishes a
-  real OTP round trip ("email confirmed") from one that never happened
-  ("email confirmed (bypassed: ...)"), and the profile screen offers a
-  bypassed account a **voluntary** "Verify email" tile — reusing the
-  `-session` endpoints above, with the `email_confirmed` guard on them
-  loosened to let a bypassed account through — that clears the flag once
-  they complete a real code round trip. Only accounts created *after*
-  rollout, with the feature on and never bulk-confirmed, are ever subject
-  to the grace-period block/cleanup.
-
-  **Admin kill switch:** `SiteSettings.email_confirmation_enabled` (Site
-  Settings page, same pattern as `turnstile_enabled`) — off skips the code
-  step for new registrations entirely (bypassed) and immediately
-  bulk-confirms every currently-unconfirmed account (bypassed too, so
-  nobody stays silently excluded from ranking or blocked at login once the
-  feature is off); re-enabling it does not retroactively re-lock anyone.
-  The Site Settings page also has a full Email section now: sender
-  name/address, confirmation-code TTL, grace-period days, and cleanup-days
-  are all admin-configurable (previously fixed constants), plus a warning
-  when `BREVO_API_KEY` is unset, since that's the reason codes aren't
-  actually being emailed yet. Not yet done: real sending is still off
-  (`BREVO_API_KEY` unset by default) pending the subdomain/DNS work in the
-  Infrastructure section; the Brevo bounce/complaint webhook.
-
-- **Design the registration flow around the email-confirmation toggle
+- **[Blocking for 1.0] Design the registration flow around the email-confirmation toggle
   flipping on/off — user priority (2026-07-29).** The toggle
   (`SiteSettings.email_confirmation_enabled`) and its two bulk-confirm/
   bypass mechanics above were each added reactively, one migration at a
@@ -369,9 +139,8 @@ import outcomes don't clobber each other.
   front. Worth a proper pass rather than another one-off patch.
 
   **What shipped in the 2026-07-29 session** (context for the open
-  questions below — all already covered in more detail in the "Real email
-  confirmation" entry above and `docs/design-decisions.md`'s
-  "`email_confirmed` is authoritative" entry):
+  questions below — see `docs/design-decisions.md`'s "`email_confirmed`
+  is authoritative" entry for the full reasoning):
   - Backend: migration `4b2026dc80cd` (email sender name/address and
     confirmation-code TTL moved from fixed constants onto `SiteSettings`)
     and migration `68156a912acf` (grace-period days and cleanup-days,
@@ -405,10 +174,9 @@ import outcomes don't clobber each other.
     path (`test_bypassed_account_can_request_and_complete_voluntary_confirmation`,
     `test_genuinely_confirmed_account_still_rejects_resend`). Full backend
     suite (552 tests) green.
-  - Docs: this backlog entry and the "Real email confirmation" entry above
-    it, plus a matching pair of entries in renar-frontend's `docs/backlog.md`
-    and both repos' `docs/design-decisions.md` — see those for the
-    reasoning behind each piece, not repeated here.
+  - Docs: this backlog entry, plus a matching entry in renar-frontend's
+    `docs/backlog.md` and both repos' `docs/design-decisions.md` — see
+    those for the reasoning behind each piece, not repeated here.
 
   Open questions for the actual design pass:
   - **Toggle-flip races.** `register()` reads
@@ -447,7 +215,7 @@ import outcomes don't clobber each other.
     how that squares with "no obligation" being the whole point of the
     tile.
 
-- **Soft delete with a 30-day grace period for account deletion.**
+- **[Blocking for 1.0] Soft delete with a 30-day grace period for account deletion.**
   `DELETE /auth/me` (`routers/auth.py:520-525`) currently calls
   `users/accounts.py`'s `delete_account` directly, which purges the user row
   and every referencing row (comments, likes, follows, notifications, login
@@ -538,7 +306,7 @@ import outcomes don't clobber each other.
       status pill, and `_render_account_actions` (163-214) is where a
       "cancel pending deletion" admin action would live.
 
-- **Real phone number confirmation on registration.** Same shape as the
+- **[Blocking for 1.0] Real phone number confirmation on registration.** Same shape as the
   email-confirmation item above, but there's currently no phone number
   field on `User` at all (`models.py:111-151`) — this needs the field
   added first, plus an SMS-sending capability (no provider integration
@@ -549,7 +317,7 @@ import outcomes don't clobber each other.
   confirmation; which SMS provider (cost, coverage — matters if
   international numbers are expected).
 
-- **Anti username-squatter protection.** Prevent usernames from being
+- **[Blocking for 1.0] Anti username-squatter protection.** Prevent usernames from being
   permanently locked up by abandoned/unconfirmed or inactive accounts.
   Overlaps with the "Squatting via never-confirmed accounts" note under the
   email-confirmation item above (periodic cleanup of unconfirmed signups),
@@ -561,14 +329,7 @@ import outcomes don't clobber each other.
 
 ## Bugs
 
-- **Block marking future (unaired) episodes as watched — server-side enforcement — fixed.**
-  `_assert_not_future_episode()` helper in `routers/media.py` called from both
-  `set_episode` (single toggle) and `bulk_episodes` before any `EpisodeWatch` rows
-  are written. Raises 422 when the `Episode` catalog row exists and its `air_date`
-  is a future date. No catalog row or NULL air_date → allowed (treat as possibly
-  aired/untracked). Six tests added to `tests/test_episodes.py`.
-
-- **Show fully up-to-date with aired episodes must not appear in "Watch Next".**
+- **[Blocking for 1.0] Show fully up-to-date with aired episodes must not appear in "Watch Next".**
   `list_media()` with `order_by="last_watched"` powers the "Continue Watching"
   list. It must exclude shows where all aired episodes (`air_date <= today`) are
   watched and only future-dated episodes remain. `_sync_progress()` computes
@@ -576,7 +337,7 @@ import outcomes don't clobber each other.
   `list_media` can filter on, or the filter can be applied directly in the query.
   A show should only re-enter the list once a new episode's air date passes.
 
-- **New aired episodes should rank #2 in "Watch Next".**
+- **[Blocking for 1.0] New aired episodes should rank #2 in "Watch Next".**
   When a tracked show has a newly aired episode the user hasn't watched, it
   should bubble to position #2 in the list (position #1 is the most recently
   actively-watched item — highest `last_watched_at`). Depends on the bug above
@@ -585,7 +346,7 @@ import outcomes don't clobber each other.
   `last_watched` descending; a secondary sort key is needed for shows with at
   least one unwatched aired episode whose `air_date > last_watched_at`.
 
-- **`/auth/me` doesn't expose how many grace-period days an unconfirmed
+- **[Blocking for 1.0] `/auth/me` doesn't expose how many grace-period days an unconfirmed
   account has left.** Flagged from the frontend side (renar-frontend's
   `docs/backlog.md`, 2026-07-30 sweep): `confirm_email_view.py`'s
   `login_reminder`/`login_blocked` copy always shows the *full*
@@ -599,7 +360,7 @@ import outcomes don't clobber each other.
 
 ## Features
 
-- **Diary endpoint — chronological watch/activity log.**
+- **[Blocking for 1.0] Diary endpoint — chronological watch/activity log.**
   New endpoint `GET /diary` returning the user's watch events in
   reverse-chronological order, paginated. Should cover both film/show library
   completions and individual episode watches. Response shape per entry:
@@ -610,28 +371,28 @@ import outcomes don't clobber each other.
   completions via `last_watched_at`). Prefer one unified endpoint over two
   separate ones if the schema allows it cleanly.
 
-- **Chronological sort on comments.**
+- **[Blocking for 1.0] Chronological sort on comments.**
   `GET /media/{id}/comments` currently returns comments in a fixed order.
   Add a `?sort=asc|desc` query parameter so clients can request oldest-first
   (chronological). Default remains the current behaviour; `asc` is the new
   opt-in. Change goes in the comments query in `routers/comments.py` (or
   wherever comments are fetched).
 
-- **Reviews (alongside the existing Comments).**
+- **[Blocking for 1.0] Reviews (alongside the existing Comments).**
   Reviews are longer, more considered write-ups — distinct from the casual
   comment thread already in place. Backend work: new `reviews` table + Alembic
   migration, new CRUD endpoints in `routers/`, normalization check in
   `test_normalization.py`. Schema must stay BCNF (a review's rating is a fact
   about the user+title pair, not a copy of anything else).
 
-- **Share — film, show, episode, comment.**
+- **[Blocking for 1.0] Share — film, show, episode, comment.**
   Backend needs to support shareable deep links or redirect URLs for a title page,
   a specific episode, and a comment (anchor within a thread). Options: generate
   canonical share URLs in the API response, or add a `/share/{type}/{id}`
   redirect endpoint. Decide on a URL scheme before implementing frontend share
   buttons.
 
-- **Social login: Continue with Google / Continue with Apple.**
+- **[Future] Social login: Continue with Google / Continue with Apple.**
   Not committed — revisit once real signup-funnel data shows password-registration
   drop-off is a problem worth solving. Would need nullable `google_id`/`apple_id`
   columns on `User` (with nullable `password_hash`), new Alembic migration, new
@@ -640,7 +401,7 @@ import outcomes don't clobber each other.
   account and is mandatory if Google sign-in is also offered on iOS. Decide on
   native plugin bridge vs. OAuth web-redirect before scoping further.
 
-- **Recommendation feed: infinite-scroll "what to watch next".**
+- **[Blocking for 1.0] Recommendation feed: infinite-scroll "what to watch next".**
   Not committed — needs design work on what signals feed the taste model before
   scoping endpoints. Would need a "taste inferer" (model/heuristic from watch
   history, ratings, dwell time), new endpoint(s) in `routers/recommendations.py`,
@@ -648,7 +409,7 @@ import outcomes don't clobber each other.
   for new users. Open question: in-house collaborative/content-based filtering
   vs. external recommendation service.
 
-- **Push notifications (system notifications while the app is closed).**
+- **[Blocking for 1.0] Push notifications (system notifications while the app is closed).**
   `notifier.py`'s `check_new_episodes` only ever writes an in-app `Notification`
   row — nothing reaches the device when the app isn't open. A killed-app
   system notification from a server-side event requires going through the
@@ -792,12 +553,7 @@ import outcomes don't clobber each other.
 
 ## Infrastructure
 
-- **Domain registered: `breren.com`.** Umbrella domain is bought (done, no
-  longer a backlog item). App renamed to Renar; subdomain is `renar.breren.com`.
-  Cloudflare DNS (A/CNAME per subdomain, orange-cloud proxy, "Always Use
-  HTTPS") still needs configuring; ties into the HTTPS-by-default item below.
-
-- **Wire up HTTPS by default; currently opt-in only.** Caddy-based TLS
+- **[Blocking for 1.0] Wire up HTTPS by default; currently opt-in only.** Caddy-based TLS
   termination was added then dropped (see git history); the current
   approach is documented in `docs/design-decisions.md:298-310` as relying
   on uvicorn's native `--ssl-keyfile`/`--ssl-certfile` flags (see
@@ -829,7 +585,7 @@ import outcomes don't clobber each other.
     manifest is hand-patched..." entry) — real HTTPS would make that
     manifest patch unnecessary too, not just close this item.
 
-- **Cloudflare Turnstile captcha on `/auth/register` — shipped, a few
+- **[Blocking for 1.0] Cloudflare Turnstile captcha on `/auth/register` — shipped, a few
   loose ends remain.** Added to combat fake-account registration inflating
   stats/rankings. Live keys configured (`TURNSTILE_SITE_KEY`/
   `TURNSTILE_SECRET_KEY` in `.env`, hostname `api.renar.breren.com`
@@ -862,13 +618,8 @@ import outcomes don't clobber each other.
     all — see the HTTPS item above and renar-frontend's
     `docs/design-decisions.md`. Real HTTPS on the backend removes the need
     for that patch entirely, not just the manual-edit fragility.
-  - **Email verification — done.** See "Real email confirmation on
-    registration" in the Features section above. Captcha alone only stopped
-    scripted bulk signups, not a human hand-registering a few throwaway
-    accounts; `_compute_ranking`'s percentile denominator and "ahead of me"
-    comparison now both exclude unconfirmed accounts.
 
-- **No human-facing mailbox on `breren.com` yet (e.g. `support@`/`hello@`).**
+- **[Blocking for 1.0] No human-facing mailbox on `breren.com` yet (e.g. `support@`/`hello@`).**
   Distinct from the OTP-sending item above (Brevo, transactional-only, no
   inbox): this is for a real mailbox a person actually reads/replies from —
   support requests, store-listing contact address, domain-registrar
@@ -883,7 +634,7 @@ import outcomes don't clobber each other.
   the HTTPS/Turnstile items above, so batch with those when DNS is next
   touched.
 
-- **Admin/mod accounts still lack per-account roles.** `routers/admin.py`
+- **[Blocking for 1.0] Admin/mod accounts still lack per-account roles.** `routers/admin.py`
   is a working operator dashboard (users, usage, comments, banned IPs)
   gated by a single shared `HTTPBasic` credential pair
   (`settings.admin_path`, admin.py:49) — good for one operator, not for
@@ -893,7 +644,7 @@ import outcomes don't clobber each other.
   admin/mod-only actions per account if multiple privileged users are
   wanted, distinct from the existing single-operator panel.
 
-- **psycopg3 stale prepared plans after live schema changes.** psycopg3
+- **[Blocking for 1.0] psycopg3 stale prepared plans after live schema changes.** psycopg3
   auto-prepares statements reused ~5+ times per connection. DDL that alters
   or recreates tables against a pool with existing prepared plans triggers
   `cached plan must not change result type` on the next query using that
@@ -908,14 +659,14 @@ Not yet scheduled. Nothing here is started; capturing the shape of the work
 before picking it up. Store-specific build steps (Android/iOS/web packaging)
 are tracked in renar-frontend's `docs/backlog.md`.
 
-- **Production hosting isn't chosen or set up.** No Dockerfile/compose file
+- **[Blocking for 1.0] Production hosting isn't chosen or set up.** No Dockerfile/compose file
   exists in either repo and nothing is deployed anywhere. Needs a host
   (Fly.io/Railway/a VPS are all viable) running a persistent Postgres
   (sqlite is fine locally, not for production) with a backup plan, plus
   the app's subdomain on `breren.com` (once picked) and the
   HTTPS-by-default item above wired to point at it.
 
-- **No privacy policy or Terms of Service exist.** Both Apple and Google
+- **[Blocking for 1.0] No privacy policy or Terms of Service exist.** Both Apple and Google
   require a live, publicly hosted URL to a privacy policy at submission
   time (Google also wants ToS if the app has accounts/payments). The
   `gdpr-data` folder at the workspace root suggests GDPR is already on the
@@ -923,19 +674,19 @@ are tracked in renar-frontend's `docs/backlog.md`.
   page, once the app's subdomain is picked to host it on (`breren.com`
   itself is registered already).
 
-- **No data-safety audit done for store submission.** Google Play's Data
+- **[Blocking for 1.0] No data-safety audit done for store submission.** Google Play's Data
   Safety form and Apple's Privacy Nutrition Label both require enumerating
   exactly what user data is collected (email, username, avatar, watch
   history, IP address for rate-limiting) and why. One audit, reused for
   both store listings.
 
-- **Account-deletion page needs a web-reachable path, not just in-app.**
+- **[Blocking for 1.0] Account-deletion page needs a web-reachable path, not just in-app.**
   `DELETE /auth/me` already covers in-app deletion, but Google Play policy
   requires a deletion request to also be reachable *without* installing the
   app (a simple hosted web form/page). Blocked on the app's subdomain
   being picked (`breren.com` itself is registered already).
 
-- **No payment integration wired to the app stores — and mobile can't just
+- **[Blocking for 1.0] No payment integration wired to the app stores — and mobile can't just
   reuse a web payment flow.** `premium_until` is admin-granted only today
   (see `docs/design-decisions.md:441-450`); there's no Stripe/PayPal/IAP
   integration at all yet. If premium becomes purchasable from inside the
@@ -947,7 +698,7 @@ are tracked in renar-frontend's `docs/backlog.md`.
   ship the first store release with premium still admin-granted only and
   add IAP in a later version. Option (b) is the smaller first step.
 
-- **No crash/error monitoring wired anywhere.** No Sentry (or equivalent)
+- **[Blocking for 1.0] No crash/error monitoring wired anywhere.** No Sentry (or equivalent)
   found in either repo. Worth adding before real (non-dev) traffic hits the
   backend, so a production failure doesn't fail silently — ties into the
   admin-roles and HTTPS-by-default items above as general pre-launch
