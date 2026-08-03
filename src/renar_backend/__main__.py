@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:13.871671
-Revised: 2026/07/22 10:41:57.857899
+Revised: 2026/08/01 16:10:08.490593
 """
 
 import logging
@@ -81,6 +81,14 @@ def run():
         reload_dirs=[_SRC_DIR],
         server_header=False,  # don't advertise "uvicorn" + version to scanners
         log_config=_log_config(),
+        # Without this, shutdown waits forever for open connections to close
+        # (uvicorn's own default) — but /events (routers/events.py) holds an
+        # SSE stream open indefinitely, only ending when the client
+        # disconnects. A single Ctrl+C would then just hang logging "Waiting
+        # for connections to close" until every connected frontend session
+        # closed its stream, needing a second Ctrl+C to force-exit. This
+        # caps that wait instead of relying on the user to force it.
+        timeout_graceful_shutdown=5,
     )
 
 

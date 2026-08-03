@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.200759
-Revised: 2026/07/28 15:02:00.185814
+Revised: 2026/08/02 18:12:40.608812
 
 DB-side helpers for the content-addressed image store.
 

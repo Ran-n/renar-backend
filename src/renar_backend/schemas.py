@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/07/28 12:54:40.129102
+Revised: 2026/08/02 18:29:48.686036
 """
 
 from datetime import datetime
@@ -214,6 +214,16 @@ class PremiumStyleUpdate(BaseModel):
         return value
 
 
+class CropBox(BaseModel):
+    """Fractional (0..1) region of an uploaded image to keep, chosen by the
+    user panning it in the frontend's position picker before thumbnailing."""
+
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    w: float = Field(gt=0, le=1)
+    h: float = Field(gt=0, le=1)
+
+
 class CustomPosterSet(BaseModel):
     """Exactly one source: an uploaded image, or one of TMDB's alternate
     posters (downloaded server-side into the image store)."""
@@ -228,16 +238,6 @@ class CustomPosterSet(BaseModel):
         if self.tmdb_url is not None and not self.tmdb_url.startswith("https://image.tmdb.org/t/p/"):
             raise ValueError("tmdb_url must be a TMDB image URL")
         return self
-
-
-class CropBox(BaseModel):
-    """Fractional (0..1) region of an uploaded image to keep, chosen by the
-    user panning it in the frontend's position picker before thumbnailing."""
-
-    x: float = Field(ge=0, le=1)
-    y: float = Field(ge=0, le=1)
-    w: float = Field(gt=0, le=1)
-    h: float = Field(gt=0, le=1)
 
 
 class ProfileUpdate(BaseModel):
