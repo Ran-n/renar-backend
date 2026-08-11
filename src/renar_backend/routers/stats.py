@@ -143,7 +143,12 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
             "poster_url": item.poster_url,
         })
 
-    rating_distribution = Counter(ratings)
+    decile_distribution: Counter[str] = Counter()
+    for r in ratings:
+        bucket_start = ((r - 1) // 10) * 10 + 1
+        bucket_end = min(bucket_start + 9, 100)
+        label = f"{bucket_start}-{bucket_end}"
+        decile_distribution[label] += 1
     by_status = Counter(item.status.value for item in items)
     by_type = Counter(item.media_type.value for item in items)
 
@@ -157,8 +162,8 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         "shows_watching": shows_watching,
         "total_items": len(items),
         "favorites": favorites,
-        "avg_rating": round(sum(ratings) / len(ratings), 1) if ratings else None,
-        "rating_distribution": {str(k): v for k, v in sorted(rating_distribution.items())},
+        "avg_rating": round(sum(ratings) / len(ratings)) if ratings else None,
+        "rating_distribution": dict(sorted(decile_distribution.items())),
         "episodes_last_7_days": episodes_last_7_days,
         "episodes_last_30_days": episodes_last_30_days,
         "current_streak_days": current_streak,

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.990684
-Revised: 2026/07/21 09:51:04.206736
+Revised: 2026/08/03 11:14:16.677974
 
 Upcoming releases for tracked titles: next episodes and film premieres.
 """
@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
+from ..catalog.titles import WITH_TITLE_GENRES
 from ..database import get_db
 from ..models import Episode, LibraryEntry, MediaType, Title, User, WatchStatus
 from ..tmdb.tmdb_store import sync_show_episodes
@@ -32,7 +33,7 @@ def _tv_entry(entry: LibraryEntry, title: Title, today: date) -> dict | None:
         "media_type": "tv_show",
         "title": title.title,
         "tmdb_id": title.tmdb_id,
-        "poster_url": title.poster_url,
+        "poster_url": entry.poster_url,
         "date": when.isoformat(),
         "days_until": (when - today).days,
         "season": title.next_episode_season,
@@ -50,7 +51,7 @@ def _film_entry(entry: LibraryEntry, title: Title, today: date) -> dict | None:
         "media_type": "film",
         "title": title.title,
         "tmdb_id": title.tmdb_id,
-        "poster_url": title.poster_url,
+        "poster_url": entry.poster_url,
         "date": when.isoformat(),
         "days_until": (when - today).days,
         "season": None,
@@ -69,6 +70,7 @@ def get_upcoming(
     query = (
         db.query(LibraryEntry, Title)
         .join(Title, LibraryEntry.title_id == Title.id)
+        .options(*WITH_TITLE_GENRES)
         .filter(
             LibraryEntry.user_id == user.id,
             Title.tmdb_id.isnot(None),
@@ -138,6 +140,7 @@ def get_upcoming_history(
         tv_query = (
             db.query(LibraryEntry, Title)
             .join(Title, LibraryEntry.title_id == Title.id)
+            .options(*WITH_TITLE_GENRES)
             .filter(
                 LibraryEntry.user_id == user.id,
                 Title.media_type == MediaType.tv_show,
@@ -172,7 +175,7 @@ def get_upcoming_history(
                     "media_type": "tv_show",
                     "title": title.title,
                     "tmdb_id": title.tmdb_id,
-                    "poster_url": title.poster_url,
+                    "poster_url": entry.poster_url,
                     "date": ep.air_date.isoformat(),
                     "days_until": (ep.air_date - today).days,
                     "season": ep.season,
@@ -184,6 +187,7 @@ def get_upcoming_history(
         film_query = (
             db.query(LibraryEntry, Title)
             .join(Title, LibraryEntry.title_id == Title.id)
+            .options(*WITH_TITLE_GENRES)
             .filter(
                 LibraryEntry.user_id == user.id,
                 Title.media_type == MediaType.film,
@@ -201,7 +205,7 @@ def get_upcoming_history(
                 "media_type": "film",
                 "title": title.title,
                 "tmdb_id": title.tmdb_id,
-                "poster_url": title.poster_url,
+                "poster_url": entry.poster_url,
                 "date": title.release_date.isoformat(),
                 "days_until": (title.release_date - today).days,
                 "season": None,

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/08/02 18:29:48.585693
+Revised: 2026/08/05 21:48:03.653437
 """
 
 import enum
@@ -57,6 +57,13 @@ class WatchStatus(enum.StrEnum):
     paused = "paused"
     completed = "completed"
     dropped = "dropped"
+
+
+# The four countdown-pill tiers on the Upcoming screen (see routers/upcoming.py
+# and the frontend's upcoming_view._countdown): today/tomorrow, this week,
+# further out (weeks/months), and past. Each is independently color-
+# customizable — see User.countdown_colors below.
+COUNTDOWN_TIERS: tuple[str, ...] = ("urgent", "soon", "later", "past")
 
 
 class Image(Base):
@@ -166,8 +173,10 @@ class User(Base):
     # and disappears while premium is lapsed — the stored flags stay put.
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     verification_requested: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Chosen from premium.PALETTE (validated server-side); kept when premium
-    # lapses but only served/applied while premium is active.
+    # Any hex color (validated server-side against hex format, not restricted
+    # to premium.PALETTE — that's just the suggested-swatch list GET
+    # /premium/palette returns); kept when premium lapses but only served/
+    # applied while premium is active.
     ring_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     name_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     # Chosen from premium.THEME_NAMES (validated server-side); kept when
@@ -182,16 +191,25 @@ class User(Base):
     home_on_launch: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     # Home screen progress indicator. "rings" is the only free style (same
     # premium gate as theme, enforced in the /auth/profile route); season/
-    # series colors are premium-only regardless of style, chosen from
-    # premium.PALETTE, kept when premium lapses but only applied while active.
+    # series colors are premium-only regardless of style, any hex color
+    # (see ring_color above), kept when premium lapses but only applied
+    # while active.
     home_progress_style: Mapped[str] = mapped_column(String(20), default="rings", server_default="rings")
     home_season_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     home_series_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    # Per-tier countdown-pill colors on the Upcoming screen — premium-only,
+    # keyed by COUNTDOWN_TIERS ("urgent", "soon", "later", "past"), colors are
+    # arbitrary hex (validated server-side, not restricted to premium.PALETTE
+    # — see schemas.PremiumStyleUpdate). Missing keys fall back to the
+    # theme's default color for that tier. Kept when premium lapses but only
+    # applied while active, same as the two colors above.
+    countdown_colors: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
     # Per-status accent overrides for Library cards (badge bar / progress
-    # color) — premium-only, keyed by WatchStatus value, colors chosen from
-    # premium.PALETTE (validated server-side). Missing keys fall back to the
-    # theme's default accent for that status. Kept when premium lapses but
-    # only applied while active, same as the home season/series colors.
+    # color) — premium-only, keyed by WatchStatus value, any hex color
+    # (validated server-side, see ring_color above). Missing keys fall back
+    # to the theme's default accent for that status. Kept when premium
+    # lapses but only applied while active, same as the home season/series
+    # colors.
     status_colors: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
     # Season/episode label format shown next to episode titles (Upcoming,
     # Title, Episode). "cross" ("1×05") is the only free style, same premium
@@ -665,7 +683,7 @@ class LibraryEntry(Base):
     title_id: Mapped[int] = mapped_column(ForeignKey("titles.id"), index=True)
     url: Mapped[str | None] = mapped_column(String(500), nullable=True)  # optional personal link for the item
     status: Mapped[WatchStatus] = mapped_column(Enum(WatchStatus), default=WatchStatus.want_to_watch)
-    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1-10
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1-100
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Coarse TV-show progress. These are user-asserted facts, NOT caches: a
     # user can track "I'm 37 episodes in" without recording which episodes
@@ -884,7 +902,7 @@ class EpisodeWatch(Base):
     media_item_id: Mapped[int] = mapped_column(ForeignKey("media_items.id"), index=True)
     season: Mapped[int] = mapped_column(Integer)
     episode: Mapped[int] = mapped_column(Integer)
-    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1-10
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1-100
     watched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     item: Mapped[LibraryEntry] = relationship(back_populates="episode_watches")

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.395578
-Revised: 2026/07/22 13:50:06.518967
+Revised: 2026/08/04 08:18:59.045976
 
 Media library CRUD, filters, ownership, and community ratings.
 """
@@ -52,7 +52,7 @@ def test_create_requires_auth(client):
 
 def test_create_invalid_rating_rejected(client, alice):
     _, headers = alice
-    r = client.post("/media", json={"media_type": "film", "title": "Heat", "rating": 11}, headers=headers)
+    r = client.post("/media", json={"media_type": "film", "title": "Heat", "rating": 101}, headers=headers)
     assert r.status_code == 422
 
 
@@ -342,11 +342,11 @@ def test_delete_other_users_item_not_found(client, alice, bob):
 def test_ratings_average_across_users(client, alice, bob):
     _, alice_headers = alice
     _, bob_headers = bob
-    _create(client, alice_headers, tmdb_id=949, rating=9)
-    _create(client, bob_headers, tmdb_id=949, rating=6)
+    _create(client, alice_headers, tmdb_id=949, rating=80)
+    _create(client, bob_headers, tmdb_id=949, rating=70)
     r = client.get("/media/ratings", params={"media_type": "film", "tmdb_id": 949}, headers=alice_headers)
     assert r.status_code == 200
-    assert r.json() == {"average": 7.5, "count": 2}
+    assert r.json() == {"average": 75, "count": 2}
 
 
 def test_ratings_by_title_when_no_tmdb_id(client, alice):
@@ -359,4 +359,28 @@ def test_ratings_by_title_when_no_tmdb_id(client, alice):
 def test_ratings_requires_tmdb_id_or_title(client, alice):
     _, headers = alice
     r = client.get("/media/ratings", params={"media_type": "film"}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_ratings_batch(client, alice, bob):
+    _, alice_headers = alice
+    _, bob_headers = bob
+    _create(client, alice_headers, tmdb_id=949, rating=80)
+    _create(client, bob_headers, tmdb_id=949, rating=70)
+    _create(client, alice_headers, tmdb_id=27205, rating=60)
+    r = client.post(
+        "/media/ratings/batch",
+        json={"media_type": "film", "tmdb_ids": [949, 27205, 12345]},
+        headers=alice_headers,
+    )
+    assert r.status_code == 200
+    assert r.json() == {
+        "949": {"average": 75, "count": 2},
+        "27205": {"average": 60, "count": 1},
+    }
+
+
+def test_ratings_batch_requires_at_least_one_id(client, alice):
+    _, headers = alice
+    r = client.post("/media/ratings/batch", json={"media_type": "film", "tmdb_ids": []}, headers=headers)
     assert r.status_code == 422

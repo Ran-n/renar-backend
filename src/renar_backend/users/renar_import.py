@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/07/27 08:44:22.913790
+Revised: 2026/08/11 09:36:15.490976
 
 Import a Renar-native export (users/export.py's .7z of profile/library/
 comments/social JSON) back into an account — the write side of GDPR Art.
@@ -108,6 +108,7 @@ _PROFILE_FIELDS = (
     "home_progress_style",
     "home_season_color",
     "home_series_color",
+    "countdown_colors",
     "status_colors",
     "episode_label_style",
     "ring_color",
@@ -173,13 +174,23 @@ def _apply_profile(user: User, profile: dict) -> None:
             setattr(user, field, profile[field])
 
 
+def _valid_rating(value) -> int | None:
+    """Ratings here come straight from an export file, not a validated API
+    request — a corrupted, hand-edited, or foreign-version export could carry
+    anything. Mirrors the API schemas' `ge=1, le=100` bound so a bad value
+    can't slip into the DB (and then render raw/unclamped) via import alone."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value if 1 <= value <= 100 else None
+
+
 def _reconcile_library_entry(entry: LibraryEntry, incoming: dict) -> bool:
     """Fill gaps on an already-tracked entry; never overwrite what's there."""
     changed = False
     if incoming.get("is_favorite") and not entry.is_favorite:
         entry.is_favorite = True
         changed = True
-    if entry.rating is None and incoming.get("rating") is not None:
+    if entry.rating is None and _valid_rating(incoming.get("rating")) is not None:
         entry.rating = incoming["rating"]
         changed = True
     if not entry.notes and incoming.get("notes"):
@@ -242,7 +253,7 @@ def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) 
                 user_id=user_id,
                 title_id=title.id,
                 status=status,
-                rating=row.get("rating"),
+                rating=_valid_rating(row.get("rating")),
                 notes=row.get("notes"),
                 is_favorite=bool(row.get("is_favorite")),
             )
@@ -272,7 +283,7 @@ def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) 
                     media_item_id=item_id,
                     season=w["season"],
                     episode=w["episode"],
-                    rating=w.get("rating"),
+                    rating=_valid_rating(w.get("rating")),
                     watched_at=_parse_iso(w.get("watched_at")) or datetime.now(UTC),
                 )
             )

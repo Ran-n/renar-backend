@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/18 00:26:58.864620
+Revised: 2026/08/10 16:09:56.561126
 
 Admin invite-codes page: list, generate, revoke, restore, and delete
 registration invite codes.
@@ -296,7 +296,8 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
           <td class="td-ts" data-sort="{expires_sort}">{expires}</td>
           <td class="td-ts" data-sort="{c.created_at.isoformat()}">{_fmt_ts(c.created_at)}</td>
           <td class="td-email">{created_by}</td>
-          <td><div class="td-actions">{revoke_btn}{restore_btn}{reset_uses_btn}{restore_expiry_btn}{delete_btn}</div></td>
+          <td><div class="td-actions">{revoke_btn}{restore_btn}{reset_uses_btn}
+            {restore_expiry_btn}{delete_btn}</div></td>
         </tr>"""
 
     empty_row = '<tr><td colspan="7" class="empty">No invite codes yet</td></tr>' if not rows else ""

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/03 08:23:15.844405 )
+[//]: # (+ Revised: 	2026/08/11 13:36:46.723539 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -25,6 +25,12 @@ naturally community-scoped (per title), not per-tracking-row. Keeping
 catalog metadata on the entry would mean N duplicate copies of the same
 poster URL for N users, and updating a title's metadata would require a
 bulk update across every user's row instead of one write.
+
+### Rating scale: 1-100
+
+Ratings on library entries and per-episode watches use a 1-100 integer scale. What would previously have been entered as "8" on a 1-10 scale is now "80"; fractional values like "7.9" that couldn't be expressed before can now be entered as "79".
+
+**Why:** 100 points of resolution lets users express fine-grained preferences without requiring floats. With 100 distinct values, displayed averages are rounded to the nearest whole integer (no decimal) — the extra resolution makes a decimal redundant and the display cleaner. The `GET /stats` rating distribution is bucketed into deciles (10 bins: "1-10", "11-20", ..., "91-100") for display purposes; this keeps the chart readable regardless of how sparse individual values are. TV Time imports are rescaled from 1-5 stars to 1-100 (multiplier ×20); TMDB's 0-10 `vote_average` float is rescaled to 0-100 (×10, rounded to int). Historical data was migrated by multiplying existing 1-10 values by 10 (migration `b5f3a1c9d7e2`).
 
 ### Title identity: `tmdb_id`, falling back to a normalized key
 
@@ -625,6 +631,35 @@ Vote averages are deliberately *not* trusted from old copies of typed
 data — they change constantly and are read from the payload like
 everything else, stale only during outages.
 
+### `GET /tmdb/credits` returns the full cast and a department-tagged crew list, uncapped
+
+Cast used to be capped to the first 12 entries and directors/creators to
+the first 4, with nothing else from TMDB's `crew` array exposed at all.
+Both caps are gone: the endpoint now returns every cast member, and every
+crew member other than the director(s)/creator(s) already surfaced
+separately (`{**person(c), "character": c.get("job"), "department":
+c.get("department")}` for each) as its own `crew` list, so the frontend can
+group it by department (Writing, Camera, Editing, ...) instead of only
+ever showing who directed.
+
+**Why not paginate or keep a cap:** this is a single proxied TMDB response,
+already bounded by how many people TMDB itself credits for a title (tens,
+not thousands) — a cap here only threw away data the client might
+reasonably want to show, for no real payload-size problem it was solving.
+
+### TMDB's `vote_average` is rescaled 0-10 → 0-100, and `vote_count` now travels with it
+
+`_map_results`/`_map_details` multiply TMDB's own `vote_average` by 10 and
+round to an int, matching Renar's own 1-100 rating scale (see "Ratings are
+1-100" in Data model above) so the two numbers are directly comparable
+without the frontend doing its own conversion. `vote_count` — previously
+dropped — now travels alongside it in both payloads.
+
+**Why:** the frontend's title page weighs Renar's own average against
+TMDB's by vote count (more voters, more weight) to produce a single
+"overall" score — that weighting is meaningless without `vote_count`
+actually reaching the client.
+
 ### `warm_title_translations` opens one DB session per title, not one for the whole loop
 
 `warm_title_translations` (fire-and-forget `BackgroundTasks` callback that
@@ -846,20 +881,29 @@ accumulate badges" — deriving the badge makes that rule impossible to
 violate, and lapsed premium automatically hides the verified badge too
 (verification is a premium perk, not a lifetime grant).
 
-### Style colors come from a server palette; lapse hides, never deletes
+### Style colors validate hex format only; lapse hides, never deletes
 
-`ring_color`/`name_color` must be members of `premium.PALETTE` (422
-otherwise). Public payloads (comments, profiles, feed) carry a `flair`
-block — badge + colors — that is blanked while premium is inactive;
-`/auth/me` alone returns the stored values so the style picker can show
-the saved choice. The same keep-but-don't-serve rule applies to custom
-posters.
+Every premium color field (`ring_color`, `name_color`, `home_season_color`,
+`home_series_color`, `status_colors`, `countdown_colors`) accepts any
+well-formed `#rrggbb` hex (`schemas._HEX_COLOR_RE`) — it used to require
+membership in `premium.PALETTE` (422 otherwise), but users asked to type an
+exact hex directly rather than pick the closest curated swatch, so the
+allowlist was dropped in favor of a format check. `GET /premium/palette`
+still returns the same curated list — it's the frontend's suggested-swatch
+row now, not an enforced set. Public payloads (comments, profiles, feed)
+carry a `flair` block — badge + colors — that is blanked while premium is
+inactive; `/auth/me` alone returns the stored values so the style picker
+can show the saved choice. The same keep-but-don't-serve rule applies to
+custom posters.
 
-**Why:** free-form hex invites unreadable-on-one-theme choices and
-support burden; a curated palette is validated once server-side and every
-client renders it consistently. Keeping (not deleting) customizations on
-lapse means resubscribing restores everything instantly — the gentle
-behavior users expect from subscriptions.
+**Why:** an allowlist that only the frontend's own palette satisfies
+rejects every hex a user types that isn't already in it, which defeats the
+point of a direct hex-entry field. Trusting well-formed hex is enough here:
+the worst case of an ugly chosen color is the same as the pre-existing
+custom-theme risk (see below) — nothing beyond an unreadable color on the
+account that picked it. Keeping (not deleting) customizations on lapse
+means resubscribing restores everything instantly — the gentle behavior
+users expect from subscriptions.
 
 ### Custom themes are frontend-only, not a backend resource
 
@@ -916,6 +960,26 @@ of those endpoints calls `_poster_overrides(db, user, media_type, tmdb_ids)`
 to look up any custom poster for titles in the result set that the
 requesting user also has in their library, and splices the override URL in
 where available.
+
+### Upcoming also serves the entry's own poster, not the title's shared one
+
+`routers/upcoming.py`'s `_tv_entry()`/`_film_entry()` and
+`get_upcoming_history()` build each row's `poster_url` from
+`entry.poster_url` (the `LibraryEntry` property that resolves the custom
+override when premium, falling back to `title_ref.poster_url` otherwise —
+see "Custom posters are per-entry image-store rows" above), not
+`title.poster_url` directly. Each of the three queries now eager-loads
+`WITH_TITLE_GENRES` (`catalog/titles.py` — despite the name, it also
+selectin-loads `custom_poster_image`/`custom_backdrop_image`), so resolving
+that property doesn't trigger a lazy load per row.
+
+**Why:** a premium user's custom poster is honored everywhere else in the
+app the title appears (library, detail views, Explore/Search/Trending —
+see above), but Upcoming was still reading the shared `titles` row
+directly, so a chosen alternate poster silently reverted to the stock TMDB
+one on this one screen. Tracked as a backlog item until diagnosed as
+exactly this — resolved without a schema change, just reading the entry
+property that already existed instead of the title's own field.
 
 **Why:** the custom poster is the user's personal reskin of a title; it
 should follow that title wherever they see it in the app, not just in
@@ -1118,6 +1182,58 @@ wrong caller sends a type-inapplicable field — from silently corrupting
 data again, including once more media types (e.g. books) exist and bring
 their own type-only fields.
 
+### `POST /media/ratings/batch` alongside the existing single-title `GET /media/ratings`
+
+Explore's result grid (renar-frontend) needs a Renar community rating per
+card, up to a page's worth of titles (~20-40) at once — calling the
+existing `GET /media/ratings?tmdb_id=...` once per card would mean that
+many round trips on every grid paint. The batch endpoint takes one
+`media_type` + a list of `tmdb_ids` (`RatingsBatchRequest`, capped at 100)
+and returns `{tmdb_id: {average, count}}` for every id that has at least
+one rating, via a single grouped query (`GROUP BY Title.tmdb_id`) instead
+of N separate lookups.
+
+**Why not replace the single-title endpoint:** the title detail page only
+ever needs one title's rating (and sometimes resolves by `title` text, not
+`tmdb_id`, for titles with no TMDB match) — a batch shape would be pure
+overhead there. Kept as two endpoints rather than bending one to cover
+both shapes.
+
+### Rewatch history is exposed per-event, backed by the existing `WatchEvent` rows — no new table
+
+`rewatch_count` was already derived by counting `WatchEvent` rows for a
+given (item, season, episode); each rewatch was already its own row, the
+count just hadn't been exposed individually. `GET /media/{id}/rewatch-
+events` (`routers/media.py`) lists them newest-first (`id`, `watched_at`)
+and `DELETE /media/{id}/rewatch-events/{event_id}` removes one specific
+row (re-running `_sync_progress` afterward, same as the existing undo-
+latest path). No schema change was needed — this is purely two new read/
+delete views onto data that already existed.
+
+**Why:** the frontend's rewatch control could previously only undo the
+*latest* rewatch (`POST .../undo-rewatch`), so correcting a rewatch logged
+by mistake earlier in the history meant undoing everything after it too.
+Since each rewatch was already a distinct row, exposing per-event list/
+delete was a thin addition rather than a new feature needing new storage.
+
+### Countdown-pill colors are per-tier (`countdown_colors` JSONB), replacing one flat `upcoming_countdown_color`
+
+The Upcoming screen's countdown pill previously had a single premium
+override color applied uniformly across the "urgent" and "soon" tiers,
+with "later"/"past" permanently the theme's neutral color. `User.
+countdown_colors` (migration `a4d8e1f39c62`, following `e2c8a4f1d936`
+which had first added the single-color field) is now a JSONB map keyed by
+`COUNTDOWN_TIERS` (`"urgent"`, `"soon"`, `"later"`, `"past"` —
+`models.py`), same shape and same per-key patch/merge semantics as the
+existing `status_colors`. Missing keys fall back to the theme's default
+for that tier.
+
+**Why:** there's no principled reason "later"/"past" should be
+permanently unstylable when every other tier and every other premium
+color surface (status colors, home progress colors) already lets the user
+pick per-slot — the JSONB-map-of-independently-settable-values shape
+`status_colors` established was the direct fit, not a new pattern.
+
 ## Dev server
 
 ### Nothing may depend on the launch directory
@@ -1239,3 +1355,38 @@ and replaces the traceback with one clean info-level log line. It's served
 as a separate `asgi_app` (uvicorn's actual target) rather than wrapping
 `app` in place, so tests (`TestClient(app)`, `dependency_overrides`, ...)
 keep using the plain, unwrapped `FastAPI` instance.
+
+---
+
+## Release scope (1.0)
+
+### 2026-08-11 full reassessment of every `[Blocking for 1.0]` backlog item
+
+Every item tagged `[Blocking for 1.0]` in `docs/backlog.md` (both repos) was
+walked one-by-one with the owner and explicitly re-confirmed or moved to
+`[Future]` — not a stale carry-forward from when each item was first filed.
+See `docs/backlog.md`'s git history around this date for the resulting tag
+changes; the reasoning for each individual call lives inline in its backlog
+entry, not duplicated here. Re-run this kind of pass periodically rather
+than treating the tag as permanent once set — priorities shift as scope
+(mobile-first, Android-before-iOS, admin-granted-premium-before-real-IAP)
+gets clearer.
+
+### Reviews restricted to a reviewer whitelist, not open to every user
+
+The planned Reviews feature (longer write-ups alongside the casual Comments
+thread) is scoped to a whitelisted set of reviewers, not a compose
+permission every account has.
+
+**Why:** unrestricted long-form reviews from any account risk becoming a
+lower-signal duplicate of Comments rather than the more considered,
+editorial content Reviews is meant to be.
+
+**How to apply:** the new `reviews` table/endpoints need an authorization
+check on the write path (e.g. a `can_review` flag on `User`, or a separate
+whitelist table — not yet decided) gating who may `POST` a review; read
+endpoints stay open to everyone. See `docs/backlog.md`'s Reviews entry for
+the concrete schema/endpoint touch points, and renar-frontend's
+`docs/backlog.md`/`docs/design-decisions.md` for the matching client-side
+gating (composer hidden/disabled for non-whitelisted users, not just a
+403 after the fact).

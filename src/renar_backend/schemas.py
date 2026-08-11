@@ -2,15 +2,18 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/08/02 18:29:48.686036
+Revised: 2026/08/05 21:48:03.743807
 """
 
+import re
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
-from .models import MediaType, WatchStatus
-from .users.premium import EPISODE_LABEL_STYLES, PALETTE, PROGRESS_STYLES, THEME_NAMES
+from .models import COUNTDOWN_TIERS, MediaType, WatchStatus
+from .users.premium import EPISODE_LABEL_STYLES, PROGRESS_STYLES, THEME_NAMES
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 def _password_fits_bcrypt(password: str) -> str:
@@ -165,6 +168,7 @@ class UserOut(BaseModel):
     home_progress_style: str = "rings"
     home_season_color: str | None = None
     home_series_color: str | None = None
+    countdown_colors: dict[str, str] | None = None
     status_colors: dict[str, str] | None = None
     episode_label_style: str = "cross"
     has_seen_welcome: bool = False
@@ -183,22 +187,38 @@ class PasswordChange(BaseModel):
 
 
 class PremiumStyleUpdate(BaseModel):
-    """Both colors optional; explicit null clears one. Values must come from
-    the server palette so nothing unreadable can be stored."""
+    """All colors optional; explicit null clears one. Any well-formed hex
+    color is accepted — GET /premium/palette is just a suggested-swatch
+    list, not an enforced allowlist."""
 
     ring_color: str | None = None
     name_color: str | None = None
     home_season_color: str | None = None
     home_series_color: str | None = None
     # explicit null clears all overrides; a dict clears/sets one key at a
+    # time via {"tier": "#hex" | None} — omitted keys keep their value
+    countdown_colors: dict[str, str | None] | None = None
+    # explicit null clears all overrides; a dict clears/sets one key at a
     # time via {"status": "#hex" | None} — omitted keys keep their value
     status_colors: dict[str, str | None] | None = None
 
     @field_validator("ring_color", "name_color", "home_season_color", "home_series_color")
     @classmethod
-    def _in_palette(cls, value: str | None) -> str | None:
-        if value is not None and value not in PALETTE:
-            raise ValueError("Color must be one of the palette options")
+    def _valid_hex(cls, value: str | None) -> str | None:
+        if value is not None and not _HEX_COLOR_RE.fullmatch(value):
+            raise ValueError("Color must be a hex value like #rrggbb")
+        return value
+
+    @field_validator("countdown_colors")
+    @classmethod
+    def _valid_countdown_colors(cls, value: dict[str, str | None] | None) -> dict[str, str | None] | None:
+        if value is None:
+            return value
+        for tier, color in value.items():
+            if tier not in COUNTDOWN_TIERS:
+                raise ValueError(f"Unknown countdown tier: {tier}")
+            if color is not None and not _HEX_COLOR_RE.fullmatch(color):
+                raise ValueError("Color must be a hex value like #rrggbb")
         return value
 
     @field_validator("status_colors")
@@ -209,8 +229,8 @@ class PremiumStyleUpdate(BaseModel):
         for status, color in value.items():
             if status not in WatchStatus.__members__:
                 raise ValueError(f"Unknown status: {status}")
-            if color is not None and color not in PALETTE:
-                raise ValueError("Color must be one of the palette options")
+            if color is not None and not _HEX_COLOR_RE.fullmatch(color):
+                raise ValueError("Color must be a hex value like #rrggbb")
         return value
 
 
@@ -311,7 +331,7 @@ class LibraryEntryCreate(BaseModel):
     # user-owned fields
     url: str | None = Field(default=None, max_length=500)
     status: WatchStatus = WatchStatus.want_to_watch
-    rating: int | None = Field(default=None, ge=1, le=10)
+    rating: int | None = Field(default=None, ge=1, le=100)
     notes: str | None = None
     current_season: int | None = Field(default=None, ge=0)
     current_episode: int | None = Field(default=None, ge=0)
@@ -322,7 +342,7 @@ class LibraryEntryCreate(BaseModel):
 class LibraryEntryUpdate(BaseModel):
     url: str | None = Field(default=None, max_length=500)
     status: WatchStatus | None = None
-    rating: int | None = Field(default=None, ge=1, le=10)
+    rating: int | None = Field(default=None, ge=1, le=100)
     notes: str | None = None
     current_season: int | None = Field(default=None, ge=0)
     current_episode: int | None = Field(default=None, ge=0)
@@ -376,7 +396,7 @@ class LibraryEntryOut(BaseModel):
 
 class EpisodeSet(BaseModel):
     watched: bool = True
-    rating: int | None = Field(default=None, ge=1, le=10)
+    rating: int | None = Field(default=None, ge=1, le=100)
 
 
 class EpisodeBulk(BaseModel):
@@ -408,3 +428,11 @@ class CommentReportCreate(BaseModel):
 class RewatchCreate(BaseModel):
     season: int | None = Field(default=None, ge=0)
     episode: int | None = Field(default=None, ge=0)
+
+
+# ---------- ratings ----------
+
+
+class RatingsBatchRequest(BaseModel):
+    media_type: MediaType
+    tmdb_ids: list[int] = Field(min_length=1, max_length=100)

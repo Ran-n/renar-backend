@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/02 18:29:49.172047 )
+[//]: # (+ Revised: 	2026/08/11 13:33:24.345056 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -63,7 +63,7 @@ import outcomes don't clobber each other.
   (favorite only flips true, rating only fills when empty), but worth a note
   if reconcile logic grows less monotonic later.
 
-- **[Blocking for 1.0] Minor: `_progress` entries are never pruned.** Negligible memory; clears
+- **[Future] Minor: `_progress` entries are never pruned.** Negligible memory; clears
   on process restart. Not worth fixing unless it becomes visible.
 
 - **[Blocking for 1.0] Planned: custom-lists import mapping.** Once the
@@ -83,7 +83,7 @@ import outcomes don't clobber each other.
   `tv_show_user_emotion_count.csv`) — real discrete `emotion_id` values do
   exist in the export (unlike star votes, which don't carry a value at
   all — see above), but adding a whole reaction system duplicates the
-  existing 1-10 rating for questionable value, and TV Time's emotion enum
+  existing 1-100 rating for questionable value, and TV Time's emotion enum
   isn't fully documented from the sample export (only 4 of what's
   presumably ~8 values were observed, no confirmed label mapping).
 
@@ -306,7 +306,7 @@ import outcomes don't clobber each other.
       status pill, and `_render_account_actions` (163-214) is where a
       "cancel pending deletion" admin action would live.
 
-- **[Blocking for 1.0] Real phone number confirmation on registration.** Same shape as the
+- **[Future] Real phone number confirmation on registration.** Same shape as the
   email-confirmation item above, but there's currently no phone number
   field on `User` at all (`models.py:111-151`) — this needs the field
   added first, plus an SMS-sending capability (no provider integration
@@ -360,7 +360,7 @@ import outcomes don't clobber each other.
 
 ## Features
 
-- **[Blocking for 1.0] Diary endpoint — chronological watch/activity log.**
+- **[Future] Diary endpoint — chronological watch/activity log.**
   New endpoint `GET /diary` returning the user's watch events in
   reverse-chronological order, paginated. Should cover both film/show library
   completions and individual episode watches. Response shape per entry:
@@ -371,7 +371,7 @@ import outcomes don't clobber each other.
   completions via `last_watched_at`). Prefer one unified endpoint over two
   separate ones if the schema allows it cleanly.
 
-- **[Blocking for 1.0] Chronological sort on comments.**
+- **[Future] Chronological sort on comments.**
   `GET /media/{id}/comments` currently returns comments in a fixed order.
   Add a `?sort=asc|desc` query parameter so clients can request oldest-first
   (chronological). Default remains the current behaviour; `asc` is the new
@@ -380,10 +380,16 @@ import outcomes don't clobber each other.
 
 - **[Blocking for 1.0] Reviews (alongside the existing Comments).**
   Reviews are longer, more considered write-ups — distinct from the casual
-  comment thread already in place. Backend work: new `reviews` table + Alembic
-  migration, new CRUD endpoints in `routers/`, normalization check in
-  `test_normalization.py`. Schema must stay BCNF (a review's rating is a fact
-  about the user+title pair, not a copy of anything else).
+  comment thread already in place. **Restricted feature (2026-08-11
+  reassessment): not open to all users** — only a whitelisted set of
+  reviewers can post one, so the schema/endpoints need an authorization
+  check (e.g. a `can_review` flag or a whitelist table) rather than any
+  authenticated user being allowed to create a row. Backend work: new
+  `reviews` table + Alembic migration, new CRUD endpoints in `routers/`
+  (write endpoint gated to whitelisted users, read endpoints open), and a
+  whitelist mechanism (table or user flag — not yet decided), normalization
+  check in `test_normalization.py`. Schema must stay BCNF (a review's rating
+  is a fact about the user+title pair, not a copy of anything else).
 
 - **[Blocking for 1.0] Share — film, show, episode, comment.**
   Backend needs to support shareable deep links or redirect URLs for a title page,
@@ -391,6 +397,18 @@ import outcomes don't clobber each other.
   canonical share URLs in the API response, or add a `/share/{type}/{id}`
   redirect endpoint. Decide on a URL scheme before implementing frontend share
   buttons.
+
+- **[Blocking for 1.0] Per-rewatch ratings, not a single overwritten rating.**
+  Ratings are currently one value per user+title, overwritten on every
+  re-rate. A rewatch can change a user's opinion (first watch "ok", second
+  watch "wow"), so allow a new rating per watch-through instead of only
+  replacing the existing one. Needs a rating tied to a rewatch/watch-through
+  identity rather than just the title, plus an endpoint to list a user's
+  rating history for a title. The title's headline/aggregate score should
+  keep using the latest rating per user. Schema must stay BCNF — a rating is
+  a fact about the (user, title, watch-through) tuple; check
+  `test_normalization.py`. Frontend counterpart in renar-frontend's
+  `docs/backlog.md` (rate dialog needs a history view + per-entry editing).
 
 - **[Future] Social login: Continue with Google / Continue with Apple.**
   Not committed — revisit once real signup-funnel data shows password-registration
@@ -401,7 +419,7 @@ import outcomes don't clobber each other.
   account and is mandatory if Google sign-in is also offered on iOS. Decide on
   native plugin bridge vs. OAuth web-redirect before scoping further.
 
-- **[Blocking for 1.0] Recommendation feed: infinite-scroll "what to watch next".**
+- **[Future] Recommendation feed: infinite-scroll "what to watch next".**
   Not committed — needs design work on what signals feed the taste model before
   scoping endpoints. Would need a "taste inferer" (model/heuristic from watch
   history, ratings, dwell time), new endpoint(s) in `routers/recommendations.py`,
@@ -409,7 +427,7 @@ import outcomes don't clobber each other.
   for new users. Open question: in-house collaborative/content-based filtering
   vs. external recommendation service.
 
-- **[Blocking for 1.0] Push notifications (system notifications while the app is closed).**
+- **[Future] Push notifications (system notifications while the app is closed).**
   `notifier.py`'s `check_new_episodes` only ever writes an in-app `Notification`
   row — nothing reaches the device when the app isn't open. A killed-app
   system notification from a server-side event requires going through the
@@ -619,7 +637,7 @@ import outcomes don't clobber each other.
     `docs/design-decisions.md`. Real HTTPS on the backend removes the need
     for that patch entirely, not just the manual-edit fragility.
 
-- **[Blocking for 1.0] No human-facing mailbox on `breren.com` yet (e.g. `support@`/`hello@`).**
+- **[Future] No human-facing mailbox on `breren.com` yet (e.g. `support@`/`hello@`).**
   Distinct from the OTP-sending item above (Brevo, transactional-only, no
   inbox): this is for a real mailbox a person actually reads/replies from —
   support requests, store-listing contact address, domain-registrar
@@ -634,7 +652,7 @@ import outcomes don't clobber each other.
   the HTTPS/Turnstile items above, so batch with those when DNS is next
   touched.
 
-- **[Blocking for 1.0] Admin/mod accounts still lack per-account roles.** `routers/admin.py`
+- **[Future] Admin/mod accounts still lack per-account roles.** `routers/admin.py`
   is a working operator dashboard (users, usage, comments, banned IPs)
   gated by a single shared `HTTPBasic` credential pair
   (`settings.admin_path`, admin.py:49) — good for one operator, not for
@@ -686,7 +704,7 @@ are tracked in renar-frontend's `docs/backlog.md`.
   app (a simple hosted web form/page). Blocked on the app's subdomain
   being picked (`breren.com` itself is registered already).
 
-- **[Blocking for 1.0] No payment integration wired to the app stores — and mobile can't just
+- **[Future] No payment integration wired to the app stores — and mobile can't just
   reuse a web payment flow.** `premium_until` is admin-granted only today
   (see `docs/design-decisions.md:441-450`); there's no Stripe/PayPal/IAP
   integration at all yet. If premium becomes purchasable from inside the
