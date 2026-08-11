@@ -639,7 +639,7 @@ def _process_show(
     rate_row = rates.get(tvdb_id)
     if rate_row and (rate_row.get("rating") or "").isdigit():
         raw_rating = int(rate_row["rating"])
-        rating = min(10, raw_rating * 2 if raw_rating <= 5 else raw_rating)
+        rating = min(100, raw_rating * 20 if raw_rating <= 5 else raw_rating * 10)
 
     title_meta = {
         "poster_url": details.get("poster_url"),

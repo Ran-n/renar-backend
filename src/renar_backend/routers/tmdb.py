@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/07/19 03:49:23.178596
+Revised: 2026/08/03 12:44:30.482540
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -78,7 +78,8 @@ def _map_results(raw: list[dict], limit: int = 20, poster_overrides: dict[int, s
             "year": int(date[:4]) if len(date) >= 4 and date[:4].isdigit() else None,
             "poster_url": poster_url,
             "overview": (r.get("overview") or "")[:300],
-            "vote_average": round(r.get("vote_average") or 0, 1),
+            "vote_average": round((r.get("vote_average") or 0) * 10),
+            "vote_count": r.get("vote_count") or 0,
         })
     return results
 
@@ -171,7 +172,8 @@ def _map_details(media_type: str, tmdb_id: int, data: dict) -> dict:
         "backdrop_url": f"{BACKDROP_BASE}{data['backdrop_path']}" if data.get("backdrop_path") else None,
         "overview": (data.get("overview") or "")[:1000] or None,
         "tagline": (data.get("tagline") or "")[:500] or None,
-        "vote_average": round(data.get("vote_average") or 0, 1) or None,
+        "vote_average": round((data.get("vote_average") or 0) * 10) or None,
+        "vote_count": data.get("vote_count") or 0,
         "show_status": show_status,
         "last_air_year": last_air_year,
         "seasons": seasons,
@@ -338,7 +340,7 @@ def credits_tmdb(
             "character": c.get("character") or "",
             "profile_url": f"{IMAGE_BASE}/w185{c['profile_path']}" if c.get("profile_path") else None,
         }
-        for c in data.get("cast", [])[:12]
+        for c in data.get("cast", [])
     ]
 
     def person(p: dict) -> dict:
@@ -354,7 +356,17 @@ def credits_tmdb(
         details = cached_tmdb(db, mt, tmdb_id, "details", f"/tv/{tmdb_id}")
         directors = [person(p) for p in details.get("created_by", [])]
         role = "Created by"
-    return {"cast": cast, "directors": directors[:4], "director_role": role}
+
+    # everyone else behind the camera, grouped by TMDB department so the
+    # frontend can segregate the crew list (Writing, Camera, Editing, ...) —
+    # director/creator already surfaces separately above, so excluded here
+    crew = [
+        {**person(c), "character": c.get("job") or "", "department": c.get("department") or ""}
+        for c in data.get("crew", [])
+        if c.get("job") != "Director"
+    ]
+
+    return {"cast": cast, "crew": crew, "directors": directors, "director_role": role}
 
 
 @router.get("/season")

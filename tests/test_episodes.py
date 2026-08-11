@@ -272,6 +272,42 @@ def test_whole_item_rewatch_counts(client, alice):
     assert r.json()["rewatch_count"] == 2
 
 
+def test_rewatching_completed_film_keeps_status_completed(client, alice):
+    _, headers = alice
+    film = client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers).json()
+    client.patch(f"/media/{film['id']}", json={"status": "completed"}, headers=headers)
+    r = client.post(f"/media/{film['id']}/rewatch", json={}, headers=headers)
+    assert r.json()["item_status"] == "completed"
+    r = client.request("DELETE", f"/media/{film['id']}/rewatch", json={}, headers=headers)
+    assert r.json()["item_status"] == "completed"
+
+
+def test_list_and_delete_specific_rewatch_event(client, alice):
+    _, headers = alice
+    film = client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers).json()
+    for _ in range(3):
+        client.post(f"/media/{film['id']}/rewatch", json={}, headers=headers)
+
+    events = client.get(f"/media/{film['id']}/rewatch-events", headers=headers).json()
+    assert len(events) == 3
+    assert all("id" in e and "watched_at" in e for e in events)
+
+    middle_id = events[1]["id"]
+    r = client.delete(f"/media/{film['id']}/rewatch-events/{middle_id}", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["rewatch_count"] == 2
+
+    remaining = client.get(f"/media/{film['id']}/rewatch-events", headers=headers).json()
+    assert middle_id not in [e["id"] for e in remaining]
+
+
+def test_delete_rewatch_event_not_found(client, alice):
+    _, headers = alice
+    film = client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers).json()
+    r = client.delete(f"/media/{film['id']}/rewatch-events/999999", headers=headers)
+    assert r.status_code == 404
+
+
 def test_episode_rewatch_marks_watched_and_counts(client, alice):
     _, headers = alice
     show = _show(client, headers)

@@ -2,18 +2,38 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/13 09:21:11.000000
-Revised: 2026/07/21 09:51:06.113377
+Revised: 2026/08/03 11:14:16.853661
 
 /upcoming/history: past aired episodes and released films for tracked
 titles. Episode data is backfilled lazily (through the same TMDB season
 cache season_tmdb() uses) on the first request that needs it.
 """
 
+import base64
+import io
 from datetime import date, timedelta
 
+from PIL import Image as PILImage
+
 from renar_backend.database import SessionLocal
-from renar_backend.models import Episode, LibraryEntry
+from renar_backend.models import Episode, LibraryEntry, User, utcnow
 from renar_backend.tmdb import tmdb_store
+
+
+def _set_premium(user_id: int, days: int = 30) -> None:
+    db = SessionLocal()
+    try:
+        db.get(User, user_id).premium_until = utcnow() + timedelta(days=days)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _png_b64() -> str:
+    img = PILImage.new("RGB", (20, 30), (200, 30, 30))
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return base64.b64encode(out.getvalue()).decode()
 
 
 def _add(client, headers, **kwargs) -> dict:
@@ -131,6 +151,22 @@ def test_history_lists_past_film_release(client, alice):
     assert out[0]["media_type"] == "film"
     assert out[0]["date"] == released.isoformat()
     assert out[0]["days_until"] == -100
+
+
+def test_history_uses_premium_users_custom_poster(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    film = _add(client, headers, media_type="film", title="Heat", tmdb_id=100, status="completed")
+    _set_title_for_entry(client, headers, film["id"], release_date=date.today() - timedelta(days=100))
+
+    r = client.put(f"/media/{film['id']}/poster", json={"image_b64": _png_b64()}, headers=headers)
+    assert r.status_code == 200
+    custom_poster_url = r.json()["poster_url"]
+    assert custom_poster_url.startswith("/images/")
+
+    out = client.get("/upcoming/history", headers=headers).json()
+    assert len(out) == 1
+    assert out[0]["poster_url"] == custom_poster_url
 
 
 def test_history_excludes_future_film(client, alice):

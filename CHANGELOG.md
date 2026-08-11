@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/03 08:37:07.264680 )
+[//]: # (+ Revised: 	2026/08/11 18:02:22.395960 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.11.0] - 2026-08-11
+
+### Added
+
+- `POST /media/ratings/batch`: Renar average+count for up to 100 `tmdb_ids`
+  at once (`RatingsBatchRequest`, one grouped `GROUP BY Title.tmdb_id`
+  query), alongside the existing single-title `GET /media/ratings` —
+  Explore's result grid needs one rating per card without a request per
+  card.
+- `GET /media/{id}/rewatch-events` / `DELETE /media/{id}/rewatch-events/{event_id}`:
+  list (newest first) or remove one specific `WatchEvent` row, instead of
+  only being able to undo the *latest* rewatch via the existing
+  `POST/DELETE .../rewatch`. No schema change — these are new read/delete
+  views onto rows that already existed.
+- `User.countdown_colors` (migrations `e2c8a4f1d936`, `a4d8e1f39c62`): the
+  Upcoming countdown pill's premium color override is now a JSONB map keyed
+  by `COUNTDOWN_TIERS` (`"urgent"`, `"soon"`, `"later"`, `"past"` —
+  `models.py`), replacing one flat color applied only to the two "urgent"
+  tiers. `PremiumStyleUpdate.countdown_colors` takes the same per-key patch/
+  merge semantics as `status_colors`; `routers/premium.py`'s `update_style`
+  merges it the same way.
+- `GET /tmdb/credits` now also returns a department-tagged `crew` list
+  (every crew member other than the already-separate director(s)/
+  creator(s), tagged with `department`/`job`), and the `cast` and
+  `directors` lists are no longer capped (was 12 cast / 4 directors).
+- `vote_count` now travels alongside `vote_average` in `/tmdb/search`,
+  `/tmdb/trending`, `/tmdb/popular`, and title details.
+
+### Changed
+
+- **Rating scale: 1-10 → 1-100** (`schemas.py`'s `LibraryEntryCreate`/
+  `LibraryEntryUpdate`/`EpisodeSet` bounds; `models.py` columns re-documented,
+  no type change). Historical ratings migrated by ×10 (migration
+  `b5f3a1c9d7e2`). TV Time star-rating imports rescale ×20 instead of ×2
+  (`users/tvtime_import.py`). TMDB's `vote_average` rescales ×10 instead of
+  rounding to one decimal (`routers/tmdb.py`). Displayed averages
+  (`GET /media/ratings`, `/media/ratings/batch`, `_ratings_summary`,
+  `GET /stats`'s `avg_rating`) now round to a plain integer instead of one
+  decimal place. `GET /stats`'s `rating_distribution` is now bucketed into
+  10 deciles (`"1-10"`, `"11-20"`, ..., `"91-100"`) instead of one bucket
+  per raw value.
+- Premium color fields (`ring_color`, `name_color`, `home_season_color`,
+  `home_series_color`, `status_colors`, `countdown_colors`) now accept any
+  well-formed `#rrggbb` hex (`schemas._HEX_COLOR_RE`) instead of requiring
+  membership in `premium.PALETTE`. `GET /premium/palette` is unchanged —
+  it's now a suggested-swatch list rather than an enforced allowlist.
+- `routers/upcoming.py`'s `get_upcoming`/`get_upcoming_history`: each row's
+  `poster_url` now comes from `entry.poster_url` (honors a premium user's
+  custom poster override) instead of `title.poster_url`; all three queries
+  now eager-load `WITH_TITLE_GENRES` to avoid a lazy load per row.
+- `users/renar_import.py`: imported ratings are now clamped to `1-100` and
+  discarded (not silently written) if they're outside that range or not a
+  plain int — a corrupted/foreign-version export can no longer write an
+  invalid rating via import.
+
+### Fixed
+
+- `routers/media.py`'s `_sync_progress`: the "completed no longer holds up"
+  demotion branch now only runs when `total` (aired episode count) is
+  truthy — previously a film (which has no episode concept, so `total` is
+  always `None`) fell into this branch on every rewatch and was wrongly
+  demoted from `completed` back to `want_to_watch`.
 
 ## [0.10.0] - 2026-08-03
 

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/07/19 04:17:42.060159 )
+[//]: # (+ Revised: 	2026/08/06 10:27:23.324447 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Renar Backend
@@ -72,7 +72,12 @@ API docs: http://127.0.0.1:8000/docs
 - `POST /media` — save a film / tv_show item
 - `GET /media/{id}` / `PATCH /media/{id}` / `DELETE /media/{id}`
 - `GET /media/ratings?tmdb_id=...|title=...` — community average rating for a title
-- `POST /media/{id}/rewatch` — log a rewatch of a whole item or one episode
+- `POST /media/ratings/batch` — community average rating for up to 100 tmdb_ids at once
+  (Explore's result grid, one request per page instead of one per card)
+- `POST /media/{id}/rewatch` / `POST /media/{id}/undo-rewatch` — log or undo the
+  latest rewatch of a whole item or one episode
+- `GET /media/{id}/rewatch-events` / `DELETE /media/{id}/rewatch-events/{event_id}`
+  — list individual rewatch events (newest first) or remove one specific event
 - `PUT /media/{id}/poster` / `DELETE /media/{id}/poster` — premium: set a custom
   poster (TMDB alternate or upload) on one owned entry, or clear it back to default
   (clearing needs no premium)
@@ -104,9 +109,13 @@ API docs: http://127.0.0.1:8000/docs
   `POST/DELETE /comments/{id}/report` — comments (global per title via TMDB id)
   with likes, nested replies and retractable reports; a reply's title/season/episode
   scope is resolved from its thread root, not stored per-reply
-- `GET /premium/palette` — server-defined color options for the ring/name color pickers
-- `PATCH /premium/style` — premium: set avatar ring color / username color
-  (explicit null clears one)
+- `GET /premium/palette` — suggested color swatches for every premium color picker
+  (not an enforced allowlist — any well-formed hex is accepted)
+- `PATCH /premium/style` — premium: set avatar ring color / username color /
+  Home season & series progress colors / per-tier Upcoming countdown-pill colors
+  (`countdown_colors`, keyed `urgent`/`soon`/`later`/`past`) / per-status Library
+  colors (explicit null clears one; `countdown_colors` and `status_colors` merge
+  per-key)
 - `POST/DELETE /premium/verification-request` — request or withdraw the verified-badge
   request (withdrawal needs no active premium; granting is admin-only, see below)
 - `GET /notifications` (+ `/unread_count`, `POST /{id}/read`, `POST /read_all`,

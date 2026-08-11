@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.607537
-Revised: 2026/07/28 15:02:00.276076
+Revised: 2026/08/05 21:48:04.144643
 
 Premium accounts: badge derivation, style colors, verification requests,
 custom posters (upload + GC) and the admin grant/revoke/verify actions.
@@ -135,10 +135,77 @@ def test_style_update_roundtrip(client, alice):
     assert me["name_color"] == COLOR2
 
 
-def test_style_rejects_non_palette_color(client, alice):
+def test_style_rejects_malformed_hex(client, alice):
     user, headers = alice
     _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"ring_color": "not-a-color"}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_style_accepts_hex_outside_the_suggested_palette(client, alice):
+    # /premium/palette is a suggested-swatch list, not an enforced allowlist —
+    # any well-formed hex is valid, palette or not.
+    user, headers = alice
+    _set_premium(user["id"])
+    assert "#123456" not in PALETTE
     r = client.patch("/premium/style", json={"ring_color": "#123456"}, headers=headers)
+    assert r.status_code == 200
+    assert client.get("/auth/me", headers=headers).json()["ring_color"] == "#123456"
+
+
+# ---------- countdown colors ----------
+
+
+def test_countdown_colors_update_requires_premium(client, alice):
+    _, headers = alice
+    r = client.patch("/premium/style", json={"countdown_colors": {"urgent": COLOR}}, headers=headers)
+    assert r.status_code == 403
+
+
+def test_countdown_colors_roundtrip(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"countdown_colors": {"urgent": COLOR}}, headers=headers)
+    assert r.status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["countdown_colors"] == {"urgent": COLOR}
+
+
+def test_countdown_colors_merge_keeps_other_keys(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    client.patch("/premium/style", json={"countdown_colors": {"urgent": COLOR}}, headers=headers)
+    r = client.patch("/premium/style", json={"countdown_colors": {"soon": COLOR2}}, headers=headers)
+    assert r.status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["countdown_colors"] == {"urgent": COLOR, "soon": COLOR2}
+
+
+def test_countdown_colors_clear_one_key_with_null(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    client.patch(
+        "/premium/style",
+        json={"countdown_colors": {"urgent": COLOR, "soon": COLOR2}},
+        headers=headers,
+    )
+    r = client.patch("/premium/style", json={"countdown_colors": {"urgent": None}}, headers=headers)
+    assert r.status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["countdown_colors"] == {"soon": COLOR2}
+
+
+def test_countdown_colors_rejects_unknown_tier(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"countdown_colors": {"eventually": COLOR}}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_countdown_colors_rejects_malformed_hex(client, alice):
+    user, headers = alice
+    _set_premium(user["id"])
+    r = client.patch("/premium/style", json={"countdown_colors": {"urgent": "not-a-color"}}, headers=headers)
     assert r.status_code == 422
 
 
@@ -202,10 +269,10 @@ def test_status_colors_rejects_unknown_status(client, alice):
     assert r.status_code == 422
 
 
-def test_status_colors_rejects_non_palette_color(client, alice):
+def test_status_colors_rejects_malformed_hex(client, alice):
     user, headers = alice
     _set_premium(user["id"])
-    r = client.patch("/premium/style", json={"status_colors": {"watching": "#123456"}}, headers=headers)
+    r = client.patch("/premium/style", json={"status_colors": {"watching": "not-a-color"}}, headers=headers)
     assert r.status_code == 422
 
 

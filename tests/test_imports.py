@@ -249,7 +249,7 @@ def test_import_fills_favorite_and_rating_when_unset(client, alice, monkeypatch)
 
     item = client.get(f"/media/{show['id']}", headers=headers).json()
     assert item["is_favorite"] is True
-    assert item["rating"] == 8  # 4 on TV Time's 1-5 scale -> 8 on a 1-10 scale
+    assert item["rating"] == 80  # 4 on TV Time's 1-5 scale -> 80 on a 1-100 scale
 
 
 def test_import_does_not_change_manually_set_show_status(client, alice, monkeypatch):

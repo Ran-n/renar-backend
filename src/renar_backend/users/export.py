@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/21 00:00:00.000000
-Revised: 2026/07/27 16:29:49.403374
+Revised: 2026/08/05 21:48:04.042386
 
 Builds a user's personal-data export (GDPR Art. 20 — the right to data
 portability): every account, library and social fact Renar stores about
@@ -155,6 +155,7 @@ def build_export(user: User, db: Session) -> bytes:
         "home_progress_style": user.home_progress_style,
         "home_season_color": user.home_season_color,
         "home_series_color": user.home_series_color,
+        "countdown_colors": user.countdown_colors,
         "status_colors": user.status_colors,
         "episode_label_style": user.episode_label_style,
         "ring_color": user.ring_color,

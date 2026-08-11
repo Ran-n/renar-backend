@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.427427
-Revised: 2026/07/28 17:43:10.422243
+Revised: 2026/08/05 21:48:03.825541
 
 Premium account features: the color palette, the profile style (avatar ring
 + username colors) and the verified-badge request flow.
@@ -43,6 +43,7 @@ def update_style(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Profile style is currently disabled")
     changes = data.model_dump(exclude_unset=True)  # explicit null clears a color
     status_color_changes = changes.pop("status_colors", None)
+    countdown_color_changes = changes.pop("countdown_colors", None)
     for field, value in changes.items():
         setattr(user, field, value)
     if status_color_changes is not None:
@@ -55,6 +56,16 @@ def update_style(
                 merged[watch_status] = color
         user.status_colors = merged or None
         changes["status_colors"] = status_color_changes
+    if countdown_color_changes is not None:
+        # per-key patch: null clears that one tier, others keep their value
+        merged = dict(user.countdown_colors or {})
+        for tier, color in countdown_color_changes.items():
+            if color is None:
+                merged.pop(tier, None)
+            else:
+                merged[tier] = color
+        user.countdown_colors = merged or None
+        changes["countdown_colors"] = countdown_color_changes
     db.commit()
     db.refresh(user)
     _log.info("user id=%s updated premium style %s", user.id, changes)

@@ -2,13 +2,13 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/07/28 12:54:39.957764
+Revised: 2026/08/04 08:12:32.888639
 """
 
 import logging
 from datetime import date
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,7 @@ from ..schemas import (
     LibraryEntryCreate,
     LibraryEntryOut,
     LibraryEntryUpdate,
+    RatingsBatchRequest,
     RewatchCreate,
 )
 from ..tmdb.tmdb_store import localized_titles, refresh_title_details, sync_show_episodes, warm_title_translations
@@ -249,8 +250,31 @@ def title_ratings(
         .filter(LibraryEntry.title_id == title_row.id, LibraryEntry.rating.isnot(None))
         .all()
     ]
-    average = round(sum(ratings) / len(ratings), 1) if ratings else None
+    average = round(sum(ratings) / len(ratings)) if ratings else None
     return {"average": average, "count": len(ratings)}
+
+
+@router.post("/ratings/batch")
+def title_ratings_batch(
+    data: RatingsBatchRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Renar average+count for many tmdb_ids at once — explore grids need one
+    rating per card without firing a request per card, and a request-per-card
+    approach doesn't scale to a page of 20-40 results."""
+    rows = (
+        db.query(Title.tmdb_id, func.avg(LibraryEntry.rating), func.count(LibraryEntry.rating))
+        .join(LibraryEntry, LibraryEntry.title_id == Title.id)
+        .filter(
+            Title.media_type == data.media_type,
+            Title.tmdb_id.in_(data.tmdb_ids),
+            LibraryEntry.rating.isnot(None),
+        )
+        .group_by(Title.tmdb_id)
+        .all()
+    )
+    return {str(tmdb_id): {"average": round(avg), "count": count} for tmdb_id, avg, count in rows if avg is not None}
 
 
 @router.get("/{item_id}", response_model=LibraryEntryOut)
@@ -581,12 +605,16 @@ def _sync_progress(item: LibraryEntry, db: Session) -> None:
         total = item.total_episodes
     if total and item.episodes_watched >= total:
         item.status = WatchStatus.completed
-    elif item.status == WatchStatus.completed:
+    elif total and item.status == WatchStatus.completed:
         # no longer every episode is watched — completed doesn't hold up
         # anymore, so this undoes the auto-promotion above the same way an
         # unwatch undoes want_to_watch -> watching below. Without this, an
         # unwatch after finishing a show left the status stuck on
         # "completed" forever, since nothing ever demoted it back down.
+        # Guarded on `total`: a film has no episode concept, so `total` is
+        # always None and `episodes_watched` always 0 — without this guard,
+        # every rewatch of a completed film fell into this branch and got
+        # wrongly demoted all the way to want_to_watch.
         item.status = WatchStatus.watching if item.episodes_watched > 0 else WatchStatus.want_to_watch
     elif item.episodes_watched > 0 and item.status == WatchStatus.want_to_watch:
         item.status = WatchStatus.watching
@@ -600,9 +628,9 @@ def _ratings_summary(item: LibraryEntry, db: Session) -> dict:
         .filter(EpisodeWatch.media_item_id == item.id, EpisodeWatch.rating.isnot(None))
         .all()
     ]
-    episode_avg = round(sum(ep_ratings) / len(ep_ratings), 1) if ep_ratings else None
+    episode_avg = round(sum(ep_ratings) / len(ep_ratings)) if ep_ratings else None
     all_episodes_rated = bool(item.total_episodes) and len(ep_ratings) >= item.total_episodes
-    combined = round((item.rating + episode_avg) / 2, 1) if item.rating and episode_avg and all_episodes_rated else None
+    combined = round((item.rating + episode_avg) / 2) if item.rating and episode_avg and all_episodes_rated else None
     rewatch_count = (
         db.query(WatchEvent).filter(WatchEvent.media_item_id == item.id, WatchEvent.season.is_(None)).count()
     )
@@ -742,6 +770,51 @@ def undo_rewatch(
     if latest is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rewatch to undo")
     db.delete(latest)
+    db.commit()
+    _sync_progress(item, db)
+    return _ratings_summary(item, db)
+
+
+@router.get("/{item_id}/rewatch-events")
+def list_rewatch_events(
+    item_id: int,
+    season: int | None = Query(default=None, ge=0),
+    episode: int | None = Query(default=None, ge=0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Per-event detail behind the aggregate rewatch_count — newest first —
+    so the frontend can show a removable history instead of only
+    undo-the-latest."""
+    item = _get_owned_item(item_id, user, db)
+    if (season is None) != (episode is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="season and episode must be given together",
+        )
+    events = (
+        db.query(WatchEvent)
+        .filter(WatchEvent.media_item_id == item.id, WatchEvent.season == season, WatchEvent.episode == episode)
+        .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        .all()
+    )
+    return [{"id": e.id, "watched_at": e.watched_at} for e in events]
+
+
+@router.delete("/{item_id}/rewatch-events/{event_id}")
+def delete_rewatch_event(
+    item_id: int,
+    event_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Remove one specific rewatch event by id, not just the most recent —
+    lets the user drop a particular entry out of their rewatch history."""
+    item = _get_owned_item(item_id, user, db)
+    event = db.query(WatchEvent).filter(WatchEvent.id == event_id, WatchEvent.media_item_id == item.id).first()
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rewatch event not found")
+    db.delete(event)
     db.commit()
     _sync_progress(item, db)
     return _ratings_summary(item, db)

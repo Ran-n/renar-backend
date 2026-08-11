@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/29 16:13:44.002226
+Revised: 2026/08/10 16:09:56.644080
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
@@ -513,7 +513,8 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
       function addPill(ip) {{
         ip = ip.trim();
         if (!ip) return;
-        var dup = Array.from(container.querySelectorAll('.tag-pill')).some(function (p) {{ return p.dataset.ip === ip; }});
+        var dup = Array.from(container.querySelectorAll('.tag-pill'))
+          .some(function (p) {{ return p.dataset.ip === ip; }});
         if (dup) return;
         var pill = document.createElement('span');
         pill.className = 'tag-pill';
