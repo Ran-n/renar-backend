@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/11 13:36:46.723539 )
+[//]: # (+ Revised: 	2026/08/12 15:46:07.911190 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -1017,6 +1017,18 @@ rendering-affecting field actually changed; each open `/events` connection
 holds a `subscribe()`d queue and yields an SSE line whenever something
 lands in it, plus a heartbeat comment every 25s so idle connections/
 proxies don't time it out.
+
+**No self-exclusion:** `publish()` fans an event out to *every* subscribed
+queue for `user.id`, including the queue belonging to the very session
+whose own PATCH triggered it — there's no session/connection id threaded
+through to exclude the caller. Simpler, and the sync is meant to be
+symmetric across devices anyway. The frontend has to account for this
+itself: a page that makes its own optimistic edit to a rendering field
+(e.g. `home_progress_style_view.py`'s color/style pickers) would otherwise
+get its own change echoed back and re-render out from under itself
+moments later — see renar-frontend's `docs/design-decisions.md` (same
+section as above) for `page.note_own_settings_change()`, which suppresses
+exactly that.
 
 Auth is resolved with its own short-lived `SessionLocal()` before the
 stream starts, not via the usual `Depends(get_current_user)` — that would
