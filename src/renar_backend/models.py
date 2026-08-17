@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/08/05 21:48:03.653437
+Revised: 2026/08/17 17:05:33.984413
 """
 
 import enum
@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy import (
     DDL,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -31,7 +32,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column, object_session, relationship
 
 from .database import Base
-from .db_triggers import USER_COUNT_TRIGGER_SQL, WATCH_MINUTES_TRIGGER_SQL
+from .db_triggers import RATING_AGGREGATES_TRIGGER_SQL, USER_COUNT_TRIGGER_SQL, WATCH_MINUTES_TRIGGER_SQL
 
 
 def utcnow() -> datetime:
@@ -565,6 +566,15 @@ class Title(Base):
     next_episode_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     # Film-only; TV release timing lives in next_episode_air_date above.
     release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Running total of every LibraryEntry.rating for this title, maintained
+    # incrementally by a database trigger (see db_triggers.py's
+    # RATING_AGGREGATES_TRIGGER_SQL) — same pattern as User.total_watch_minutes
+    # above. /media/ratings reads these directly (average = rating_sum /
+    # rating_count) instead of live-aggregating every rating for the title on
+    # every request. BigInteger on the sum: a plain Integer overflows once a
+    # single title's rating_count gets into the tens of millions.
+    rating_sum: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    rating_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -618,6 +628,32 @@ class Episode(Base):
     name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     air_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class EpisodeRatingAggregate(Base):
+    """Running sum/count of every user's EpisodeWatch.rating for one
+    (title, season, episode), maintained incrementally by a database
+    trigger (see db_triggers.py's RATING_AGGREGATES_TRIGGER_SQL) — the
+    per-episode counterpart to Title.rating_sum/rating_count above.
+    /media/episode-ratings reads this directly instead of live-joining
+    every EpisodeWatch row for the episode on every request.
+
+    Deliberately its own table rather than columns on Episode: EpisodeWatch
+    only carries (media_item_id, season, episode) — not an Episode.id FK —
+    so a rating can arrive (and needs somewhere to land) before that
+    episode's TMDB catalog row has ever been synced into `episodes`. The
+    trigger upserts a row here lazily, on that episode's first rating.
+    """
+
+    __tablename__ = "episode_rating_aggregates"
+    __table_args__ = (UniqueConstraint("title_id", "season", "episode", name="uq_episode_rating_aggregate"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title_id: Mapped[int] = mapped_column(ForeignKey("titles.id"), index=True)
+    season: Mapped[int] = mapped_column(Integer)
+    episode: Mapped[int] = mapped_column(Integer)
+    rating_sum: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    rating_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 def prefetch_episode_cache(db: Session, title_ids: Iterable[int | None]) -> None:
@@ -1149,3 +1185,13 @@ event.listen(LibraryEntry.__table__, "after_create", DDL(WATCH_MINUTES_TRIGGER_S
 # references both tables) is safe.
 AppCounters.__table__.add_is_dependent_on(User.__table__)
 event.listen(AppCounters.__table__, "after_create", DDL(USER_COUNT_TRIGGER_SQL))
+
+# RATING_AGGREGATES_TRIGGER_SQL's DDL touches four tables: titles,
+# media_items, episode_watches and episode_rating_aggregates. The first
+# three are already ordered by SQLAlchemy's own FK-dependency sort (titles
+# -> media_items -> episode_watches), but episode_rating_aggregates has no
+# FK from episode_watches (see its own docstring) to hang that ordering off
+# of — add_is_dependent_on declares it explicitly, same tool used for
+# app_counters above, so this DDL is safe wherever it's attached.
+EpisodeWatch.__table__.add_is_dependent_on(EpisodeRatingAggregate.__table__)
+event.listen(EpisodeWatch.__table__, "after_create", DDL(RATING_AGGREGATES_TRIGGER_SQL))

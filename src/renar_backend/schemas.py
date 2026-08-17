@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/08/05 21:48:03.743807
+Revised: 2026/08/15 17:44:49.339111
 """
 
 import re
@@ -15,11 +15,15 @@ from .users.premium import EPISODE_LABEL_STYLES, PROGRESS_STYLES, THEME_NAMES
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# bcrypt (5.x) raises on inputs longer than 72 bytes instead of truncating
+# silently.  This constant is the single authoritative cap used by the schema
+# validator below and by the admin reset-password endpoint.
+BCRYPT_MAX_PASSWORD_BYTES = 72
+
 
 def _password_fits_bcrypt(password: str) -> str:
-    # bcrypt (5.x) raises on inputs longer than 72 bytes instead of
-    # truncating; reject them here so the client gets a 422, not a 500
-    if len(password.encode()) > 72:
+    # Reject oversized passwords here so the client gets a 422, not a 500
+    if len(password.encode()) > BCRYPT_MAX_PASSWORD_BYTES:
         raise ValueError("Password must be at most 72 bytes")
     return password
 

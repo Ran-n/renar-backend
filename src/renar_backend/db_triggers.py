@@ -274,3 +274,129 @@ DROP FUNCTION IF EXISTS trg_users_email_confirmed();
 DROP TRIGGER IF EXISTS users_count_iud ON users;
 DROP FUNCTION IF EXISTS trg_users_count();
 """
+
+# titles.rating_sum/rating_count and episode_rating_aggregates back
+# /media/ratings, /media/ratings/batch and /media/episode-ratings — each was
+# previously a live query over every matching media_items/episode_watches
+# row (title_ratings even pulled every individual rating value into Python
+# just to sum() them there). Fine at today's scale, but that cost scales
+# with "how many people rated this exact title/episode", which is precisely
+# the number that grows fastest for a popular title — and worse, it's
+# recomputed on every single read, so read traffic on a hot title
+# multiplies the cost further. Same fix, same reasoning, as
+# total_watch_minutes/total_users above: a running total maintained by an
+# O(1)-per-row trigger, so a read is a single indexed point lookup
+# regardless of how many ratings feed it.
+#
+# episode_rating_aggregates has no natural link from episode_watches (which
+# only carries media_item_id, season, episode — not title_id), so the
+# trigger resolves title_id via one extra lookup into media_items and
+# upserts the aggregate row (ON CONFLICT DO UPDATE) — it may not exist yet
+# on a title's very first episode rating, unlike titles.rating_sum/count
+# which always has a row to update since a media_items row can't exist
+# without its title already existing.
+RATING_AGGREGATES_TRIGGER_SQL = """
+CREATE OR REPLACE FUNCTION trg_media_items_rating() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.rating IS NOT NULL THEN
+            UPDATE titles SET rating_sum = rating_sum - OLD.rating, rating_count = rating_count - 1
+            WHERE id = OLD.title_id;
+        END IF;
+        RETURN OLD;
+    ELSIF TG_OP = 'INSERT' THEN
+        IF NEW.rating IS NOT NULL THEN
+            UPDATE titles SET rating_sum = rating_sum + NEW.rating, rating_count = rating_count + 1
+            WHERE id = NEW.title_id;
+        END IF;
+        RETURN NEW;
+    ELSE -- UPDATE, rating changed (guarded by the trigger's own WHEN clause)
+        UPDATE titles
+        SET rating_sum = rating_sum + COALESCE(NEW.rating, 0) - COALESCE(OLD.rating, 0),
+            rating_count = rating_count
+                + (CASE WHEN NEW.rating IS NOT NULL THEN 1 ELSE 0 END)
+                - (CASE WHEN OLD.rating IS NOT NULL THEN 1 ELSE 0 END)
+        WHERE id = NEW.title_id;
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS media_items_rating_iud ON media_items;
+CREATE TRIGGER media_items_rating_iud
+AFTER INSERT OR DELETE ON media_items
+FOR EACH ROW EXECUTE FUNCTION trg_media_items_rating();
+
+DROP TRIGGER IF EXISTS media_items_rating_update ON media_items;
+CREATE TRIGGER media_items_rating_update
+AFTER UPDATE ON media_items
+FOR EACH ROW
+WHEN (OLD.rating IS DISTINCT FROM NEW.rating)
+EXECUTE FUNCTION trg_media_items_rating();
+
+CREATE OR REPLACE FUNCTION trg_episode_watches_rating() RETURNS trigger AS $$
+DECLARE
+    v_title_id integer;
+    v_season integer;
+    v_episode integer;
+    delta_sum integer;
+    delta_count integer;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.rating IS NULL THEN
+            RETURN OLD;
+        END IF;
+        SELECT title_id INTO v_title_id FROM media_items WHERE id = OLD.media_item_id;
+        v_season := OLD.season;
+        v_episode := OLD.episode;
+        delta_sum := -OLD.rating;
+        delta_count := -1;
+    ELSIF TG_OP = 'INSERT' THEN
+        IF NEW.rating IS NULL THEN
+            RETURN NEW;
+        END IF;
+        SELECT title_id INTO v_title_id FROM media_items WHERE id = NEW.media_item_id;
+        v_season := NEW.season;
+        v_episode := NEW.episode;
+        delta_sum := NEW.rating;
+        delta_count := 1;
+    ELSE -- UPDATE, rating changed (guarded by the trigger's own WHEN clause)
+        SELECT title_id INTO v_title_id FROM media_items WHERE id = NEW.media_item_id;
+        v_season := NEW.season;
+        v_episode := NEW.episode;
+        delta_sum := COALESCE(NEW.rating, 0) - COALESCE(OLD.rating, 0);
+        delta_count := (CASE WHEN NEW.rating IS NOT NULL THEN 1 ELSE 0 END)
+                      - (CASE WHEN OLD.rating IS NOT NULL THEN 1 ELSE 0 END);
+    END IF;
+
+    INSERT INTO episode_rating_aggregates (title_id, season, episode, rating_sum, rating_count)
+    VALUES (v_title_id, v_season, v_episode, delta_sum, delta_count)
+    ON CONFLICT (title_id, season, episode) DO UPDATE
+    SET rating_sum = episode_rating_aggregates.rating_sum + EXCLUDED.rating_sum,
+        rating_count = episode_rating_aggregates.rating_count + EXCLUDED.rating_count;
+
+    RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS episode_watches_rating_iud ON episode_watches;
+CREATE TRIGGER episode_watches_rating_iud
+AFTER INSERT OR DELETE ON episode_watches
+FOR EACH ROW EXECUTE FUNCTION trg_episode_watches_rating();
+
+DROP TRIGGER IF EXISTS episode_watches_rating_update ON episode_watches;
+CREATE TRIGGER episode_watches_rating_update
+AFTER UPDATE ON episode_watches
+FOR EACH ROW
+WHEN (OLD.rating IS DISTINCT FROM NEW.rating)
+EXECUTE FUNCTION trg_episode_watches_rating();
+"""
+
+RATING_AGGREGATES_TRIGGER_TEARDOWN_SQL = """
+DROP TRIGGER IF EXISTS episode_watches_rating_update ON episode_watches;
+DROP TRIGGER IF EXISTS episode_watches_rating_iud ON episode_watches;
+DROP FUNCTION IF EXISTS trg_episode_watches_rating();
+DROP TRIGGER IF EXISTS media_items_rating_update ON media_items;
+DROP TRIGGER IF EXISTS media_items_rating_iud ON media_items;
+DROP FUNCTION IF EXISTS trg_media_items_rating();
+"""

@@ -384,3 +384,49 @@ def test_ratings_batch_requires_at_least_one_id(client, alice):
     _, headers = alice
     r = client.post("/media/ratings/batch", json={"media_type": "film", "tmdb_ids": []}, headers=headers)
     assert r.status_code == 422
+
+
+# ---------- rating aggregate maintenance (titles.rating_sum/rating_count,
+# trigger-maintained — see db_triggers.py) ----------
+
+
+def test_ratings_average_updates_when_rating_changed(client, alice, bob):
+    _, alice_headers = alice
+    _, bob_headers = bob
+    alice_item = _create(client, alice_headers, tmdb_id=949, rating=80)
+    _create(client, bob_headers, tmdb_id=949, rating=70)
+    r = client.patch(f"/media/{alice_item['id']}", json={"rating": 60}, headers=alice_headers)
+    assert r.status_code == 200
+    r = client.get("/media/ratings", params={"media_type": "film", "tmdb_id": 949}, headers=alice_headers)
+    assert r.json() == {"average": 65, "count": 2}
+
+
+def test_ratings_average_drops_when_rating_cleared(client, alice, bob):
+    _, alice_headers = alice
+    _, bob_headers = bob
+    alice_item = _create(client, alice_headers, tmdb_id=949, rating=80)
+    _create(client, bob_headers, tmdb_id=949, rating=70)
+    r = client.patch(f"/media/{alice_item['id']}", json={"rating": None}, headers=alice_headers)
+    assert r.status_code == 200
+    r = client.get("/media/ratings", params={"media_type": "film", "tmdb_id": 949}, headers=alice_headers)
+    assert r.json() == {"average": 70, "count": 1}
+
+
+def test_ratings_average_drops_when_item_deleted(client, alice, bob):
+    _, alice_headers = alice
+    _, bob_headers = bob
+    alice_item = _create(client, alice_headers, tmdb_id=949, rating=80)
+    _create(client, bob_headers, tmdb_id=949, rating=70)
+    r = client.delete(f"/media/{alice_item['id']}", headers=alice_headers)
+    assert r.status_code == 204
+    r = client.get("/media/ratings", params={"media_type": "film", "tmdb_id": 949}, headers=bob_headers)
+    assert r.json() == {"average": 70, "count": 1}
+
+
+def test_ratings_none_left_after_all_deleted(client, alice):
+    _, headers = alice
+    item = _create(client, headers, tmdb_id=949, rating=80)
+    r = client.delete(f"/media/{item['id']}", headers=headers)
+    assert r.status_code == 204
+    r = client.get("/media/ratings", params={"media_type": "film", "tmdb_id": 949}, headers=headers)
+    assert r.json() == {"average": None, "count": 0}

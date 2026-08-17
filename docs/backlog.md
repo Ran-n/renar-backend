@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/11 13:33:24.345056 )
+[//]: # (+ Revised: 	2026/08/15 17:44:49.528588 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -327,6 +327,24 @@ import outcomes don't clobber each other.
   just unconfirmed) accounts should eventually free their username too.
   Not scoped in detail yet.
 
+## Performance
+
+- **[Future] `GET /upcoming/history` issues N+1 DB queries and N×M potential TMDB
+  calls.** `routers/upcoming.py`'s `get_upcoming_history` loops over every
+  tracked TV show and, for each one, calls `sync_show_episodes(db, title)`
+  (possibly triggering per-season TMDB fetches if the episode table is cold)
+  then runs a separate `db.query(Episode)` filtered to that title — one SQL
+  round-trip per tracked show. For a user tracking 50 shows that's 50
+  episode queries plus up to N×seasons TMDB calls on a cold cache. The
+  background `sync_episode_history` task pre-warms the cache so
+  `sync_show_episodes` short-circuits to DB reads in practice, but the
+  per-title episode query loop is still N+1. Fix: bulk-load all relevant
+  `Episode` rows in one query keyed on `Episode.title_id.in_(title_ids)`,
+  group in Python. The `sync_show_episodes` call can stay as-is (it
+  short-circuits cheaply when the cache is warm) or be moved to a
+  pre-fill step before the loop if the lazy-sync guarantee matters to users
+  more than the one-request penalty cost.
+
 ## Bugs
 
 - **[Blocking for 1.0] Show fully up-to-date with aired episodes must not appear in "Watch Next".**
@@ -391,12 +409,17 @@ import outcomes don't clobber each other.
   check in `test_normalization.py`. Schema must stay BCNF (a review's rating
   is a fact about the user+title pair, not a copy of anything else).
 
-- **[Blocking for 1.0] Share — film, show, episode, comment.**
-  Backend needs to support shareable deep links or redirect URLs for a title page,
-  a specific episode, and a comment (anchor within a thread). Options: generate
-  canonical share URLs in the API response, or add a `/share/{type}/{id}`
-  redirect endpoint. Decide on a URL scheme before implementing frontend share
-  buttons.
+- **[Blocking for 1.0] Share — deep link still needed; frontend shipped without one.**
+  renar-frontend's share buttons (title cards, title page, comment tiles)
+  ship today generating a branded PNG card (Pillow, client-side) and handing
+  it to the native share sheet / clipboard — no link involved, since there's
+  no public web frontend hosted yet to link to (see renar-frontend's
+  `docs/backlog.md`). This backend half is still open for whenever that
+  changes: shareable deep links or redirect URLs for a title page, a
+  specific episode, and a comment (anchor within a thread). Options:
+  generate canonical share URLs in the API response, or add a
+  `/share/{type}/{id}` redirect endpoint. Decide on a URL scheme once
+  `renar.breren.com` is actually hosting something to redirect to.
 
 - **[Blocking for 1.0] Per-rewatch ratings, not a single overwritten rating.**
   Ratings are currently one value per user+title, overwritten on every
@@ -409,6 +432,41 @@ import outcomes don't clobber each other.
   a fact about the (user, title, watch-through) tuple; check
   `test_normalization.py`. Frontend counterpart in renar-frontend's
   `docs/backlog.md` (rate dialog needs a history view + per-entry editing).
+
+- **[Future] Per-season grading, once a season is fully watched.** No
+  season-level rating exists today — only `media_items.rating` (per
+  title) and `episode_watches.rating` (per episode); confirmed while
+  building the share-card mockups (see renar-frontend's `docs/backlog.md`).
+  Wanted: let a user rate a season as a whole once they've finished every
+  aired episode in it (mirrors how a title itself gets rated only after
+  the user has actually watched it, not before). Needs a new rating fact
+  keyed on (user, title, season) — a season isn't its own row anywhere
+  today, so this likely means a new table rather than a column bolted onto
+  `episode_watches` (which is per-episode) or `media_items` (which is
+  per-title, no season dimension). Must stay BCNF; check
+  `test_normalization.py`. Open questions: enforce "fully watched" how (all
+  aired episodes checked off in that season, computed from
+  `episode_watches`), does the aggregate/Renar-average badge described in
+  the frontend backlog then read from this instead of leaving seasons
+  ungraded, and does this interact with the per-rewatch-ratings entry
+  above (a season rewatch re-rating too, or title/episode only). Not
+  scoped in detail — not blocking, no urgency signaled.
+
+  Rough API shape, so the frontend side (see renar-frontend's
+  `docs/backlog.md`) has something concrete to wire the season-rate
+  prompt to: `set_episode`'s response should report whether that write
+  just completed the season (all aired episodes in `episode_watches` now
+  checked off for that (user, title, season)) — a `season_completed: bool`
+  flag alongside the existing response fields — so the frontend knows to
+  surface the rate prompt right after that call, without a separate
+  round-trip. Reads/writes of the rating itself go through their own new
+  endpoint (e.g. `PUT/GET /titles/{id}/seasons/{season}/rating`) rather
+  than being bolted onto `set_episode`, since the rating isn't tied to any
+  single episode write and needs to be independently re-readable/editable
+  later. Important: this flag must reflect *only* whether the season is
+  now fully watched, not carry or default to any episode's rating value —
+  the frontend backlog entry specifically calls out that the season
+  rating must not pre-fill from the last-watched episode's grade.
 
 - **[Future] Social login: Continue with Google / Continue with Apple.**
   Not committed — revisit once real signup-funnel data shows password-registration

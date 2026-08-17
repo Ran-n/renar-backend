@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/29 16:16:46.639144
+Revised: 2026/08/15 17:44:49.434588
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -32,6 +32,7 @@ from ...models import (
     WatchStatus,
     utcnow,
 )
+from ...schemas import BCRYPT_MAX_PASSWORD_BYTES
 from ...users import accounts
 from ...users import security as _security
 from ...users.auth import hash_password
@@ -1044,8 +1045,8 @@ def set_user_password(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    # bcrypt refuses >72 bytes; mirror the registration floor of 8.
-    if not (8 <= len(new_password) <= 72) or len(new_password.encode()) > 72:
+    # bcrypt refuses >BCRYPT_MAX_PASSWORD_BYTES; mirror the registration floor of 8.
+    if len(new_password) < 8 or len(new_password.encode()) > BCRYPT_MAX_PASSWORD_BYTES:
         raise HTTPException(status_code=422, detail="Password must be 8-72 characters")
     user.password_hash = hash_password(new_password)
     user.password_changed_at = utcnow()
