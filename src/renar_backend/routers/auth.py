@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/08/02 18:29:48.488249
+Revised: 2026/08/15 17:44:49.159903
 """
 
 import logging
@@ -328,18 +328,26 @@ def _confirm_email_code(user: User, code: str, db: Session, background_tasks: Ba
         user.email_confirmation_bypassed = False
         db.commit()
         return ConfirmEmailResult(status="confirmed")
-    if code_row.purpose == "change_authorize":
+    elif code_row.purpose == "change_authorize":
         # the OLD address approved the change — not done yet: the NEW
         # (pending) address still has to prove ownership of itself.
         db.commit()
         create_and_send_code(db, user, "change_confirm", user.pending_email, background_tasks)
         return ConfirmEmailResult(status="change_pending_new_email")
-    # change_confirm: the new address just proved ownership — complete the swap
-    user.email = user.pending_email
-    user.pending_email = None
-    user.email_confirmed = True
-    db.commit()
-    return ConfirmEmailResult(status="confirmed")
+    elif code_row.purpose == "change_confirm":
+        # the new address just proved ownership — complete the swap
+        user.email = user.pending_email
+        user.pending_email = None
+        user.email_confirmed = True
+        db.commit()
+        return ConfirmEmailResult(status="confirmed")
+    else:
+        _log.error(
+            "unknown email confirmation purpose %r for user id=%s — refusing to mutate",
+            code_row.purpose,
+            user.id,
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown confirmation purpose")
 
 
 @router.post("/confirm-email", response_model=ConfirmEmailResult)

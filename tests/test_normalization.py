@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/07/18 19:33:27.832602
+Revised: 2026/08/17 17:05:34.076782
 
 Schema normalization guard: fails CI the moment a denormalization sneaks
 back into the models.
@@ -76,6 +76,17 @@ ALLOWED_AGGREGATES: dict[str, str] = {
         "indexing, so this avoids scanning the whole users table on every "
         "ranking request; see docs/design-decisions.md"
     ),
+    "titles.rating_count": (
+        "Renar community-rating cache for /media/ratings, same trigger-"
+        "maintained pattern as users.total_watch_minutes (migration "
+        "6eae4e5ba1c0) — avoids live-aggregating every media_items.rating "
+        "for a title on every read; see docs/design-decisions.md"
+    ),
+    "episode_rating_aggregates.rating_count": (
+        "per-episode counterpart to titles.rating_count, same trigger-"
+        "maintained pattern, for /media/episode-ratings — see "
+        "docs/design-decisions.md"
+    ),
 }
 
 # FK-looking columns that intentionally carry no ForeignKey.
@@ -105,6 +116,16 @@ ALLOWED_COPIED_COLUMNS: dict[tuple[str, str], str] = {
         "none), so user_id can't be derived through it alone and must be "
         "stored independently; when both are set they're kept in agreement "
         "by construction in routers/notifications.py, not by a query-time join"
+    ),
+    ("episode_rating_aggregates.rating_sum", "titles"): (
+        "a per-episode rating total, independent of titles.rating_sum (the "
+        "show's overall rating total) — same column name, unrelated fact, "
+        "same reasoning as episode_watches.rating vs media_items.rating above"
+    ),
+    ("episode_rating_aggregates.rating_count", "titles"): (
+        "a per-episode rating count, independent of titles.rating_count — "
+        "same column name, unrelated fact, same reasoning as "
+        "episode_watches.rating vs media_items.rating above"
     ),
 }
 

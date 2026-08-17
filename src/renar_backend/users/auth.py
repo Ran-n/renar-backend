@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.008319
-Revised: 2026/07/21 14:55:07.689383
+Revised: 2026/08/15 17:44:49.248016
 """
 
 import logging
@@ -43,12 +43,10 @@ def require_admin(credentials: HTTPBasicCredentials = Depends(_basic)) -> str:
 
 
 # bcrypt only reads the first 72 bytes of a password; since 5.x it raises
-# instead of truncating silently. Schemas cap passwords at 72 bytes, so
-# hash_password never sees longer input — but verify_password can (e.g. an
-# absurdly long login attempt) and must answer False, not crash with a 500.
-BCRYPT_MAX_PASSWORD_BYTES = 72
-
-
+# instead of truncating silently. schemas.BCRYPT_MAX_PASSWORD_BYTES caps
+# inputs at registration/change time, so hash_password never sees longer
+# input — but verify_password can (e.g. an absurdly long login attempt)
+# and must answer False, not crash with a 500.
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/12 15:46:07.911190 )
+[//]: # (+ Revised: 	2026/08/17 17:05:33.894226 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -233,6 +233,51 @@ explicitly with `AppCounters.__table__.add_is_dependent_on(User.__table__)`
 — the tool SQLAlchemy provides specifically for "must be created after,
 but there's no real foreign key" — rather than relying on incidental
 ordering that isn't actually guaranteed.
+
+### `titles.rating_sum`/`rating_count` and `episode_rating_aggregates`: the same trigger pattern, for community ratings
+
+`/media/ratings`, `/media/ratings/batch` and `/media/episode-ratings` (the
+Renar community-average badges shown next to TMDB's own score) used to
+recompute their average live, on every call — `title_ratings` was the
+worst of the three: it pulled every individual `media_items.rating` value
+for the title over the wire into Python and averaged it there, not even
+`func.avg()` in SQL. That's invisible at small scale, but the cost scales
+with exactly the number that grows fastest for a popular title — how many
+people rated it — and it was paid again on every single read, not once.
+
+Same fix, same reasoning as `users.total_watch_minutes` above: a running
+total maintained incrementally by a database trigger (migration
+`6eae4e5ba1c0`), so a read is an O(1) indexed point lookup regardless of
+how many ratings feed it, and the total can't drift because nothing can
+change `media_items.rating`/`episode_watches.rating` without the trigger
+running in the same transaction.
+
+**Two aggregate homes, not one:** `titles.rating_sum`/`rating_count` sit
+directly on `Title` (a title's row always exists before any
+`media_items.rating` can reference it, so a plain `UPDATE ... WHERE
+id = title_id` always has a row to hit). Episode ratings instead get
+their own table, `episode_rating_aggregates`, keyed by `(title_id, season,
+episode)` — `episode_watches` only carries `media_item_id`, not a direct
+link to a title or to the `episodes` catalog table, and a rating can
+arrive before that episode's TMDB catalog row has ever been synced. The
+trigger resolves `title_id` via one lookup into `media_items` and
+`INSERT ... ON CONFLICT DO UPDATE`s the aggregate row into existence on
+that episode's first-ever rating, rather than requiring one to already be
+there.
+
+**Same column names, different facts, both registered:**
+`episode_rating_aggregates.rating_sum`/`rating_count` share their names
+with `titles.rating_sum`/`rating_count` purely by convention (both are
+"a rating total for the thing this row is about") — same shape as
+`episode_watches.rating` vs. `media_items.rating` already is, and
+registered in `tests/test_normalization.py`'s `ALLOWED_COPIED_COLUMNS`/
+`ALLOWED_AGGREGATES` the same way.
+
+**Backfilled, not left at zero:** the migration populates both from
+existing `media_items`/`episode_watches` data with a one-time `GROUP BY`
+aggregate before creating the triggers, so titles/episodes already rated
+before this migration start with a correct total instead of silently
+reading as unrated until their next rating change.
 
 ### Ranking at large scale: what's built, what's deferred, and why
 

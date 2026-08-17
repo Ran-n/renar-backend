@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/11 18:02:22.395960 )
+[//]: # (+ Revised: 	2026/08/17 17:29:53.347082 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-08-17
+
+### Added
+
+- `GET/POST /comments` responses now include `seen_by_author` and
+  `author_rating` per comment — the commenter's own watch state and 1-100
+  grade for the thread's title/episode, resolved from their own library
+  entry (`LibraryEntry.last_watched_at`/`.rating`) or, for an episode-
+  scoped thread, their `EpisodeWatch` row for that exact episode
+  (`comments.py`'s `_build_watch_info`, computed once per request off
+  every commenter in the thread rather than per comment). Powers the
+  frontend's comment share card, which shows a "seen" glyph and a small
+  grade pill next to the commenter's name.
+
+### Changed
+
+- `/media/ratings`, `/media/ratings/batch` and `/media/episode-ratings`
+  (the Renar community-average badges) now read from stored running
+  totals — `titles.rating_sum`/`rating_count` and the new
+  `episode_rating_aggregates` table — instead of recomputing the average
+  over every individual rating on each call. Maintained incrementally by
+  a Postgres trigger (`db_triggers.py`, migration `6eae4e5ba1c0`,
+  backfilled from existing data) so a read is an O(1) indexed lookup
+  regardless of how many people have rated a title, and the total can't
+  drift since nothing can change a rating without the trigger running in
+  the same transaction.
 
 ## [0.11.0] - 2026-08-11
 

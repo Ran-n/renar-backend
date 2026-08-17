@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/08/03 12:44:30.482540
+Revised: 2026/08/17 11:07:26.604818
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -154,6 +154,7 @@ def _map_details(media_type: str, tmdb_id: int, data: dict) -> dict:
                 "season": s["season_number"],
                 "name": s.get("name") or f"Season {s['season_number']}",
                 "episode_count": s.get("episode_count") or 0,
+                "air_date": s.get("air_date") or None,
             }
             for s in data.get("seasons", [])
             if s.get("season_number", 0) > 0  # skip "Specials"
@@ -388,6 +389,8 @@ def season_tmdb(
             "runtime": e.get("runtime"),
             "overview": e.get("overview") or "",
             "still_url": (f"{IMAGE_BASE}/w300{e['still_path']}" if e.get("still_path") else None),
+            "vote_average": round((e.get("vote_average") or 0) * 10) or None,
+            "vote_count": e.get("vote_count") or 0,
             "guest_stars": [
                 {
                     "name": g["name"],

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/08/04 08:12:32.888639
+Revised: 2026/08/17 17:05:34.198094
 """
 
 import logging
@@ -19,6 +19,7 @@ from ..media.image_utils import decode_b64_image, normalize_jpeg
 from ..models import (
     Episode,
     EpisodeCustomStill,
+    EpisodeRatingAggregate,
     EpisodeWatch,
     LibraryEntry,
     MediaType,
@@ -236,22 +237,19 @@ def title_ratings(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Renar average+count for one title, read straight off
+    Title.rating_sum/rating_count — a running total a database trigger keeps
+    in sync on every media_items rating write (see db_triggers.py), not a
+    live aggregate over every LibraryEntry row recomputed on every call."""
     if tmdb_id is None and not title:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide tmdb_id or title",
         )
     title_row = find_title(db, media_type, tmdb_id, title)
-    if title_row is None:
+    if title_row is None or title_row.rating_count == 0:
         return {"average": None, "count": 0}
-    ratings = [
-        r
-        for (r,) in db.query(LibraryEntry.rating)
-        .filter(LibraryEntry.title_id == title_row.id, LibraryEntry.rating.isnot(None))
-        .all()
-    ]
-    average = round(sum(ratings) / len(ratings)) if ratings else None
-    return {"average": average, "count": len(ratings)}
+    return {"average": round(title_row.rating_sum / title_row.rating_count), "count": title_row.rating_count}
 
 
 @router.post("/ratings/batch")
@@ -262,19 +260,52 @@ def title_ratings_batch(
 ):
     """Renar average+count for many tmdb_ids at once — explore grids need one
     rating per card without firing a request per card, and a request-per-card
-    approach doesn't scale to a page of 20-40 results."""
+    approach doesn't scale to a page of 20-40 results. Same trigger-maintained
+    columns as `title_ratings`, just selected for a whole batch of titles at
+    once instead of one."""
     rows = (
-        db.query(Title.tmdb_id, func.avg(LibraryEntry.rating), func.count(LibraryEntry.rating))
-        .join(LibraryEntry, LibraryEntry.title_id == Title.id)
+        db.query(Title.tmdb_id, Title.rating_sum, Title.rating_count)
         .filter(
             Title.media_type == data.media_type,
             Title.tmdb_id.in_(data.tmdb_ids),
-            LibraryEntry.rating.isnot(None),
+            Title.rating_count > 0,
         )
-        .group_by(Title.tmdb_id)
         .all()
     )
-    return {str(tmdb_id): {"average": round(avg), "count": count} for tmdb_id, avg, count in rows if avg is not None}
+    return {
+        str(tmdb_id): {"average": round(rating_sum / rating_count), "count": rating_count}
+        for tmdb_id, rating_sum, rating_count in rows
+    }
+
+
+@router.get("/episode-ratings")
+def episode_ratings(
+    tmdb_id: int = Query(ge=1),
+    season: int = Query(ge=0),
+    episode: int = Query(ge=1),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Renar average+count for one episode, across every user's own
+    EpisodeWatch.rating for it — the per-episode counterpart to
+    `title_ratings`. Reads EpisodeRatingAggregate, a trigger-maintained
+    running total (see db_triggers.py) keyed by (title_id, season, episode),
+    instead of live-joining/aggregating every EpisodeWatch row for it."""
+    title_id = db.query(Title.id).filter(Title.media_type == MediaType.tv_show, Title.tmdb_id == tmdb_id).scalar()
+    if title_id is None:
+        return {"average": None, "count": 0}
+    agg = (
+        db.query(EpisodeRatingAggregate)
+        .filter(
+            EpisodeRatingAggregate.title_id == title_id,
+            EpisodeRatingAggregate.season == season,
+            EpisodeRatingAggregate.episode == episode,
+        )
+        .first()
+    )
+    if agg is None or agg.rating_count == 0:
+        return {"average": None, "count": 0}
+    return {"average": round(agg.rating_sum / agg.rating_count), "count": agg.rating_count}
 
 
 @router.get("/{item_id}", response_model=LibraryEntryOut)
@@ -746,11 +777,17 @@ def undo_rewatch(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Remove the single most recent rewatch for this item/episode, without
-    touching the underlying watched status (EpisodeWatch row untouched) —
-    the inverse of POST .../rewatch, one event at a time. Lets the frontend
-    step an already-rewatched episode down by one instead of jumping
-    straight to fully unwatched when the user "unmarks" it."""
+    """Remove the single most recent rewatch for this item/episode — the
+    inverse of POST .../rewatch, one event at a time. Lets the frontend step
+    an already-rewatched episode down by one instead of jumping straight to
+    fully unwatched when the user "unmarks" it. The underlying watched
+    status (EpisodeWatch row) is left in place, but its rating IS cleared:
+    this endpoint's only caller is that same "unmark" tap on the checkmark
+    (never a standalone "undo my last rewatch" action elsewhere — see
+    rewatch_widget.py, which uses the separate per-event delete-rewatch-
+    event endpoint instead), so from the user's perspective tapping unmark
+    should always drop the rating too, not just leave it stranded on a row
+    that no longer looks freshly watched."""
     item = _get_owned_item(item_id, user, db)
     if (data.season is None) != (data.episode is None):
         raise HTTPException(
@@ -770,9 +807,23 @@ def undo_rewatch(
     if latest is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rewatch to undo")
     db.delete(latest)
+    rating_cleared = False
+    if data.season is not None:
+        watch = (
+            db.query(EpisodeWatch)
+            .filter(
+                EpisodeWatch.media_item_id == item.id,
+                EpisodeWatch.season == data.season,
+                EpisodeWatch.episode == data.episode,
+            )
+            .first()
+        )
+        if watch is not None and watch.rating is not None:
+            watch.rating = None
+            rating_cleared = True
     db.commit()
     _sync_progress(item, db)
-    return _ratings_summary(item, db)
+    return {**_ratings_summary(item, db), "rating_cleared": rating_cleared}
 
 
 @router.get("/{item_id}/rewatch-events")

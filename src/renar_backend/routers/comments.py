@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.875365
-Revised: 2026/07/17 19:40:36.311593
+Revised: 2026/08/17 13:38:10.873280
 
 Comments on titles (global across users), with likes, nested replies and
 user reports.
@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
-from ..models import Comment, CommentLike, CommentReport, MediaType, User
+from ..models import Comment, CommentLike, CommentReport, EpisodeWatch, LibraryEntry, MediaType, User
 from ..schemas import CommentCreate, CommentReportCreate
 from ..social.comment_threads import ancestor_depth, load_thread, resolve_root_scope
 from ..users.auth import get_current_user
@@ -30,13 +30,53 @@ MAX_REPLY_DEPTH = 8  # a reply can target any ancestor reply, so nesting is
 # blow up _comment_out into unbounded recursion / query fan-out
 
 
+def _build_watch_info(
+    db: Session, user_ids: set[int], title_id: int, season: int | None, episode: int | None
+) -> dict[int, tuple[bool, int | None]]:
+    """`{user_id: (seen, rating)}` for every commenter in a thread, off each
+    commenter's own library entry for this title — every comment in a
+    `list_comments`/`create_comment` call shares the same (season, episode)
+    scope (replies inherit their root's, and root comments are only ever
+    fetched filtered to one season/episode pair), so this is computed once
+    per request rather than per comment. `rating` is the commenter's own
+    1-100 grade (EpisodeWatch.rating for an episode-scoped thread,
+    LibraryEntry.rating for a title-level one) — never another user's rating
+    merged in, and never TMDB's. A commenter with no library entry for this
+    title at all is simply absent, so callers default to (False, None)."""
+    entries = db.query(LibraryEntry).filter(LibraryEntry.user_id.in_(user_ids), LibraryEntry.title_id == title_id).all()
+    if not entries:
+        return {}
+    if episode is not None:
+        entry_by_id = {e.id: e for e in entries}
+        watches = (
+            db.query(EpisodeWatch)
+            .filter(
+                EpisodeWatch.media_item_id.in_(entry_by_id.keys()),
+                EpisodeWatch.season == season,
+                EpisodeWatch.episode == episode,
+            )
+            .all()
+        )
+        watch_by_entry_id = {w.media_item_id: w for w in watches}
+        return {
+            e.user_id: (
+                e.id in watch_by_entry_id,
+                watch_by_entry_id[e.id].rating if e.id in watch_by_entry_id else None,
+            )
+            for e in entries
+        }
+    return {e.user_id: (e.last_watched_at is not None, e.rating) for e in entries}
+
+
 def _comment_out(
     c: Comment,
     me: User,
     children_by_parent: dict[int | None, list[Comment]],
+    watch_info: dict[int, tuple[bool, int | None]] | None = None,
     depth: int = 0,
 ) -> dict:
     replies = children_by_parent.get(c.id, [])
+    seen, author_rating = (watch_info or {}).get(c.user_id, (False, None))
     return {
         "id": c.id,
         "user_id": c.user_id,
@@ -52,7 +92,9 @@ def _comment_out(
         "disliked_by_me": any(like.user_id == me.id and like.value < 0 for like in c.likes),
         "mine": c.user_id == me.id,
         "reported_by_me": any(r.user_id == me.id for r in c.reports),
-        "replies": [_comment_out(r, me, children_by_parent, depth + 1) for r in replies]
+        "seen_by_author": seen,
+        "author_rating": author_rating,
+        "replies": [_comment_out(r, me, children_by_parent, watch_info, depth + 1) for r in replies]
         if depth < MAX_REPLY_DEPTH
         else [],
     }
@@ -96,7 +138,9 @@ def list_comments(
     if not root_ids:
         return []
     by_id, children_by_parent = load_thread(db, root_ids)
-    return [_comment_out(by_id[cid], me, children_by_parent) for cid in root_ids]
+    all_comments = list(by_id.values())
+    watch_info = _build_watch_info(db, {c.user_id for c in all_comments}, target.id, season, episode)
+    return [_comment_out(by_id[cid], me, children_by_parent, watch_info) for cid in root_ids]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -145,7 +189,12 @@ def create_comment(
     db.add(comment)
     db.commit()
     db.refresh(comment)
-    return _comment_out(comment, me, {})
+    # `data.season`/`data.episode` are the thread's real scope even for a
+    # reply (the Comment row itself stores None there — see above — but the
+    # request payload is validated against the parent's own root scope just
+    # above, so it's already the right pair to look up watch/rating info by).
+    watch_info = _build_watch_info(db, {comment.user_id}, target.id, data.season, data.episode)
+    return _comment_out(comment, me, {}, watch_info)
 
 
 @router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
