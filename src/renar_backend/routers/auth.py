@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/08/15 17:44:49.159903
+Revised: 2026/08/18 11:05:47.230348
 """
 
 import logging
@@ -486,8 +486,13 @@ def resend_confirmation_session(
 
 
 @router.get("/me", response_model=UserOut)
-def me(current_user: User = Depends(get_current_user)):
-    return current_user
+def me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    out = UserOut.model_validate(current_user)
+    if not current_user.email_confirmed:
+        grace_days = get_site_settings(db).email_confirmation_grace_days
+        elapsed_days = (utcnow() - current_user.created_at).days
+        out.grace_days_remaining = max(0, grace_days - elapsed_days)
+    return out
 
 
 @router.patch("/profile", response_model=UserOut)

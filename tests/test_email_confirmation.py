@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 13:10:00.000000
-Revised: 2026/07/29 16:37:38.103793
+Revised: 2026/08/18 11:05:47.525437
 
 Registration/email-change confirmation codes (users/email_confirmation.py,
 routers/auth.py's /auth/confirm-email + /auth/resend-confirmation) and the
@@ -434,6 +434,55 @@ def test_account_still_blocked_at_login_past_grace(client):
     _set_created_at(user["id"], utcnow() - timedelta(days=365))
     r = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
     assert r.status_code == 403
+
+
+# ---------- /me's grace_days_remaining ----------
+
+
+def test_me_grace_days_remaining_counts_down(client):
+    grace_days = site_settings.current().email_confirmation_grace_days
+    user = _raw_register(client)
+    _set_created_at(user["id"], utcnow() - timedelta(days=2))
+    headers = _login_headers(client, "alice")
+    r = client.get("/auth/me", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["grace_days_remaining"] == grace_days - 2
+
+
+def test_me_grace_days_remaining_floors_at_zero(client):
+    """Login itself is blocked once the grace period is fully spent (see
+    test_login_after_grace_period_blocked) — but a login that lands exactly
+    on the boundary, or an admin lengthening/shortening the grace period
+    after the fact, could still put created_at further in the past than the
+    current grace_days allows without the account having ever failed to log
+    in. That must read as "0 days left", not a negative count."""
+    user = _raw_register(client)
+    _set_created_at(user["id"], utcnow() - timedelta(days=365))
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).email_confirmed = True  # bypass /auth/login's own grace-period block
+        db.commit()
+    finally:
+        db.close()
+    headers = _login_headers(client, "alice")  # token in hand; /me doesn't re-check confirmation status
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).email_confirmed = False
+        db.commit()
+    finally:
+        db.close()
+    r = client.get("/auth/me", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["grace_days_remaining"] == 0
+
+
+def test_me_grace_days_remaining_none_once_confirmed(client, fixed_code):
+    _raw_register(client)
+    client.post("/auth/confirm-email", json={"username": "alice", "password": PASSWORD, "code": fixed_code})
+    headers = _login_headers(client, "alice")
+    r = client.get("/auth/me", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["grace_days_remaining"] is None
 
 
 # ---------- email normalization ----------

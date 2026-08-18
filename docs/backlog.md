@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/15 17:44:49.528588 )
+[//]: # (+ Revised: 	2026/08/18 11:05:46.928498 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -344,37 +344,6 @@ import outcomes don't clobber each other.
   short-circuits cheaply when the cache is warm) or be moved to a
   pre-fill step before the loop if the lazy-sync guarantee matters to users
   more than the one-request penalty cost.
-
-## Bugs
-
-- **[Blocking for 1.0] Show fully up-to-date with aired episodes must not appear in "Watch Next".**
-  `list_media()` with `order_by="last_watched"` powers the "Continue Watching"
-  list. It must exclude shows where all aired episodes (`air_date <= today`) are
-  watched and only future-dated episodes remain. `_sync_progress()` computes
-  progress — it may need a companion flag (e.g. `has_unwatched_aired`) that
-  `list_media` can filter on, or the filter can be applied directly in the query.
-  A show should only re-enter the list once a new episode's air date passes.
-
-- **[Blocking for 1.0] New aired episodes should rank #2 in "Watch Next".**
-  When a tracked show has a newly aired episode the user hasn't watched, it
-  should bubble to position #2 in the list (position #1 is the most recently
-  actively-watched item — highest `last_watched_at`). Depends on the bug above
-  being fixed first — a fully caught-up show must not appear in the list at
-  all before this ordering rule is applied. The ordering currently sorts by
-  `last_watched` descending; a secondary sort key is needed for shows with at
-  least one unwatched aired episode whose `air_date > last_watched_at`.
-
-- **[Blocking for 1.0] `/auth/me` doesn't expose how many grace-period days an unconfirmed
-  account has left.** Flagged from the frontend side (renar-frontend's
-  `docs/backlog.md`, 2026-07-30 sweep): `confirm_email_view.py`'s
-  `login_reminder`/`login_blocked` copy always shows the *full*
-  `SiteSettings.email_confirmation_grace_days` value ("you have 7 days
-  left") since the frontend has no way to compute the actual remaining
-  count — it knows `days` as a hardcoded mirror constant, not
-  `user.created_at`. A `grace_days_remaining`-style field on `UserOut`
-  (or folded into the `email_not_confirmed` 403's detail) would let the
-  frontend show the real number instead of a static one that's wrong
-  from day 2 onward.
 
 ## Features
 

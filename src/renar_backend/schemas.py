@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/08/15 17:44:49.339111
+Revised: 2026/08/18 11:05:47.380357
 """
 
 import re
@@ -159,6 +159,12 @@ class UserOut(BaseModel):
     # a voluntary, non-blocking "verify your email" action (see
     # routers/auth.py's _resend_confirmation / _confirm_email_code).
     email_confirmation_bypassed: bool = False
+    # Days left before an unconfirmed account is blocked at login — None once
+    # confirmed (nothing to count down) or when confirmation is off entirely.
+    # Computed in routers/auth.py's `me()`, not a real column; lets the
+    # frontend show the actual remaining count instead of a hardcoded mirror
+    # of the grace-period constant (see renar-frontend's confirm_email_view.py).
+    grace_days_remaining: int | None = None
     verified: bool = False
     verification_requested: bool = False
     badge: str | None = None
