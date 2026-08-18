@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/17 17:05:33.894226 )
+[//]: # (+ Revised: 	2026/08/18 12:16:48.657427 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -1211,6 +1211,33 @@ rows from each item's latest `episode_watches.watched_at` (falling back
 to `updated_at`) specifically so this rollout didn't make every
 pre-existing in-progress show read as "never watched" and vanish from
 the ordering until the user happened to watch something new.
+
+**Fully caught-up shows are excluded, live, not via the `status` column:**
+`order_by=last_watched` additionally drops any `tv_show` where every
+aired episode has been watched — `_unwatched_aired_episode_clause()`
+(`routers/media.py`) is a correlated `EXISTS` against `Episode`/
+`EpisodeWatch` checked at query time, not a stored flag. A cached
+`LibraryEntry.status` of `watching` only changes on a write (a watch
+event, a manual status edit); it says nothing about whether a new
+episode aired since the user last opened the app, so a boolean column
+would go stale the moment time passes without the user doing anything.
+The clause is guarded by `_known_aired_episode_clause()` so a show with
+zero synced `Episode` rows (season data never pulled) is never excluded
+for lack of evidence, and films — which have no `Episode` concept at all
+— are never subject to the rule regardless of their own data.
+
+**New-episode ranking bumps to position #2, not by re-sorting on air
+date:** a show with an aired-but-unwatched episode newer than the show's
+own `last_watched_at` gets a `has_new_episode` flag from the same live
+`EXISTS` check (`newer_than_last_watched=True`), and the result set is
+re-ranked in Python: the caller's actual most-recently-watched item
+always stays first, everything else is stably sorted by
+`has_new_episode` descending. An old backlog episode the user just
+hasn't caught up on yet (aired *before* their last watch) does not
+count as "new" and doesn't move the show. Re-ranking happens after the
+fully-caught-up exclusion and before the `limit` slice, so a show only
+bumped into view by the exclusion becoming false can still win the #2
+slot the same query.
 
 ### `update_media` rejects TV-only fields on a film
 

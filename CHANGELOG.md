@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/17 17:29:53.347082 )
+[//]: # (+ Revised: 	2026/08/18 12:15:06.372463 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.13.0] - 2026-08-18
+
+### Added
+
+- `GET /auth/me` now returns `grace_days_remaining` for unconfirmed
+  accounts (`null` once confirmed), so the frontend can show the
+  account's actual remaining grace period instead of a static default.
+
+### Fixed
+
+- `GET /media?status_filter=watching&order_by=last_watched` ("Watch
+  Next"): a tv_show fully caught up on everything aired so far no
+  longer lingers in the list — it now drops out until a new episode
+  actually airs. Shows with no synced episode data, and films (which
+  have no episode concept), are never affected by this rule.
+- Same endpoint: a show with a genuinely new unwatched episode (aired
+  after the show's own `last_watched_at`) now bubbles to position #2,
+  right after whatever the user most recently actively watched, instead
+  of sorting purely by last-watched time. An old backlog episode the
+  user simply hasn't gotten to yet does not trigger this bump.
 
 ## [0.12.0] - 2026-08-17
 
