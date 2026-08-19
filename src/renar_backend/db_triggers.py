@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 09:54:55.646441
-Revised: 2026/07/21 09:51:02.775820
+Revised: 2026/08/18 17:25:24.090648
 
 Postgres functions/triggers that keep denormalized aggregate columns in sync
 at the database level — see docs/design-decisions.md, "users.total_watch_minutes:

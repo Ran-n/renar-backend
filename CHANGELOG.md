@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/18 12:15:06.372463 )
+[//]: # (+ Revised: 	2026/08/19 14:11:12.311332 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.14.0] - 2026-08-19
+
+### Added
+
+- `Title` now caches `imdb_id` and `wikidata_id`, synced from TMDB's
+  `external_ids` alongside the existing details fetch (no extra API
+  call) — groundwork for a future external ratings source (OMDb) and
+  per-language Wikipedia links, tracked in `docs/backlog.md`.
+- `Title.tvdb_id` is now also refreshed from that same TMDB payload on
+  every details sync (previously only ever set via the TV Time import's
+  TVDB fallback), collision-guarded against its unique index the same
+  way `catalog/titles.py`'s `backfill_title_tvdb_id` already is.
+- TheTVDB is now a genuine fallback *identity*, not just a name source for
+  a retried TMDB search: when a show's TMDB match fails through every
+  avenue (crosswalk, TVDB-name retry, plain title search) and
+  `TVDB_API_KEY` is configured, the show is tracked under `Title.tvdb_id`
+  with poster, overview, status, runtime, and episode list sourced
+  directly from TheTVDB instead of sitting fully blank. TMDB always wins
+  the moment it resolves — see `docs/design-decisions.md`.
+- `PATCH /media/{id}` accepts an optional `tmdb_id` to manually relink an
+  unmatched library entry (`_relink_tmdb` in `routers/media.py`) — the
+  backend half of the frontend's "Link to catalog" dialog shipped in
+  renar-frontend 0.17.0.
+- `unmatched_title_retry`: a periodic background task (`task_runs.py` /
+  `social/notifier.py`, every 6h by default) that re-attempts a TMDB match
+  for every shared `Title` still unmatched, regardless of which user's
+  import created it or whether they ever import again.
+- `tmdb_get` now retries a 429/500/502/503/504 or network error up to 3
+  attempts in place (honoring `Retry-After`, capped at 8s) before raising,
+  instead of permanently degrading the row on a transient failure.
+- Expanded test suite: new pytest markers (`integration`, `smoke`,
+  `regression`, `contract`, `property`, `snapshot`, `security`, `load`,
+  `mutation`, `fuzz`) covering real-process boot, property/fuzz-driven
+  validation, snapshot regression, SAST + dependency scanning (bandit,
+  pip-audit), and headless load testing (locust); see `README.md` for how
+  to select each.
+
+### Fixed
+
+- TV Time import reconciliation now keys the "already in library" lookup
+  on the raw source name instead of the TMDB-resolved title — a later
+  re-import that resolves a match TMDB's title text differs from (language,
+  punctuation, capitalization) was silently creating a duplicate
+  `LibraryEntry` instead of healing the earlier unmatched row.
 
 ## [0.13.0] - 2026-08-18
 

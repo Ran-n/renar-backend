@@ -1,0 +1,14 @@
+[
+  "genres",
+  "media_type",
+  "overview",
+  "poster_url",
+  "runtime_minutes",
+  "show_status",
+  "tagline",
+  "title",
+  "tmdb_id",
+  "total_episodes",
+  "total_seasons",
+  "year"
+]

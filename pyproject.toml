@@ -1,6 +1,6 @@
 [project]
 name = "renar-backend"
-version = "0.13.0"
+version = "0.14.0"
 description = "FastAPI backend for Renar — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]
@@ -27,7 +27,7 @@ dependencies = [
 be = "renar_backend.__main__:run"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "hypothesis>=6.100", "bandit>=1.7", "pip-audit>=2.7", "locust>=2.31", "mutmut>=3.2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -43,6 +43,54 @@ filterwarnings = [
     # there's nothing to migrate to. Silence until it actually exists.
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:UserWarning",
 ]
+markers = [
+    "integration: boots the real app on a real socket (tests/integration/) instead of TestClient's in-process ASGI transport",
+    "smoke: fast post-boot sanity check against a live server (tests/integration/)",
+    "regression: curated critical-path subset, re-run after any change",
+    "property: hypothesis-driven property-based test",
+    "fuzz: hypothesis-driven fuzz test feeding malformed/random input at an API endpoint",
+    "snapshot: compares a derived value against a checked-in baseline (tests/snapshots/); re-run with UPDATE_SNAPSHOTS=1 to accept an intentional change",
+    "security: SAST (bandit) + dependency vulnerability (pip-audit) scan — hits the network, kept out of the default run",
+    "load: headless locust run against a live_server (tests/integration/, tests/load/locustfile.py)",
+]
+# Spins up a real uvicorn process per session — seconds, not milliseconds —
+# so it's kept out of the default `pytest` run. Select explicitly:
+# `pytest -m integration` (works with any path filter too). security also
+# needs network access (pip-audit queries a vulnerability database), so
+# it's excluded the same way — `pytest -m security` to run it.
+addopts = "-m \"not integration and not security\""
+
+[tool.bandit]
+# B608 (hardcoded_sql_expressions) false-positives on db_triggers.py's
+# WATCH_MINUTES_TRIGGER_SQL/USER_COUNT_TRIGGER_SQL: f-strings, but the only
+# interpolated values are this module's own compile-time constants
+# (DEFAULT_*_RUNTIME), never user input — and bandit attributes the finding
+# to the f-string's opening `f"""` line, where a trailing `# nosec` comment
+# would corrupt the literal it opens, so this is a project-wide skip rather
+# than a per-line suppression. tests/test_security_scan.py re-asserts B608
+# doesn't appear anywhere else.
+skips = ["B608"]
+
+[tool.mutmut]
+# Mutation testing: mutates the listed source, re-runs `runner` per mutant,
+# and reports which mutants survived (a test suite that still passes despite
+# the code being subtly wrong — a gap the suite doesn't actually cover).
+#
+# UNVERIFIED on this machine: mutmut has no native Windows support (WSL/Linux
+# only — confirmed by running `mutmut --help` here, which refuses outright
+# and points at https://github.com/boxed/mutmut/issues/397) and this
+# environment has no WSL installed. This config was written from mutmut's
+# documented pyproject.toml schema, not proven by an actual run — verify it
+# under WSL or Linux CI before trusting its results.
+#
+# Scoped to models.py + schemas.py rather than the whole src tree: full-repo
+# mutation testing reruns the suite (real Postgres schema per test) once per
+# mutant, which is impractically slow — start with the modules that already
+# have the most example+property coverage (tests/test_property.py,
+# tests/test_titles.py) and widen paths_to_mutate deliberately from there.
+paths_to_mutate = ["src/renar_backend/models.py", "src/renar_backend/schemas.py"]
+tests_dir = ["tests/"]
+runner = "python -m pytest -x -q -m \"not integration and not security and not load\""
 
 [tool.ruff]
 src = ["src"]

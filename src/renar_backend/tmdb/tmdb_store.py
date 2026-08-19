@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.543016
-Revised: 2026/07/29 17:38:11.922503
+Revised: 2026/08/19 12:36:30.039794
 
 Write-through persistence for TMDB data (see TmdbCache in models.py).
 
@@ -143,6 +143,30 @@ def sync_title_details(db: Session, title: Title, data: dict) -> None:
     original = (data.get("original_title") or data.get("original_name") or "").strip()[:300]
     if original:
         title.original_title = original
+    external_ids = data.get("external_ids") or {}
+    imdb_id = (external_ids.get("imdb_id") or data.get("imdb_id") or "").strip()
+    if imdb_id:
+        title.imdb_id = imdb_id
+    wikidata_id = (external_ids.get("wikidata_id") or "").strip()
+    if wikidata_id:
+        title.wikidata_id = wikidata_id
+    tmdb_tvdb_id = external_ids.get("tvdb_id")
+    if tmdb_tvdb_id and tmdb_tvdb_id != title.tvdb_id:
+        # tvdb_id is unique-indexed identity (also owned by the TV Time
+        # import fallback, users/tvtime_import.py) — nested + caught so a
+        # rare collision with another title's tvdb_id just keeps the old
+        # value instead of failing the whole details sync.
+        try:
+            with db.begin_nested():
+                title.tvdb_id = tmdb_tvdb_id
+                db.flush()
+        except IntegrityError:
+            _log.info(
+                "tvdb_id=%s from TMDB collides with another title; keeping existing tvdb_id=%s for %r",
+                tmdb_tvdb_id,
+                title.tvdb_id,
+                title.title,
+            )
     if data.get("poster_path"):
         title.poster_url = f"{POSTER_BASE}{data['poster_path']}"
     if data.get("backdrop_path"):
@@ -209,9 +233,13 @@ def cached_tmdb(
             return row.payload
 
     locale = TMDB_LOCALE.get(language)
-    params = {"language": locale} if locale else None
+    params = {}
+    if locale:
+        params["language"] = locale
+    if kind == "details":
+        params["append_to_response"] = "external_ids"
     try:
-        data = tmdb_get(path, params)
+        data = tmdb_get(path, params or None)
     except HTTPException as exc:
         if row is not None:
             _log.warning("TMDB unavailable (%s), serving stored copy of %s: %s", exc.detail, path, exc.status_code)
@@ -297,7 +325,10 @@ def refresh_title_details(db: Session, title: Title) -> None:
     if title.tmdb_id is None or title.media_type.value not in TMDB_KIND:
         return
     try:
-        data = tmdb_get(f"/{TMDB_KIND[title.media_type.value]}/{title.tmdb_id}")
+        data = tmdb_get(
+            f"/{TMDB_KIND[title.media_type.value]}/{title.tmdb_id}",
+            {"append_to_response": "external_ids"},
+        )
     except HTTPException as exc:
         _log.warning("details sync skipped for title %s (tmdb %s): %s", title.id, title.tmdb_id, exc.detail)
         return

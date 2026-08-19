@@ -98,6 +98,15 @@ TASKS: list[TaskSpec] = [
         "General",
         2880,
     ),
+    TaskSpec(
+        "unmatched_title_retry",
+        "Unmatched title retry",
+        "Re-attempt a TMDB match for every title that came out of an import "
+        "unmatched (no poster, no episode tracking), so a stuck entry heals on "
+        "its own instead of needing the user to re-import or relink it by hand.",
+        "General",
+        360,
+    ),
 ]
 
 _TASKS_BY_KEY = {t.key: t for t in TASKS}

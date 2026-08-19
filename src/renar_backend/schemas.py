@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/08/18 11:05:47.380357
+Revised: 2026/08/18 17:42:31.749953
 """
 
 import re
@@ -28,6 +28,18 @@ def _password_fits_bcrypt(password: str) -> str:
     return password
 
 
+def _no_nul_bytes(value: str) -> str:
+    # Postgres text columns reject NUL (0x00) outright — a username
+    # containing one would otherwise reach the DB layer as an unhandled
+    # DataError (500) on the very next query that filters by it, both here
+    # at registration (the username-taken check) and at login (routers/
+    # auth.py's login(), which guards form.username the same way since it
+    # bypasses this schema entirely — see tests/test_fuzz.py).
+    if "\x00" in value:
+        raise ValueError("must not contain NUL bytes")
+    return value
+
+
 # ---------- auth ----------
 
 
@@ -41,6 +53,7 @@ class UserCreate(BaseModel):
     turnstile_token: str = ""
 
     _password_len = field_validator("password")(_password_fits_bcrypt)
+    _username_no_nul = field_validator("username")(_no_nul_bytes)
 
 
 class RegistrationStatus(BaseModel):
@@ -350,6 +363,10 @@ class LibraryEntryCreate(BaseModel):
 
 
 class LibraryEntryUpdate(BaseModel):
+    # relink an unmatched entry (Title.tmdb_id is None) to a TMDB match the
+    # user picked in the "Link to catalog" search — see update_media's
+    # _relink_tmdb. Not usable to change an already-linked entry's match.
+    tmdb_id: int | None = Field(default=None, ge=1)
     url: str | None = Field(default=None, max_length=500)
     status: WatchStatus | None = None
     rating: int | None = Field(default=None, ge=1, le=100)

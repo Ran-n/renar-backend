@@ -2,13 +2,26 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.395578
-Revised: 2026/08/04 08:18:59.045976
+Revised: 2026/08/18 17:10:43.917361
 
 Media library CRUD, filters, ownership, and community ratings.
 """
 
+import pytest
+
 from renar_backend.database import SessionLocal
 from renar_backend.models import EpisodeWatch, Notification, WatchEvent
+from renar_backend.tmdb import tmdb_store
+
+pytestmark = pytest.mark.regression
+
+RAW_FILM = {
+    "title": "Lanterns",
+    "release_date": "2024-01-01",
+    "runtime": 100,
+    "genres": [{"name": "Drama"}],
+    "poster_path": "/lanterns.jpg",
+}
 
 
 def _create(client, headers, **overrides) -> dict:
@@ -292,6 +305,51 @@ def test_patch_other_users_item_not_found(client, alice, bob):
     item = _create(client, alice_headers)
     r = client.patch(f"/media/{item['id']}", json={"rating": 1}, headers=bob_headers)
     assert r.status_code == 404
+
+
+# ---------- relink (tmdb_id) ----------
+
+
+def test_patch_relink_unmatched_entry_fetches_and_backfills(client, alice, monkeypatch):
+    _, headers = alice
+    item = _create(client, headers, title="Lanterns")  # no tmdb_id: unmatched, as an import would leave it
+    assert item["tmdb_id"] is None
+
+    monkeypatch.setattr(tmdb_store, "tmdb_get", lambda path, params=None, cache=True: RAW_FILM)
+    r = client.patch(f"/media/{item['id']}", json={"tmdb_id": 501}, headers=headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["tmdb_id"] == 501
+    assert body["poster_url"] and "lanterns.jpg" in body["poster_url"]
+    assert body["runtime_minutes"] == 100
+
+
+def test_patch_relink_reuses_existing_title_without_tmdb_fetch(client, alice, bob):
+    _, alice_headers = alice
+    _, bob_headers = bob
+    tracked = _create(client, bob_headers, title="No One Could Live Here", tmdb_id=501)
+    unmatched = _create(client, alice_headers, title="Aqui no hay quien viva")
+
+    r = client.patch(f"/media/{unmatched['id']}", json={"tmdb_id": tracked["tmdb_id"]}, headers=alice_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["tmdb_id"] == 501
+
+
+def test_patch_relink_conflicts_with_existing_duplicate(client, alice):
+    _, headers = alice
+    tracked = _create(client, headers, title="No One Could Live Here", tmdb_id=501)
+    unmatched = _create(client, headers, title="Aqui no hay quien viva")
+
+    r = client.patch(f"/media/{unmatched['id']}", json={"tmdb_id": tracked["tmdb_id"]}, headers=headers)
+    assert r.status_code == 409
+    assert "No One Could Live Here" in r.json()["detail"]
+
+
+def test_patch_relink_already_linked_entry_rejected(client, alice):
+    _, headers = alice
+    item = _create(client, headers, tmdb_id=501)
+    r = client.patch(f"/media/{item['id']}", json={"tmdb_id": 999}, headers=headers)
+    assert r.status_code == 422
 
 
 # ---------- delete ----------

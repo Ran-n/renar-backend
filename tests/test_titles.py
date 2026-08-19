@@ -2,14 +2,18 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/07/10 08:47:48.374007
+Revised: 2026/08/18 17:10:44.010775
 
 Shared Title resolution and normalized genres: one Genre row per name,
 linked to titles through title_genres, round-tripped as list[str].
 """
 
+import pytest
+
 from renar_backend.database import SessionLocal
 from renar_backend.models import Genre, Title
+
+pytestmark = pytest.mark.regression
 
 
 def _create(client, headers, **overrides) -> dict:

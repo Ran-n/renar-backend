@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/07/27 16:39:30.147559
+Revised: 2026/08/18 18:07:58.731691
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -18,6 +18,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .. import task_runs
+from ..catalog.titles import backfill_title_tmdb_id
 from ..database import SessionLocal
 from ..models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus, utcnow
 from ..tmdb.tmdb_http import tmdb_get
@@ -228,6 +229,93 @@ def resync_tmdb_metadata_once() -> int:
         db.close()
 
 
+def retry_unmatched_titles(
+    db: Session,
+    search_tv=None,
+    search_movie=None,
+    find_by_tvdb=None,
+    fetch_show=fetch_show,
+    fetch_film=fetch_film,
+    pace_seconds: float = 0.05,
+) -> int:
+    """Re-attempt a TMDB match for every shared Title still unmatched
+    (`tmdb_id` is None) — an unmatched Title otherwise only heals via the
+    retry/backoff already inside `tmdb_get` (fixes a blip within one
+    import), a later re-import happening to resolve it (see
+    `catalog/titles.py`'s `backfill_title_tmdb_id` and
+    `users/tvtime_import.py`'s raw-name-keyed reconciliation), or the show
+    having a TheTVDB fallback identity already (`title_row.tvdb_id` — see
+    `users/tvtime_import.py`'s TVDB fallback) — none of that helps a title
+    that keeps failing on all of the above with nobody ever re-importing. A
+    Title is shared across every user tracking it, so one successful match
+    here fixes every affected library entry at once, not just one
+    account's.
+
+    When a title already carries a `tvdb_id`, `find_by_tvdb` (TMDB's own
+    `/find` crosswalk by TVDB id) is tried before the plain name search —
+    far more reliable, and already the identity TV Time gave us. `search_tv`
+    /`search_movie`/`find_by_tvdb` default to the same matchers the TV Time
+    importer uses (lazy-imported to avoid a load-time cycle); overridable
+    for tests. A movie that now resolves as a TV show is left alone — a
+    genuine media_type change isn't something this can safely rewrite in
+    place, so it's left for the manual "Link to catalog" relink instead.
+    """
+    if search_tv is None or search_movie is None or find_by_tvdb is None:
+        from ..users.tvtime_import import _find_tv_by_tvdb, _search_movie, _search_tv  # avoids a load-time cycle
+
+        search_tv = search_tv or _search_tv
+        search_movie = search_movie or _search_movie
+        find_by_tvdb = find_by_tvdb or _find_tv_by_tvdb
+
+    titles = db.query(Title).filter(Title.tmdb_id.is_(None)).all()
+    fixed = 0
+    for title_row in titles:
+        try:
+            if title_row.media_type == MediaType.tv_show:
+                found = find_by_tvdb(str(title_row.tvdb_id)) if title_row.tvdb_id else None
+                found = found or search_tv(title_row.title)
+            else:
+                found, is_tv = search_movie(title_row.title, str(title_row.year) if title_row.year else None)
+                if is_tv:
+                    continue
+        except Exception as exc:
+            _log.warning("TMDB retry search failed for title %s (%r): %s", title_row.id, title_row.title, exc)
+            continue
+        if found is None:
+            continue
+
+        tmdb_id = found["id"]
+        name_field = "name" if title_row.media_type == MediaType.tv_show else "title"
+        resolved_title = found.get(name_field) or title_row.title
+        backfill_title_tmdb_id(db, title_row, tmdb_id, title=resolved_title)
+        if title_row.tmdb_id != tmdb_id:
+            db.rollback()  # lost a race to another writer claiming this tmdb_id first
+            continue
+        db.commit()
+
+        try:
+            fetch = fetch_show if title_row.media_type == MediaType.tv_show else fetch_film
+            data = fetch(tmdb_id)
+            store_details(db, title_row, data)
+            db.commit()
+        except Exception as exc:
+            # identity (tmdb_id, title) is already saved above; only the
+            # richer metadata (genres, overview, ...) is missing this round
+            _log.warning("TMDB details fetch failed after relinking title %s (tmdb %s): %s", title_row.id, tmdb_id, exc)
+        fixed += 1
+        if pace_seconds:
+            time.sleep(pace_seconds)  # spread requests instead of bursting TMDB
+    return fixed
+
+
+def retry_unmatched_titles_once() -> int:
+    db = SessionLocal()
+    try:
+        return retry_unmatched_titles(db)
+    finally:
+        db.close()
+
+
 def sync_episode_history_once() -> int:
     db = SessionLocal()
     try:
@@ -374,14 +462,32 @@ async def _tmdb_metadata_resync_loop() -> None:
         await asyncio.sleep(task_runs.get_interval_minutes("tmdb_metadata_resync") * 60)
 
 
+async def _unmatched_title_retry_loop() -> None:
+    await asyncio.sleep(15)
+    while True:
+        if not task_runs.is_enabled("unmatched_title_retry"):
+            _log.info("unmatched title retry skipped: disabled")
+        else:
+            started = utcnow()
+            try:
+                n = await asyncio.to_thread(retry_unmatched_titles_once)
+                _log.info("unmatched title retry done: %d titles fixed", n)
+                task_runs.record_run("unmatched_title_retry", started, "ok", f"{n} titles fixed")
+            except Exception:
+                _log.exception("unmatched title retry failed")
+                task_runs.record_run("unmatched_title_retry", started, "error", "retry failed, see server logs")
+        await asyncio.sleep(task_runs.get_interval_minutes("unmatched_title_retry") * 60)
+
+
 def start_periodic_tasks() -> list[asyncio.Task]:
-    """Launch the six independent per-task loops; each is paused/rescheduled
+    """Launch the seven independent per-task loops; each is paused/rescheduled
     without affecting the others (see task_runs.py / admin Periodic Tasks page)."""
     return [
         asyncio.create_task(_episode_check_loop()),
         asyncio.create_task(_episode_history_sync_loop()),
         asyncio.create_task(_film_check_loop()),
         asyncio.create_task(_tmdb_metadata_resync_loop()),
+        asyncio.create_task(_unmatched_title_retry_loop()),
         asyncio.create_task(_email_confirmation_cleanup_loop()),
         asyncio.create_task(_export_cleanup_loop()),
     ]

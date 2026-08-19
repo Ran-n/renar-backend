@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/08/18 11:05:47.076244
+Revised: 2026/08/18 12:42:15.332583
 """
 
 import logging
@@ -12,7 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from sqlalchemy import Date, and_, cast, exists, func, or_
 from sqlalchemy.orm import Session
 
-from ..catalog.titles import WITH_TITLE_GENRES, find_or_create_title, find_title
+from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, find_or_create_title, find_title
 from ..database import get_db
 from ..media.image_service import gc_image, image_row_for
 from ..media.image_utils import decode_b64_image, normalize_jpeg
@@ -41,9 +41,16 @@ from ..schemas import (
     RatingsBatchRequest,
     RewatchCreate,
 )
-from ..tmdb.tmdb_store import localized_titles, refresh_title_details, sync_show_episodes, warm_title_translations
+from ..tmdb.tmdb_http import TMDB_KIND
+from ..tmdb.tmdb_store import (
+    cached_tmdb,
+    localized_titles,
+    refresh_title_details,
+    sync_show_episodes,
+    warm_title_translations,
+)
 from ..users.auth import get_current_user, require_premium
-from .tmdb import fetch_poster_bytes
+from .tmdb import _map_details, fetch_poster_bytes
 
 router = APIRouter(prefix="/media", tags=["media"])
 _log = logging.getLogger(__name__)
@@ -454,6 +461,54 @@ def _mark_all_aired_watched(item: LibraryEntry, db: Session) -> None:
     _sync_progress(item, db)
 
 
+def _relink_tmdb(item: LibraryEntry, tmdb_id: int, db: Session) -> None:
+    """Point an unmatched entry (Title.tmdb_id is None) at a TMDB match the
+    user picked via the "Link to catalog" search on the title page — the
+    manual fix for entries that came out of an import with no match (see
+    docs/backlog.md's "Transient TMDB failures permanently degrade an
+    entry"). Only usable while the entry is still unmatched; already-linked
+    entries can't be re-pointed through here.
+    """
+    title_row = item.title_ref
+    if title_row.tmdb_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Entry is already linked to a catalog title",
+        )
+    existing = find_title(db, item.media_type, tmdb_id, None)
+    if existing is not None:
+        dup = db.query(LibraryEntry).filter_by(user_id=item.user_id, title_id=existing.id).first()
+        if dup is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"You already have {dup.title_ref.title!r} tracked in your library under that catalog "
+                    "match — remove one of the two duplicate entries instead of relinking."
+                ),
+            )
+        item.title_id = existing.id
+        db.flush()
+        return
+    kind = TMDB_KIND[item.media_type.value]
+    data = cached_tmdb(db, item.media_type, tmdb_id, "details", f"/{kind}/{tmdb_id}")
+    details = _map_details(item.media_type.value, tmdb_id, data)
+    backfill_title_tmdb_id(
+        db,
+        title_row,
+        tmdb_id,
+        title=details.get("title"),
+        poster_url=details.get("poster_url"),
+        runtime_minutes=details.get("runtime_minutes"),
+        total_episodes=details.get("total_episodes"),
+    )
+    if title_row.tmdb_id != tmdb_id:
+        # lost a race to another request claiming the same tmdb_id first
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That title was just linked by another request — refresh and try again",
+        )
+
+
 @router.patch("/{item_id}", response_model=LibraryEntryOut)
 def update_media(
     item_id: int,
@@ -463,6 +518,10 @@ def update_media(
 ):
     item = _get_owned_item(item_id, user, db)
     changed = data.model_dump(exclude_unset=True)
+    if "tmdb_id" in changed:
+        tmdb_id = changed.pop("tmdb_id")
+        if tmdb_id is not None:
+            _relink_tmdb(item, tmdb_id, db)
     if item.media_type == MediaType.film:
         tv_only = {"episodes_watched", "current_season", "current_episode"} & changed.keys()
         if tv_only:
