@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/18 12:16:48.657427 )
+[//]: # (+ Revised: 	2026/08/19 12:36:49.479998 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -39,6 +39,151 @@ normalized `title_key` derived from the entered title. This lets manually
 entered items (no TMDB match) still dedupe and share a `Title` row across
 users, instead of every user's manual entry creating its own untracked
 title.
+
+### Import reconciliation keys on the raw source name, not the resolved title
+
+`_process_show`/`_process_movie` (`users/tvtime_import.py`) look up whether
+a row is already in the user's library using an identity built from the
+*raw* TV Time export name (`normalize_title_key(name)`), not the title TMDB
+resolved this run (`final_title`).
+
+**Why:** when a row's TMDB match fails, the created `Title` has no
+`tmdb_id`, so its `title_key` is `normalize_title_key(name)` — `final_title
+== name` in that branch (see `_process_show`'s fallback). A later re-import
+where TMDB *now* resolves a match produces a `final_title` that's TMDB's
+own text — routinely a different language, punctuation, or capitalization
+(TV Time's "Aqui no hay quien viva" vs. TMDB's "No One Could Live Here").
+Looking the row up by that resolved text missed the existing unmatched
+entry entirely, so re-importing after a transient failure cleared up didn't
+heal the row — it silently created a duplicate `LibraryEntry` for the same
+show. `name` is stable across re-imports of the same account, so keying on
+it instead finds the earlier unmatched row reliably; a genuinely new title
+still gets created under its resolved identity as before, since the lookup
+just misses `existing_map` in that case too.
+
+`backfill_title_tmdb_id` (`catalog/titles.py`) also now takes an optional
+`title` and overwrites the row's stored title unconditionally (not just
+filling a gap, like its other metadata params) when given — an unmatched
+row's title is only ever the raw source text, and a newly resolved
+`tmdb_id` means the caller's resolved title is strictly better information,
+not just a fallback. Without this, a reconciled row kept displaying its
+original raw/untranslated name forever even after gaining a `tmdb_id`.
+
+### TheTVDB as a genuine fallback identity, not just a name source
+
+Before this, TheTVDB v4 API (optional, `TVDB_API_KEY`) was only ever used to
+fetch a show's name/aliases and retry them as a TMDB *search query* —
+every path still dead-ended at TMDB, so a real TMDB outage (or a title TMDB
+simply doesn't carry) left the row fully unmatched no matter what TVDB had.
+Now, when every TMDB avenue for a show has failed (`_match_show` in
+`users/tvtime_import.py`: crosswalk by tvdb_id, TVDB-name retry, plain
+title search), TVDB's own extended record and episode list are fetched
+directly and used to track the show under `Title.tvdb_id` instead —
+poster, overview, status, runtime, and a real episode list, all sourced
+from TVDB.
+
+**Why this is safe to add as a second identity dimension:** `tvdb_id` sits
+between `tmdb_id` and `title_key` in priority (`catalog/titles.py`'s
+`find_title`/`find_or_create_title`) — `uq_title_tvdb` mirrors
+`uq_title_tmdb`'s partial-unique-index shape exactly. It's always None for
+films (TV Time only supplies a TVDB id for shows), and a Title with a
+`tmdb_id` is never touched by the TVDB path at all (`backfill_title_tvdb_id`
+in `catalog/titles.py` is a no-op once either identity exists). TMDB always
+wins the moment it resolves — `backfill_title_tmdb_id` upgrades a
+TVDB-only Title in place (tmdb_id set, `title`/poster/episodes refreshed
+from TMDB, `tvdb_id` just left in place afterward as a harmless crosswalk,
+never read again).
+
+**Why TV Time's `tv_show_id` is used as the identity even when the TVDB
+fetch itself fails:** it *is* a TheTVDB series id — a stable per-show
+identifier TV Time exports on every row, independent of whether this
+particular run's TVDB API call happened to succeed. Keying the
+`existing_map` lookup on it (rather than only on a successfully-fetched
+`tvdb_fallback`) is what lets a later run that resolves straight to TMDB
+find the entry an earlier TVDB-fallback run created — see the comment on
+`resolved_tvdb_id` in `_process_show`. Without this, only two TVDB-fallback
+runs in a row would reconcile with each other; a TVDB-fallback run
+followed by a straight-to-TMDB run would not, recreating the exact
+duplicate-on-reimport bug this feature exists to avoid.
+
+**Deliberately thin, not a second catalog source:** `tvdb/tvdb_store.py`
+fetches only what's needed to stop an entry from being fully blank —
+name, poster, overview, status, runtime, and the first page of episodes
+(TVDB paginates that endpoint; a show large enough to need page 2 still
+gets its early seasons instead of none, and the rest once TMDB resolves).
+No genre list, no alternate artwork picker, no persistent cache layer like
+`tmdb_store.py`'s `tmdb_cache` table — TVDB here is a stopgap, not a
+parallel catalog to maintain.
+
+`social/notifier.py`'s `retry_unmatched_titles` (below) also prefers the
+TMDB `/find` crosswalk by `tvdb_id` over a plain name search whenever a
+title already has one — more reliable, and it's the identity TV Time gave
+us in the first place.
+
+### Unmatched titles retry automatically — no dependency on the user re-importing
+
+`unmatched_title_retry` (`task_runs.py`'s `TaskSpec`, implemented as
+`retry_unmatched_titles` in `social/notifier.py`) is a periodic background
+task, every 6h by default, that re-attempts a TMDB match for every shared
+`Title` still unmatched (`tmdb_id IS NULL`) — regardless of which user's
+import created it, and regardless of whether that user ever imports again.
+
+**Why:** the other two mitigations for an unmatched title both depend on
+something happening again — `tmdb_get`'s retry/backoff only covers a blip
+*within* one import call, and the raw-name-keyed reconciliation (above)
+only fires on a *later re-import*. A user who imports once, hits a genuine
+TMDB outage for one show, and never imports again would otherwise have that
+one entry stuck broken forever, with "Link to catalog" as the only way out
+— fine as a manual escape hatch, not acceptable as the *only* path to a fix
+for something that isn't the user's fault. Since a `Title` is shared across
+every user tracking it (see "Title identity" above), one successful match
+here fixes every affected library entry at once, not just the account that
+happened to hit the failure.
+
+**Why a periodic sweep and not a retry queue:** the codebase already has a
+periodic-task mechanism (`task_runs.py`) used identically by
+`tmdb_metadata_resync` and friends — independently enabled/scheduled,
+admin-visible run status, no new infrastructure. A dedicated retry queue
+(scheduled backoff per failed title, exponential intervals, ...) would
+handle a persistently-unmatched title more efficiently, but a title that
+never matches is rare enough (most failures are transient) that re-scanning
+the full unmatched set every 6h is simple and cheap enough not to justify
+that complexity — the same trade the existing periodic tasks already make.
+
+**What it still can't do:** heal a *pre-existing duplicate pair* (an
+unmatched entry and an already-correctly-matched entry for the same show,
+both already in a user's library) — resolving the same `tmdb_id` a second
+time hits `uq_title_tmdb` and is skipped, same as `_relink_tmdb`'s 409 path.
+See `docs/backlog.md`'s note on this. It also skips a movie that now
+resolves as a TV show (or vice versa) rather than rewriting `media_type` in
+place — a real media-type correction, left for manual relink.
+
+### Manual relink for an unmatched title: `PATCH /media/{id}` with `tmdb_id`
+
+An entry can end up with `tmdb_id = None` (no poster, no episode tracking)
+when an import's TMDB lookup fails at the time — see `docs/backlog.md`'s
+"Transient TMDB failures permanently degrade an entry". `PATCH /media/{id}`
+accepts an optional `tmdb_id` to fix this by hand: `_relink_tmdb` in
+`routers/media.py` upgrades the entry's `Title` row in place via the
+existing `backfill_title_tmdb_id` (same helper the import reconcile path
+uses), fetching fresh TMDB details for the poster/runtime/episode-count
+fields. The frontend surfaces this as a "Link to catalog" search dialog
+(`views/title/relink_dialog.py`) on the title page's empty episodes
+section.
+
+**Why not just let the import path fix itself eventually:** re-import only
+backfills when the row's title text still matches exactly; a title that was
+imported in one language and would now resolve in another (or just never
+gets re-imported) stays stuck forever with no way to fix it from the UI.
+
+**Duplicate case is deliberately not auto-merged:** if the chosen `tmdb_id`
+already belongs to a `Title` the user has a *different* `LibraryEntry` for
+(the classic duplicate-on-reimport case), relinking would violate
+`uq_user_title`. Rather than silently merging watch history, ratings, and
+rewatch counts across two entries, `_relink_tmdb` returns 409 naming the
+existing entry and leaves the user to remove the duplicate themselves —
+merging those tables correctly (which one's progress wins, whether
+`EpisodeWatch` rows dedupe cleanly) is unimplemented and out of scope here.
 
 ### Normalized schema, enforced by a guard test
 
@@ -641,6 +786,36 @@ on locally or point at `/docs` in a non-public environment.
 
 ## External integrations
 
+### TMDB retries transient failures in place, bounded
+
+`tmdb_get` (`tmdb/tmdb_http.py`) retries a 429/500/502/503/504 or network
+error up to 3 attempts total before raising, in the same call — not a
+background job, not queued for later. A 429's `Retry-After` header is
+honored (capped at 8s so a single response can't stall the caller for as
+long as TMDB asks); anything else backs off exponentially from 0.5s. 401
+and 404 are never retried — they're not transient.
+
+**Why:** this one function serves both live user requests (Explore search,
+title details) and the TV Time importer's 8-worker matching burst
+(`users/tvtime_import.py`, `MATCH_WORKERS`), which is exactly the kind of
+traffic pattern that trips a rate limit. Before this, any transient failure
+during import permanently degraded the row — no `tmdb_id`, poster, or
+episode counts, ever, unless a later re-import happened to retry with
+matching title text (see `docs/backlog.md`'s "Transient TMDB failures
+permanently degrade an entry"). Retrying in place fixes the common case
+(a rate-limit blip clears within a second or two) without adding a retry
+queue or background job. It doesn't fully solve the backlog item — a
+lookup that's still failing after 3 tries lands the row unmatched exactly
+as before, and the duplicate-on-reimport half of that item is unrelated to
+this.
+
+**Why bounded to 3, not more:** the same function blocks a live request
+thread. Unbounded or long retries would turn a TMDB outage into slow user-
+facing requests instead of a fast, clear failure; 3 attempts (worst case
+~1.5s of backoff, or up to 8s if TMDB's own `Retry-After` asks for more)
+was picked as tolerable added latency for a live request while still
+meaningfully improving import success under a rate-limit burst.
+
 ### TMDB responses cached in memory (6 hours)
 
 Read-only catalog responses are cached process-locally with a bounded
@@ -901,6 +1076,32 @@ The final name-search fallback exists because both TMDB's crosswalk *and*
 TheTVDB's own lookup can miss for a real, well-known show (wrong/stale TVDB
 id in the export, a merged/renamed TVDB entry, etc.) — without it, those
 shows fail to import even though a plain TMDB search finds them instantly.
+
+### `titles.imdb_id`/`titles.wikidata_id` are cached cross-references, not identity
+
+Unlike `tmdb_id`/`tvdb_id`, these two carry no unique index and are never
+used to look up or deduplicate a `Title` row — they're just facts synced
+from TMDB's `external_ids` (fetched via `append_to_response=external_ids`
+on the existing details call, `tmdb/tmdb_store.py`'s `sync_title_details`)
+so other integrations don't need their own title-matching step: `imdb_id`
+for an OMDb ratings lookup (IMDb rating + vote count, Rotten Tomatoes and
+Metacritic scores — see `docs/backlog.md`), `wikidata_id` for a per-language
+Wikipedia link via Wikidata's sitelinks.
+
+The same `external_ids` payload also carries `tvdb_id` for TV shows.
+Unlike `imdb_id`/`wikidata_id`, that column *is* unique-indexed identity
+(see above), so `sync_title_details` writes it inside a nested transaction
+and catches `IntegrityError` — the same collision-safe pattern
+`catalog/titles.py`'s `backfill_title_tvdb_id` uses — so a rare clash with
+another title's `tvdb_id` just keeps the existing value instead of failing
+the whole details sync. Both this path and the TV Time import fallback can
+therefore freely write the same column; whichever runs last wins, and a
+collision never surfaces as an error.
+
+**Why no unique index:** two `Title` rows legitimately sharing an
+`imdb_id`/`wikidata_id` isn't a data-integrity problem the way it would be
+for `tmdb_id`/`tvdb_id` — these fields don't participate in title
+resolution at all, so nothing depends on uniqueness.
 
 ## Premium accounts
 
@@ -1439,6 +1640,79 @@ and replaces the traceback with one clean info-level log line. It's served
 as a separate `asgi_app` (uvicorn's actual target) rather than wrapping
 `app` in place, so tests (`TestClient(app)`, `dependency_overrides`, ...)
 keep using the plain, unwrapped `FastAPI` instance.
+
+---
+
+## Testing
+
+### Beyond unit + integration: smoke, regression, contract, property, snapshot, security, load, mutation, fuzz
+
+The suite grew from unit tests (`tests/*.py`) plus a live-process
+integration layer (`tests/integration/`, `pytest -m integration`) to cover
+every commonly-recognized test category, each gated behind its own pytest
+marker (see `pyproject.toml`'s `markers`) so the default `pytest` run stays
+fast:
+
+- **smoke** (`tests/integration/test_smoke.py`) — the smallest possible
+  "did the deploy come up alive" check against a `live_server`.
+- **regression** — not a separate file: an existing critical-path test
+  module (`test_auth.py`, `test_media.py`, `test_titles.py`,
+  `test_premium.py`) gets `pytestmark = pytest.mark.regression` added so
+  `pytest -m regression` re-runs just the user-journey core after a change,
+  without hand-maintaining a duplicate list.
+- **contract** (renar-frontend's `tests/integration/test_contract.py`) —
+  statically parses `ApiClient`'s `self._request(...)` call sites via
+  `ast`, then checks each `(METHOD, path)` against this backend's live
+  OpenAPI schema. Needs `ENABLE_DOCS=true` on the *test* server only (see
+  renar-frontend's `tests/integration/conftest.py`'s `live_backend`
+  fixture) — production still defaults `enable_docs` to `False`.
+- **property** (`tests/test_property.py`) — hypothesis-driven invariants on
+  pure validation/normalization functions (`_password_fits_bcrypt`,
+  `_HEX_COLOR_RE`, `normalize_title_key`, `_normalize_email`) across a
+  generated input space, not hand-picked examples.
+- **snapshot** (`tests/test_snapshot.py`) — the API surface
+  (`app.routes`) and a few public schemas' field sets (`UserOut`,
+  `LibraryEntryOut`, `TitleOut`) diffed against a checked-in baseline in
+  `tests/snapshots/`; `UPDATE_SNAPSHOTS=1` accepts an intentional change.
+- **security** (`tests/test_security_scan.py`) — bandit (SAST) + pip-audit
+  (dependency vulnerabilities) run as real pytest tests, not a separate CI
+  step. False positives are suppressed project-wide via `[tool.bandit]` in
+  `pyproject.toml` (not inline — see that section's comment for why the one
+  `B608` finding in `db_triggers.py` can't take a same-line `# nosec`
+  without corrupting the SQL literal it opens).
+- **load** (`tests/integration/test_load.py` + `tests/load/locustfile.py`)
+  — a short headless locust burst against a `live_server`; asserts zero
+  failed requests and a generous p95 budget. A survives-a-burst check, not
+  a tracked benchmark.
+- **mutation** (`[tool.mutmut]` in `pyproject.toml`) — **unverified on this
+  machine**: mutmut has no native Windows support (WSL/Linux only) and this
+  environment has no WSL installed, so the config was written from
+  mutmut's documented schema but never actually run here. Scoped to
+  `models.py` + `schemas.py` (the modules with the most
+  example+property coverage) rather than the whole tree — full-repo
+  mutation testing reruns the suite (real Postgres schema per test) once
+  per mutant, which is impractically slow. Verify under WSL/Linux CI
+  before trusting its results, and widen `paths_to_mutate` deliberately
+  from there.
+- **fuzz** (`tests/test_fuzz.py`) — hypothesis feeding malformed/random
+  input (including NUL bytes and other control characters) at
+  `/auth/register`, `/auth/login`, `POST /media`, and
+  `/auth/confirm-email-session` through a real `TestClient`, asserting no
+  500 ever comes back.
+
+**This one earned its keep immediately:** the fuzz suite found a real bug
+on its first real run — `POST /auth/login` with a NUL byte in `username`
+crashed with an unhandled `sqlalchemy.exc.DataError` (Postgres text columns
+reject `0x00` outright), a genuine 500 a malicious or just-malformed client
+could trigger. Fixed by rejecting NUL bytes in `UserCreate.username`
+(`schemas.py`'s `_no_nul_bytes` validator — `EmailStr` already rejects NUL
+on its own) and by an explicit guard in `login()` (`routers/auth.py`),
+since the login form bypasses that schema entirely (`OAuth2PasswordRequestForm`
+has no pydantic validators of its own). See `test_login_username_with_nul_byte_unauthorized_not_500`/
+`test_register_username_with_nul_byte_rejected_not_500` in `tests/test_auth.py`
+for the fast, deterministic regression coverage (the fuzz test itself
+depends on hypothesis's random search, which isn't guaranteed to hit this
+exact case on every run).
 
 ---
 

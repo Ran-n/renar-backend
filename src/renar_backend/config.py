@@ -29,7 +29,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24 * 7  # one week
     cors_origins: list[str] = ["http://localhost:8550", "http://127.0.0.1:8550"]
     tmdb_api_key: str = ""
-    tvdb_api_key: str = ""  # optional: fallback lookup for TV Time import matching
+    # optional: TV Time import matching. Used first to retry a TMDB search
+    # under TVDB's own name/aliases, and — if TMDB has no match at all — as
+    # a genuine fallback identity/data source of its own; see
+    # users/tvtime_import.py's TVDB fallback and docs/design-decisions.md.
+    tvdb_api_key: str = ""
     # Cloudflare Turnstile (challenges.cloudflare.com) on /auth/register.
     # Site key is public — served back to clients via /auth/registration-status
     # so the register screen can build the widget without a separate config

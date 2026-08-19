@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/08/18 11:05:47.230348
+Revised: 2026/08/18 17:42:31.851466
 """
 
 import logging
@@ -251,6 +251,14 @@ def register(data: UserCreate, request: Request, background_tasks: BackgroundTas
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     ip = client_ip(request)
     check_login_allowed(form.username, ip)  # 429 while the account is under backoff
+    if "\x00" in form.username:
+        # Postgres text columns reject NUL outright — filtering by it below
+        # would otherwise be an unhandled DataError (500), not a normal
+        # login rejection. No account with a NUL byte in its username can
+        # exist (schemas.py's UserCreate rejects it at registration), so
+        # this can never be a real login — treat it exactly like one.
+        note_login_failure(form.username, ip)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
     # form.username accepts either username or email
     user = db.query(User).filter(or_(User.username == form.username, User.email == form.username)).first()
     if user is None or not verify_password(form.password, user.password_hash):

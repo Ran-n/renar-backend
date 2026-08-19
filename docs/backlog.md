@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/18 11:05:46.928498 )
+[//]: # (+ Revised: 	2026/08/18 21:31:16.890025 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -13,6 +13,71 @@ opening `- **`. "1.0" means the next major version bump (first stable/public
 release), not the next minor/patch. Resolved entries are deleted outright,
 not marked done/fixed — the historical record lives in git history,
 CHANGELOG.md, and `docs/design-decisions.md` instead.
+
+## Testing
+
+- **[Blocking for 1.0] Full test coverage across every test type, not just
+  the modules that happen to have tests today.** The suite now has every
+  commonly-recognized *category* of test set up (unit, integration, smoke,
+  regression, contract, property, snapshot, security, load, mutation
+  (config only — unverified, no WSL on the dev machine), fuzz), but having
+  the category doesn't mean coverage is complete within it:
+  - **Contract**: renar-frontend's `test_contract.py` only checks that
+    every `ApiClient` call site's `(METHOD, path)` exists in this
+    backend's OpenAPI schema. It says nothing about request body shape,
+    response body shape, query parameters, or status codes — a renamed
+    response field, a changed enum value, or a backend route the frontend
+    never calls at all all sail through untouched. Not 100%; closer to a
+    routing smoke check.
+  - **Property/fuzz**: only cover `schemas.py`'s validators, `models.py`'s
+    `normalize_title_key`, and a handful of endpoints
+    (`/auth/register`, `/auth/login`, `POST /media`,
+    `/auth/confirm-email-session`). Every other router (`comments.py`,
+    `premium.py`, `notifications.py`, `upcoming.py`, `stats.py`,
+    `imports.py`, `export.py`, `social.py`, `admin.py`, ...) has no
+    property or fuzz coverage at all.
+  - **Unit/integration**: coverage exists per-router (`tests/test_*.py`)
+    but has never been measured — no `coverage.py`/branch-coverage number
+    exists to point at. "Every letter of code must be tested" needs that
+    measurement first (`pytest --cov`) to know what's actually missing,
+    not an assumption from file-per-router existence.
+  - **Mutation**: config exists (`pyproject.toml`'s `[tool.mutmut]`) but
+    has never actually run (no WSL on the dev machine) and is scoped to
+    just `models.py` + `schemas.py`.
+  - **Load**: one locust profile (`tests/load/locustfile.py`) covering
+    health/me/library/stats/registration-status. No coverage of
+    write-heavy paths (comments, ratings, imports) under concurrent load.
+
+  Getting to "full coverage, all test types, 100%" means, in rough order:
+  run `pytest --cov` to get a real branch-coverage baseline; write the
+  missing unit/integration tests router-by-router until that number is
+  actually high (not just "a test file exists"); extend property/fuzz to
+  every router with a pydantic-validated request body; turn the contract
+  test into real schema validation (response body against the OpenAPI
+  response model, not just route existence — `schemathesis` or hand-rolled
+  `jsonschema` validation against `app.openapi()` are the two realistic
+  options); verify the mutmut config under WSL/Linux CI and widen
+  `paths_to_mutate` to the whole `src/` tree; extend the locust profile to
+  cover every write endpoint. See renar-frontend's `docs/backlog.md` for
+  the matching frontend-side gaps (E2E journeys beyond the one that
+  exists, visual coverage beyond the boot screen).
+
+- **[Future] Set up WSL on the dev machine and actually run mutmut.**
+  `mutmut` refuses to run at all on native Windows — not a project
+  limitation, a hard-coded refusal in the tool itself (`mutmut --help`
+  prints "To run mutmut on Windows, please use the WSL" and exits without
+  doing anything, pointing at their own open tracking issue,
+  github.com/boxed/mutmut/issues/397, for native Windows support that
+  hasn't landed). The dev machine has the `wsl.exe` launcher but not a
+  working WSL runtime (`wsl --status`/`-l -v`/`--list` all fail with
+  `WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED` — the Windows optional feature
+  isn't enabled and no distro is installed). Needs: `wsl --install
+  --no-distribution` (enables the feature, likely needs a restart), a
+  distro (`wsl --install -d Ubuntu` or similar), then `uv`/Python set up
+  inside it to actually run `[tool.mutmut]`'s config against this repo.
+  Once that's done, the `[tool.mutmut]` config in `pyproject.toml` can be
+  verified for real instead of carrying the "unverified" caveat repeated
+  in the Testing item above and in `docs/design-decisions.md`.
 
 ## Multi-session sync
 
@@ -42,20 +107,27 @@ import outcomes don't clobber each other.
 
 ### TV Time import
 
-- **[Blocking for 1.0] Transient TMDB failures permanently degrade an entry — reconcile now
-  backfills.** If a TMDB lookup fails (rate limit, outage) the row imports
-  unmatched (no `tmdb_id`, poster, or episode counts). `catalog/titles.py`'s
-  new `backfill_title_tmdb_id` is now called from both reconcile paths in
-  `_upsert_library_entry`: when a later re-import resolves a `tmdb_id` for a
-  row that reconciles into an existing (tmdb_id-less) entry — whether via
-  `existing_map` or the concurrent-insert race's IntegrityError path — the
-  shared `Title` is upgraded in place (tmdb_id, title_key cleared, and any
-  still-empty poster/runtime/episode-count fields), race-safe against a
-  genuine crosswalk collision via `uq_title_tmdb`. Still open: if the
-  re-import's title text differs from what's stored, a duplicate entry is
-  still created instead of reconciling (identity is still title-key based
-  when there's no `tmdb_id` match). No retry/backoff on 429s either, and 8
-  concurrent workers make bursts more likely.
+A show with no TMDB match at all now falls all the way back to TheTVDB's
+own data (poster, overview, episodes) instead of sitting fully blank —
+tracked under `Title.tvdb_id`, upgraded to `tmdb_id` automatically the
+moment that resolves. See design-decisions.md's "TheTVDB as a genuine
+fallback identity, not just a name source".
+
+- **[Blocking for 1.0] A show already matched elsewhere can still get a second,
+  unmergeable `Title` row.** `find_or_create_title` (`catalog/titles.py`) only
+  dedups a *new* unmatched row against other unmatched rows sharing the same
+  `title_key` (`find_title`'s title-text branch) — it never cross-checks
+  against an already-*matched* `Title` stored under different text. So if, at
+  import time, TMDB's TVDB-crosswalk lookup, its name search, and every TVDB
+  alias retry all fail (a real outage, not a single-request blip — that's
+  already covered by `tmdb_get`'s retry/backoff) *and* TVDB itself has nothing
+  usable, a fresh unmatched `Title` is created even though the show is already
+  tracked under a different name. When it later resolves (periodic retry or
+  re-import), `backfill_title_tmdb_id` hits `uq_title_tmdb`, the savepoint
+  swallows the collision, and the two rows stay permanently split — same
+  failure mode as the pre-fix duplicates, just needing a rarer trigger
+  (TMDB+TVDB both down at once) instead of any transient blip. Confirmed still
+  live in the current code, not just a pre-fix artifact.
 
 - **[Blocking for 1.0] Minor: concurrent reconciles of the same entry are last-write-wins.**
   Two rows racing to reconcile into the same `LibraryEntry` aren't
@@ -97,6 +169,35 @@ import outcomes don't clobber each other.
   yet — open questions: one list per item allowed or many; public/shareable
   or private-only; does the TV Time importer target this once it exists (see
   the TV Time import section above).
+
+- **[Blocking for 1.0] Expose `MediaItem.release_date` in the media API response.**
+  The column exists (`models.py:568`) and is populated from TMDB, but no
+  response schema returns it, so the frontend has no way to show a movie's
+  or series' release date. Needed for renar-frontend's matching backlog
+  entry ("Unreleased titles/seasons/episodes need a clear 'not yet
+  launched' indicator, plus a release date") — a not-yet-released item
+  (e.g. an upcoming movie added to the library ahead of its premiere)
+  needs to show that date on the title page and info page. `Episode.
+  air_date` is already used server-side for the unaired-episode guard
+  (`routers/media.py`'s `_unwatched_aired_episode_clause`/`_check_episode_
+  not_future`) but likewise isn't exposed per-episode for display purposes
+  today — check whether it needs adding to the episode response too.
+
+- **[Future] Additional external rating sources (IMDb, Rotten Tomatoes, Metacritic)
+  alongside TMDB's `vote_average`.** OMDb (omdbapi.com) is the candidate
+  source — a single call returns IMDb rating + vote count, plus Rotten
+  Tomatoes and Metacritic scores in its `Ratings` array. Only the IMDb
+  entry carries a vote count; RT/Metacritic expose a score with no count
+  (neither has a public API of its own, so there's no way to backfill
+  that). OMDb looks up by IMDb ID, and `titles.imdb_id` is being added to
+  the schema (populated from TMDB's `external_ids`, alongside `tvdb_id`
+  and `wikidata_id`) specifically so this lookup doesn't need its own
+  title-matching step. Not scoped in detail yet — open questions: caching/
+  refresh cadence for OMDb responses, how a second/third rating source
+  folds into the existing weighted-mean blend (see `docs/design-
+  decisions.md`'s rating-scale entry), and whether RT/Metacritic scores
+  (no vote count) should even enter that weighted blend or just display
+  alongside it.
 
 - **[Future] Watched-on / streaming source tracking — user priority (2026-07-21).**
   Record which platform/service an episode or movie was watched on (TV Time

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:13.871671
-Revised: 2026/08/01 16:10:08.490593
+Revised: 2026/08/18 17:25:23.882666
 """
 
 import logging
@@ -22,7 +22,7 @@ _SRC_DIR = str(Path(__file__).resolve().parents[1])
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _LOG_FILE = _BACKEND_DIR / "logs" / "renar-backend.log"
 
-_HOST = "0.0.0.0"
+_HOST = "0.0.0.0"  # nosec B104 -- must listen on all interfaces for LAN/mobile clients
 _PORT = 8000
 
 # Frontend polls these on a timer / fetches images in bulk; logging every hit just drowns out real traffic.

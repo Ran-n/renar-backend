@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/08/17 17:05:33.984413
+Revised: 2026/08/18 20:18:51.358776
 """
 
 import enum
@@ -536,11 +536,34 @@ class Title(Base):
             unique=True,
             postgresql_where=column("tmdb_id").is_(None),
         ),
+        Index(
+            "uq_title_tvdb",
+            "media_type",
+            "tvdb_id",
+            unique=True,
+            postgresql_where=column("tvdb_id").isnot(None),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     media_type: Mapped[MediaType] = mapped_column(Enum(MediaType), index=True)
     tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # TheTVDB v4 series id — a fallback identity for a TV show TMDB hasn't
+    # matched yet (see users/tvtime_import.py's TVDB fallback and
+    # docs/design-decisions.md). Always None for films: TheTVDB doesn't
+    # track movies. Superseded by tmdb_id the moment that resolves
+    # (catalog/titles.py's backfill_title_tmdb_id) — kept around afterward
+    # only as a harmless crosswalk, not re-read by app logic — but every
+    # details sync still refreshes it from TMDB's own external_ids
+    # (tmdb/tmdb_store.py's sync_title_details), collision-guarded against
+    # the unique index the same way backfill_title_tvdb_id is.
+    tvdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Cross-reference ids from TMDB's external_ids, synced alongside the rest
+    # of sync_title_details — not an identity source (no unique index), just
+    # cached so other integrations (OMDb for imdb_id, Wikipedia sitelinks for
+    # wikidata_id) can look this title up without their own matching step.
+    imdb_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    wikidata_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
     title_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
     title: Mapped[str] = mapped_column(String(300))
     # TMDB's own original_title/original_name: language-independent, unlike

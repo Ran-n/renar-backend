@@ -26,8 +26,14 @@ Shows are matched to TMDB via TVDB id (/find), movies via name+year search.
 If the TVDB-id lookup misses (TMDB has no crosswalk entry for that id — common
 even for well-known shows) and a TVDB_API_KEY is configured, we ask TheTVDB
 for the show's name/aliases and retry a TMDB title search with each; if that
-still comes up empty (or no TVDB_API_KEY is set), we fall back to a plain
-TMDB title search on the name TV Time gave us.
+still comes up empty too, we fall back to a plain TMDB title search on the
+name TV Time gave us. If *none* of that resolves a TMDB match at all (a
+genuine TMDB outage, or a title TMDB simply doesn't carry) and TVDB_API_KEY
+is configured, the show is tracked under TheTVDB's own id instead — see
+_match_show's docstring and docs/design-decisions.md — so it still gets a
+poster and episode tracking rather than sitting fully blank; tmdb_id always
+supersedes this the moment it resolves (catalog/titles.py's
+backfill_title_tmdb_id).
 Runs in a background thread; progress is polled via GET /import/status.
 """
 
@@ -37,17 +43,14 @@ import io
 import logging
 import re
 import threading
-import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
-import httpx
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..catalog.titles import backfill_title_tmdb_id, find_or_create_title, find_title
-from ..config import settings
+from ..catalog.titles import backfill_title_tmdb_id, backfill_title_tvdb_id, find_or_create_title, find_title
 from ..database import SessionLocal
 from ..models import (
     Comment,
@@ -61,6 +64,13 @@ from ..models import (
     normalize_title_key,
 )
 from ..tmdb.tmdb_http import POSTER_BASE, tmdb_get
+from ..tvdb.tvdb_store import (
+    fetch_series_episodes,
+    fetch_series_extended,
+    series_names,
+    series_summary,
+    sync_tvdb_episodes,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -269,63 +279,37 @@ def _search_tv(name: str) -> dict | None:
         return None
 
 
-TVDB_BASE = "https://api4.thetvdb.com/v4"
-_tvdb_http = httpx.Client(timeout=15)
-_tvdb_token: str | None = None
-_tvdb_token_expiry: float = 0.0
-
-
-def _tvdb_login() -> str | None:
-    """Log in to TheTVDB v4 API; tokens are valid ~1 month so we cache ours."""
-    global _tvdb_token, _tvdb_token_expiry
-    if not settings.tvdb_api_key:
-        return None
-    if _tvdb_token and _tvdb_token_expiry > time.time():
-        return _tvdb_token
-    try:
-        resp = _tvdb_http.post(f"{TVDB_BASE}/login", json={"apikey": settings.tvdb_api_key})
-        resp.raise_for_status()
-        _tvdb_token = resp.json()["data"]["token"]
-        _tvdb_token_expiry = time.time() + 20 * 24 * 3600
-        return _tvdb_token
-    except Exception:
-        _log.warning("TheTVDB login failed", exc_info=True)
-        return None
-
-
-def _tvdb_series_names(tvdb_id: str) -> list[str]:
-    """Candidate titles (primary name + aliases) for a TVDB series id."""
-    token = _tvdb_login()
-    if not token:
-        return []
-    try:
-        resp = _tvdb_http.get(f"{TVDB_BASE}/series/{tvdb_id}", headers={"Authorization": f"Bearer {token}"})
-        if resp.status_code != 200:
-            return []
-        data = resp.json().get("data") or {}
-    except Exception:
-        _log.warning("TheTVDB series lookup failed for tvdb_id=%s", tvdb_id, exc_info=True)
-        return []
-    names = [data["name"]] if data.get("name") else []
-    for alias in data.get("aliases") or []:
-        name = alias.get("name") if isinstance(alias, dict) else alias
-        if name and name not in names:
-            names.append(name)
-    return names[:5]
-
-
 def _find_tv_via_tvdb_fallback(tvdb_id: str) -> dict | None:
-    for candidate in _tvdb_series_names(tvdb_id):
+    """Retry a TMDB search using TVDB's own name + aliases for this series —
+    catches a TMDB search miss caused by TV Time's name differing from
+    TMDB's (translations, punctuation), as long as TMDB has the show under
+    *some* name. Falls to _match_show's TVDB-as-identity fallback below
+    when even this comes up empty."""
+    extended = fetch_series_extended(tvdb_id)
+    if not extended:
+        return None
+    for candidate in series_names(extended):
         found = _search_tv(candidate)
         if found:
             return found
     return None
 
 
-def _match_show(tvdb_id: str, name: str) -> tuple[dict | None, dict]:
-    """Resolve one show to TMDB and fetch its details. Network-only, no DB access."""
+def _match_show(tvdb_id: str, name: str) -> tuple[dict | None, dict, dict | None]:
+    """Resolve one show to TMDB (preferred) and fetch its details, falling
+    back to TheTVDB's own data when TMDB has no match at all. Network-only,
+    no DB access.
+
+    Returns (tmdb_found, details, tvdb_fallback). `tvdb_fallback` — a
+    summary dict plus an "episodes" list, from tvdb_store.series_summary/
+    fetch_series_episodes — is only non-None when tmdb_found is None *and*
+    TheTVDB has the series: previously, a TMDB outage (or a title TMDB
+    simply doesn't carry) left the row fully unmatched — no poster, no
+    episodes — even though TV Time supplies a TVDB id for every show and
+    TheTVDB very often already has it. See docs/design-decisions.md.
+    """
     if not name:
-        return None, {}
+        return None, {}, None
     found = _find_tv_by_tvdb(tvdb_id) or _find_tv_via_tvdb_fallback(tvdb_id) or _search_tv(name)
     details: dict = {}
     if found:
@@ -344,7 +328,21 @@ def _match_show(tvdb_id: str, name: str) -> tuple[dict | None, dict]:
         except Exception:
             _log.warning("TMDB details fetch failed for tmdb_id=%s", tmdb_id, exc_info=True)
             details = {}
-    return found, details
+        return found, details, None
+
+    if not tvdb_id:
+        return None, {}, None
+    extended = fetch_series_extended(tvdb_id)
+    if not extended:
+        return None, {}, None
+    summary = series_summary(tvdb_id, extended)
+    if not summary.get("name"):
+        return None, {}, None
+    episodes = fetch_series_episodes(tvdb_id)
+    summary["episodes"] = episodes
+    summary["total_episodes"] = len(episodes) or None
+    summary["total_seasons"] = max((e["season"] for e in episodes), default=None)
+    return None, {}, summary
 
 
 def _search_movie(name: str, year: str | None) -> tuple[dict | None, bool]:
@@ -521,6 +519,10 @@ def _upsert_library_entry(
     tmdb_key: tuple | None,
     existing_map: dict,
     reconcile,
+    *,
+    tvdb_id: int | None = None,
+    tvdb_key: tuple | None = None,
+    tvdb_episodes: list[dict] | None = None,
 ) -> tuple[int | None, bool, bool, bool, bool]:
     """Insert or reconcile one LibraryEntry, on its own session.
 
@@ -537,6 +539,13 @@ def _upsert_library_entry(
     looks up what the winner just created, and reconciles into that instead
     of losing its data.
 
+    `tvdb_id`/`tvdb_key`/`tvdb_episodes` are TheTVDB v4 fallback identity
+    for a show TMDB hasn't matched (see _match_show) — checked as a second
+    existing_map key (after tmdb_key, before title_key) and, for a title
+    that still has no tmdb_id, backfilled/synced the same way tmdb_id is,
+    so a genuine TMDB outage still gets *some* poster/episode tracking
+    instead of the fully-blank unmatched state.
+
     Returns (item_id, is_new, changed, error, duplicate_in_run). `error` is
     only True when the row failed for an infra reason (DB hiccup, unexpected
     exception) — the caller counts that separately from a normal dedupe
@@ -547,21 +556,47 @@ def _upsert_library_entry(
     your library", since on a brand-new account nothing could be.
     """
     item_id = existing_map.get(tmdb_key) if tmdb_key else None
+    if item_id is None and tvdb_key:
+        item_id = existing_map.get(tvdb_key)
     if item_id is None:
         item_id = existing_map.get(title_key)
     is_new = item_id is None
 
+    def _backfill(title_row: Title) -> None:
+        if tmdb_id is not None:
+            backfill_title_tmdb_id(
+                db,
+                title_row,
+                tmdb_id,
+                title=title,
+                poster_url=title_meta.get("poster_url"),
+                runtime_minutes=title_meta.get("runtime_minutes"),
+                total_episodes=title_meta.get("total_episodes"),
+            )
+        elif tvdb_id is not None:
+            backfill_title_tvdb_id(
+                db,
+                title_row,
+                tvdb_id,
+                title=title,
+                poster_url=title_meta.get("poster_url"),
+                runtime_minutes=title_meta.get("runtime_minutes"),
+                total_episodes=title_meta.get("total_episodes"),
+            )
+        if tvdb_episodes and title_row.tmdb_id is None:
+            sync_tvdb_episodes(db, title_row, tvdb_episodes)
+
     db = SessionLocal()
     try:
         if is_new:
-            db_title = find_or_create_title(db, media_type, tmdb_id, title, **title_meta)
+            db_title = find_or_create_title(db, media_type, tmdb_id, title, tvdb_id=tvdb_id, **title_meta)
             entry = LibraryEntry(user_id=user_id, title_id=db_title.id, **entry_fields)
             db.add(entry)
             try:
                 db.commit()
             except IntegrityError:
                 db.rollback()
-                winner_title = find_title(db, media_type, tmdb_id, title)
+                winner_title = find_title(db, media_type, tmdb_id, title, tvdb_id=tvdb_id)
                 winner = (
                     db.query(LibraryEntry).filter_by(user_id=user_id, title_id=winner_title.id).first()
                     if winner_title
@@ -569,34 +604,22 @@ def _upsert_library_entry(
                 )
                 if winner is None:
                     return None, False, False, False, False
-                if tmdb_id is not None and winner_title is not None:
-                    backfill_title_tmdb_id(
-                        db,
-                        winner_title,
-                        tmdb_id,
-                        poster_url=title_meta.get("poster_url"),
-                        runtime_minutes=title_meta.get("runtime_minutes"),
-                        total_episodes=title_meta.get("total_episodes"),
-                    )
+                if winner_title is not None:
+                    _backfill(winner_title)
                 changed = reconcile(winner, entry_fields)
                 db.commit()
                 return winner.id, False, changed, False, True
             db.refresh(entry)
+            if tvdb_episodes and db_title.tmdb_id is None:
+                sync_tvdb_episodes(db, db_title, tvdb_episodes)
+                db.commit()
             return entry.id, True, False, False, False
         entry = db.get(LibraryEntry, item_id)
         if entry is None:
             return None, False, False, False, False
-        if tmdb_id is not None:
-            title_row = db.get(Title, entry.title_id)
-            if title_row is not None:
-                backfill_title_tmdb_id(
-                    db,
-                    title_row,
-                    tmdb_id,
-                    poster_url=title_meta.get("poster_url"),
-                    runtime_minutes=title_meta.get("runtime_minutes"),
-                    total_episodes=title_meta.get("total_episodes"),
-                )
+        title_row = db.get(Title, entry.title_id)
+        if title_row is not None:
+            _backfill(title_row)
         changed = reconcile(entry, entry_fields)
         db.commit()
         return item_id, False, changed, False, False
@@ -630,10 +653,29 @@ def _process_show(
     else:
         st = WatchStatus.watching
 
-    found, details = _match_show(tvdb_id, name)
+    found, details, tvdb_fallback = _match_show(tvdb_id, name)
     tmdb_id = found["id"] if found else None
-    final_title = (found["name"] if found else name).strip()
-    unmatched = name if not found else None
+    # TV Time's own tv_show_id *is* a TheTVDB series id — a stable identity
+    # regardless of whether TVDB's extended-record fetch above happened to
+    # succeed this particular run (down, rate-limited, ...). Deriving it
+    # from the row itself rather than only from a successful tvdb_fallback
+    # means a later run that resolves straight to TMDB still finds the
+    # entry an earlier run created via the TVDB fallback, through the same
+    # tvdb_key existing_map lookup below — not just a run that fails TMDB
+    # again and falls back to TVDB a second time.
+    resolved_tvdb_id = int(tvdb_id) if tvdb_id.isdigit() else None
+    if found:
+        final_title = found["name"].strip()
+    elif tvdb_fallback:
+        final_title = (tvdb_fallback.get("name") or name).strip()
+    else:
+        final_title = name
+    # unmatched (both TMDB and TVDB came up empty) is what feeds the
+    # comment/rewatch skip-lists and the OVA-episode-split fallback pass
+    # below — a TVDB fallback still gets a real LibraryEntry with a poster
+    # and episodes, so it's not "unmatched" in that sense even though
+    # tmdb_id stays None.
+    unmatched = name if not found and not tvdb_fallback else None
 
     rating = None
     rate_row = rates.get(tvdb_id)
@@ -642,21 +684,36 @@ def _process_show(
         rating = min(100, raw_rating * 20 if raw_rating <= 5 else raw_rating * 10)
 
     title_meta = {
-        "poster_url": details.get("poster_url"),
-        "runtime_minutes": details.get("runtime_minutes"),
-        "total_episodes": details.get("total_episodes"),
+        "poster_url": details.get("poster_url") or (tvdb_fallback.get("poster_url") if tvdb_fallback else None),
+        "runtime_minutes": details.get("runtime_minutes")
+        or (tvdb_fallback.get("runtime_minutes") if tvdb_fallback else None),
+        "total_episodes": details.get("total_episodes")
+        or (tvdb_fallback.get("total_episodes") if tvdb_fallback else None),
         "genres": details.get("genres"),
-        "year": None,
+        "year": tvdb_fallback.get("year") if tvdb_fallback else None,
     }
     entry_fields = {
         "status": st,
         "is_favorite": row.get("is_favorited") == "1",
         "rating": rating,
     }
-    # dedupe on BOTH the resolved tmdb id and the final canonical title —
-    # different TVDB entries can resolve to the same TMDB show
-    title_key = ("tv_show", normalize_title_key(final_title))
+    # dedupe on the resolved tmdb id, the resolved tvdb id, and the *raw* TV
+    # Time name, not the resolved final_title — an entry that came out of
+    # an earlier import unmatched (TMDB lookup failed then) was created
+    # with title_key = normalize_title_key(name), since final_title == name
+    # in that case (see below). If this run's TMDB lookup now succeeds,
+    # final_title becomes TMDB's own (often translated/differently-
+    # punctuated) title, and a title_key built from it would miss that
+    # existing row entirely, creating a duplicate instead of reconciling —
+    # this is the exact scenario in docs/backlog.md's "if the re-import's
+    # title text differs from what's stored, a duplicate entry is still
+    # created". `name` is stable across re-imports of the same TV Time
+    # account, so keying on it finds the earlier unmatched row reliably;
+    # when nothing was found this run either, final_title == name and this
+    # is unchanged from before.
+    title_key = ("tv_show", normalize_title_key(name))
     tmdb_key = ("tv_show", tmdb_id) if tmdb_id else None
+    tvdb_key = ("tv_show_tvdb", resolved_tvdb_id) if resolved_tvdb_id else None
     item_id, is_new, changed, error, duplicate_in_run = _upsert_library_entry(
         user_id,
         MediaType.tv_show,
@@ -668,6 +725,9 @@ def _process_show(
         tmdb_key,
         existing_map,
         _reconcile_show_entry,
+        tvdb_id=resolved_tvdb_id,
+        tvdb_key=tvdb_key,
+        tvdb_episodes=tvdb_fallback.get("episodes") if tvdb_fallback else None,
     )
     return tvdb_id, item_id, unmatched, is_new, changed, error, duplicate_in_run
 
@@ -697,7 +757,10 @@ def _process_movie(
     }
     media_type = MediaType.tv_show if is_tv else MediaType.film
     key_kind = "tv_show" if is_tv else "film"
-    title_key = (key_kind, normalize_title_key(final_title))
+    # keyed on the raw name, not final_title — see the matching comment in
+    # _process_show for why (a prior unmatched import created title_key from
+    # `name`, since final_title == name whenever nothing was found).
+    title_key = (key_kind, normalize_title_key(name))
     tmdb_key = (key_kind, tmdb_id) if tmdb_id else None
     item_id, is_new, changed, error, duplicate_in_run = _upsert_library_entry(
         user_id,
@@ -755,6 +818,8 @@ def run(user_id: int, zip_bytes: bytes) -> None:
         for entry_id, t in user_rows:
             if t.tmdb_id:
                 existing_map[(t.media_type.value, t.tmdb_id)] = entry_id
+            if t.tvdb_id:
+                existing_map[("tv_show_tvdb", t.tvdb_id)] = entry_id
             existing_map[(t.media_type.value, t.title_key or normalize_title_key(t.title))] = entry_id
 
         # ---------- shows ----------

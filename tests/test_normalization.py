@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/08/17 17:05:34.076782
+Revised: 2026/08/19 12:36:49.390206
 
 Schema normalization guard: fails CI the moment a denormalization sneaks
 back into the models.
@@ -92,6 +92,9 @@ ALLOWED_AGGREGATES: dict[str, str] = {
 # FK-looking columns that intentionally carry no ForeignKey.
 ALLOWED_FKLESS_ID_COLUMNS: dict[str, str] = {
     "titles.tmdb_id": "external identity in TMDB's keyspace, not a row of ours",
+    "titles.tvdb_id": "external identity in TheTVDB's keyspace, not a row of ours — see docs/design-decisions.md",
+    "titles.imdb_id": "external identity in IMDb's keyspace, not a row of ours — see docs/design-decisions.md",
+    "titles.wikidata_id": "external identity in Wikidata's keyspace, not a row of ours — see docs/design-decisions.md",
 }
 
 # Columns flagged by test_no_copied_columns_across_foreign_keys that are not

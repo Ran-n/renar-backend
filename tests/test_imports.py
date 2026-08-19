@@ -14,7 +14,7 @@ import zipfile
 
 import renar_backend.users.tvtime_import as imports_mod
 from renar_backend.database import SessionLocal
-from renar_backend.models import Comment, EpisodeWatch, LibraryEntry, Title, WatchEvent
+from renar_backend.models import Comment, Episode, EpisodeWatch, LibraryEntry, Title, WatchEvent
 
 
 def _csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:
@@ -158,7 +158,14 @@ def _run(user_id: int, zip_bytes: bytes) -> dict:
 def _patch_tmdb(
     monkeypatch, show_matches: dict[str, tuple[dict | None, dict]] | None = None, movie_match: dict | None = None
 ):
-    monkeypatch.setattr(imports_mod, "_match_show", lambda tvdb_id, name: (show_matches or {}).get(tvdb_id, (None, {})))
+    def match_show(tvdb_id, name):
+        # accepts either the old (found, details) shape or the full
+        # (found, details, tvdb_fallback) one — padding keeps every
+        # existing show_matches value in this file working unchanged.
+        result = (show_matches or {}).get(tvdb_id, (None, {}))
+        return (*result, None) if len(result) == 2 else result
+
+    monkeypatch.setattr(imports_mod, "_match_show", match_show)
     monkeypatch.setattr(imports_mod, "_search_movie", lambda name, year: (movie_match, False))
 
 
@@ -840,3 +847,191 @@ def test_reimport_is_idempotent(client, alice, monkeypatch):
     assert _episode_keys(show["id"]) == {(1, 1)}
     assert summary["episodes"] == 0
     assert summary["skipped"] == 1
+
+
+def test_reimport_reconciles_show_that_was_unmatched_then_resolves(client, alice, monkeypatch):
+    """A row TMDB couldn't match on the first import is created unmatched,
+    keyed on the raw TV Time name (see the title_key comment in
+    _process_show). A later re-import where TMDB now resolves a match —
+    same row, same raw name, but a different (translated) TMDB title —
+    must reconcile into that same entry instead of creating a duplicate."""
+    user, headers = alice
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "200", "tv_show_name": "Aqui no hay quien viva", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "200", "archived": "0"}],
+    )
+
+    _patch_tmdb(monkeypatch, show_matches={"200": (None, {})})
+    _run(user["id"], zip_bytes)
+
+    entries = client.get("/media", headers=headers).json()
+    assert len(entries) == 1
+    assert entries[0]["tmdb_id"] is None
+    assert entries[0]["title"] == "Aqui no hay quien viva"
+
+    _patch_tmdb(monkeypatch, show_matches={"200": ({"id": 501, "name": "No One Could Live Here"}, {})})
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    entries = client.get("/media", headers=headers).json()
+    assert len(entries) == 1  # no duplicate
+    assert entries[0]["tmdb_id"] == 501
+    assert entries[0]["title"] == "No One Could Live Here"
+
+
+def test_reimport_reconciles_movie_that_was_unmatched_then_resolves(client, alice, monkeypatch):
+    user, headers = alice
+    zip_bytes = _build_zip(
+        movie_events=[
+            {
+                "movie_name": "Il Buono, il Brutto, il Cattivo",
+                "type": "watch",
+                "runtime": "",
+                "release_date": "",
+                "created_at": "2026-01-01 00:00:00",
+            }
+        ],
+    )
+
+    monkeypatch.setattr(imports_mod, "_search_movie", lambda name, year: (None, False))
+    _run(user["id"], zip_bytes)
+
+    entries = client.get("/media", headers=headers).json()
+    assert len(entries) == 1
+    assert entries[0]["tmdb_id"] is None
+
+    monkeypatch.setattr(
+        imports_mod,
+        "_search_movie",
+        lambda name, year: ({"id": 429, "title": "The Good, the Bad and the Ugly"}, False),
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    entries = client.get("/media", headers=headers).json()
+    assert len(entries) == 1  # no duplicate
+    assert entries[0]["tmdb_id"] == 429
+    assert entries[0]["title"] == "The Good, the Bad and the Ugly"
+
+
+# ---------- TVDB fallback (TMDB has no match at all) ----------
+
+_TVDB_FALLBACK = {
+    "tvdb_id": 200,
+    "name": "No One Could Live Here",
+    "poster_url": "https://artworks.thetvdb.com/banners/posters/200.jpg",
+    "runtime_minutes": 70,
+    "total_episodes": 2,
+    "total_seasons": 1,
+    "year": 2003,
+    "episodes": [
+        {"season": 1, "episode_number": 1, "name": "Pilot", "air_date": "2003-09-22"},
+        {"season": 1, "episode_number": 2, "name": "Episode Two", "air_date": "2003-09-29"},
+    ],
+}
+
+
+def test_import_uses_tvdb_fallback_when_tmdb_has_no_match(client, alice, monkeypatch):
+    """TMDB down/no match at all for a show TV Time gave a TVDB id for:
+    the entry still gets tracked, with a poster and real episodes, via
+    TheTVDB directly instead of sitting fully blank."""
+    user, headers = alice
+    _patch_tmdb(monkeypatch, show_matches={"200": (None, {}, _TVDB_FALLBACK)})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "200", "tv_show_name": "Aqui no hay quien viva", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "200", "archived": "0"}],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    entries = client.get("/media", headers=headers).json()
+    assert len(entries) == 1
+    item = entries[0]
+    assert item["tmdb_id"] is None
+    assert item["title"] == "No One Could Live Here"
+    assert item["poster_url"] == "https://artworks.thetvdb.com/banners/posters/200.jpg"
+
+    db = SessionLocal()
+    try:
+        rows = db.query(Episode).filter_by(title_id=_title_id_for_entry(item["id"])).all()
+        assert {(r.season, r.episode_number, r.name) for r in rows} == {
+            (1, 1, "Pilot"),
+            (1, 2, "Episode Two"),
+        }
+    finally:
+        db.close()
+
+
+def test_reimport_with_tvdb_fallback_again_does_not_duplicate(client, alice, monkeypatch):
+    user, headers = alice
+    _patch_tmdb(monkeypatch, show_matches={"200": (None, {}, _TVDB_FALLBACK)})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "200", "tv_show_name": "Aqui no hay quien viva", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "200", "archived": "0"}],
+    )
+    _run(user["id"], zip_bytes)
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    entries = client.get("/media", headers=headers).json()
+    assert len(entries) == 1
+
+
+def test_reimport_upgrades_tvdb_fallback_entry_once_tmdb_resolves(client, alice, monkeypatch):
+    """The exact healing path this feature exists for: a TVDB-fallback
+    entry later reconciles into a real TMDB match, on the same entry."""
+    user, headers = alice
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "200", "tv_show_name": "Aqui no hay quien viva", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "200", "archived": "0"}],
+    )
+
+    _patch_tmdb(monkeypatch, show_matches={"200": (None, {}, _TVDB_FALLBACK)})
+    _run(user["id"], zip_bytes)
+    first = client.get("/media", headers=headers).json()[0]
+
+    _patch_tmdb(monkeypatch, show_matches={"200": ({"id": 501, "name": "No One Could Live Here"}, {})})
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    entries = client.get("/media", headers=headers).json()
+    assert len(entries) == 1  # still the same entry, not a duplicate
+    assert entries[0]["id"] == first["id"]
+    assert entries[0]["tmdb_id"] == 501
+
+
+def test_tvdb_fallback_entry_still_gets_comments_and_rewatches(client, alice, monkeypatch):
+    """A TVDB-fallback show got a real LibraryEntry (poster + episodes), so
+    it must not be treated as "unmatched" for comments/rewatches — those
+    were previously gated on items_by_tvdb, which this entry is in."""
+    user, headers = alice
+    _patch_tmdb(monkeypatch, show_matches={"200": (None, {}, _TVDB_FALLBACK)})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "200", "tv_show_name": "Aqui no hay quien viva", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "200", "archived": "0"}],
+        show_comments=[
+            {
+                "id": "1",
+                "parent_comment_id": "",
+                "tv_show_id": "200",
+                "comment": "Great show",
+                "created_at": "2026-01-01 00:00:00",
+            }
+        ],
+        rewatches=[
+            {
+                "episode_id": "1",
+                "cpt": "2",
+                "created_at": "2026-01-01 00:00:00",
+                "updated_at": "2026-01-01 00:00:00",
+                "tv_show_name": "Aqui no hay quien viva",
+                "episode_season_number": "1",
+                "episode_number": "1",
+            }
+        ],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["comments"] == 1
+    assert summary["rewatches"] == 2  # cpt="2" -> two WatchEvent rows

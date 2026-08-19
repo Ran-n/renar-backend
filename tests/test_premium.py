@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.607537
-Revised: 2026/08/05 21:48:04.144643
+Revised: 2026/08/18 17:10:44.109913
 
 Premium accounts: badge derivation, style colors, verification requests,
 custom posters (upload + GC) and the admin grant/revoke/verify actions.
@@ -12,12 +12,15 @@ import base64
 import io
 from datetime import timedelta
 
+import pytest
 from conftest import ADMIN_BASIC as BASIC
 from PIL import Image as PILImage
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import Image, Title, User, utcnow
 from renar_backend.users.premium import PALETTE
+
+pytestmark = pytest.mark.regression
 
 COLOR = PALETTE[0]
 COLOR2 = PALETTE[1]

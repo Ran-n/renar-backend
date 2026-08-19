@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.984505
-Revised: 2026/07/27 09:56:23.130946
+Revised: 2026/08/18 17:42:31.646461
 
 Auth endpoints: register, login, me, profile, password change, account delete.
 """
@@ -10,6 +10,7 @@ Auth endpoints: register, login, me, profile, password change, account delete.
 import secrets
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from conftest import PASSWORD, login, register
 
 from renar_backend.database import SessionLocal
@@ -25,6 +26,8 @@ from renar_backend.models import (
     User,
     WatchEvent,
 )
+
+pytestmark = pytest.mark.regression
 
 # ---------- register ----------
 
@@ -297,6 +300,22 @@ def test_login_over_72_byte_password_unauthorized_not_500(client):
     register(client, "alice")
     r = client.post("/auth/login", data={"username": "alice", "password": "x" * 100})
     assert r.status_code == 401
+
+
+def test_login_username_with_nul_byte_unauthorized_not_500(client):
+    # Postgres text columns reject NUL bytes outright — filtering by one
+    # unguarded would otherwise be an unhandled DataError (500), not a
+    # normal login rejection (found by tests/test_fuzz.py).
+    r = client.post("/auth/login", data={"username": "alice\x00", "password": PASSWORD})
+    assert r.status_code == 401
+
+
+def test_register_username_with_nul_byte_rejected_not_500(client):
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice\x00", "email": "alice@example.com", "password": PASSWORD},
+    )
+    assert r.status_code == 422
 
 
 # ---------- me / tokens ----------

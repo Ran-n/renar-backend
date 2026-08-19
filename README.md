@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/08/06 10:27:23.324447 )
+[//]: # (+ Revised: 	2026/08/18 17:45:40.105371 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Renar Backend
@@ -173,7 +173,22 @@ uv run pytest
 
 The suite spins up the app against a throwaway schema on the local Postgres
 server (no `.env` or API keys needed) and covers every endpoint's happy and
-error paths.
+error paths. That default run is the fast unit suite plus a few always-on
+categories (`property`, `fuzz`, `snapshot`); everything that spins up a real
+process or hits the network is gated behind its own marker and selected
+explicitly:
+
+```powershell
+uv run pytest -m integration        # real uvicorn process on a real socket
+uv run pytest -m smoke              # fastest post-boot sanity check
+uv run pytest -m regression         # curated critical-path subset
+uv run pytest -m security           # bandit (SAST) + pip-audit (needs network)
+uv run pytest -m load               # short headless locust burst
+```
+
+Mutation testing (`mutmut`, config in `pyproject.toml`'s `[tool.mutmut]`)
+needs WSL or Linux — it has no native Windows support and isn't runnable
+from a plain PowerShell/cmd shell.
 
 ## Notes
 

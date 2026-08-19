@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/07/21 09:51:02.517663
+Revised: 2026/08/18 14:35:48.776130
 
 Shared Title resolution: every place that addresses a global title by
 (media_type, tmdb_id-or-title text) — library adds, imports, comments,
@@ -56,14 +56,19 @@ def resolve_genres(db: Session, names: list[str] | None) -> list[Genre]:
     return genres
 
 
-def find_title(db: Session, media_type: MediaType, tmdb_id: int | None, title: str | None) -> Title | None:
-    """Locate the shared Title row by its identity: tmdb_id when given,
-    otherwise the normalized title text. Returns None when nobody has
-    created that title yet.
+def find_title(
+    db: Session, media_type: MediaType, tmdb_id: int | None, title: str | None, *, tvdb_id: int | None = None
+) -> Title | None:
+    """Locate the shared Title row by its identity, in priority order:
+    tmdb_id, then tvdb_id (TheTVDB v4 fallback for a show TMDB hasn't
+    matched — see users/tvtime_import.py), then the normalized title text.
+    Returns None when nobody has created that title yet.
     """
     query = db.query(Title).filter(Title.media_type == media_type)
     if tmdb_id is not None:
         return query.filter(Title.tmdb_id == tmdb_id).first()
+    if tvdb_id is not None:
+        return query.filter(Title.tvdb_id == tvdb_id).first()
     if title:
         return query.filter(Title.tmdb_id.is_(None), Title.title_key == normalize_title_key(title)).first()
     return None
@@ -74,6 +79,7 @@ def backfill_title_tmdb_id(
     title_row: Title,
     tmdb_id: int,
     *,
+    title: str | None = None,
     poster_url: str | None = None,
     runtime_minutes: int | None = None,
     total_episodes: int | None = None,
@@ -84,6 +90,13 @@ def backfill_title_tmdb_id(
     TMDB failure clears up. Without this, a title-text match against that
     row's existing (tmdb_id-less) Title reconciles the entry but never
     upgrades the Title itself, so it stays degraded forever.
+
+    `title`, when given, replaces the row's stored `title` unconditionally
+    (unlike the metadata fields below, which only fill gaps) — an unmatched
+    row's title is whatever the source gave us (a raw import name, TV
+    Time's un-translated text, ...), and the newly resolved `tmdb_id` means
+    that's no longer the best text available; the caller's own resolved
+    title is.
 
     Race-safe like resolve_genres/find_or_create_title: a concurrent import
     worker claiming the same tmdb_id for a *different* Title (a genuine
@@ -96,6 +109,8 @@ def backfill_title_tmdb_id(
         with db.begin_nested():
             title_row.tmdb_id = tmdb_id
             title_row.title_key = None
+            if title:
+                title_row.title = title
             if poster_url and not title_row.poster_url:
                 title_row.poster_url = poster_url
             if runtime_minutes and not title_row.runtime_minutes:
@@ -107,12 +122,53 @@ def backfill_title_tmdb_id(
         _log.info("tmdb_id=%s already claimed by another title; leaving %r unmatched", tmdb_id, title_row.title)
 
 
+def backfill_title_tvdb_id(
+    db: Session,
+    title_row: Title,
+    tvdb_id: int,
+    *,
+    title: str | None = None,
+    poster_url: str | None = None,
+    runtime_minutes: int | None = None,
+    total_episodes: int | None = None,
+) -> None:
+    """TVDB counterpart to backfill_title_tmdb_id: attaches TheTVDB's own
+    fallback identity to a Title that has neither tmdb_id nor tvdb_id yet —
+    the case where TMDB itself has no match at all for a show TV Time gave
+    a TVDB id for (see users/tvtime_import.py's TVDB fallback).
+
+    Never touches a Title that already has *either* identity: an existing
+    tmdb_id always wins (this only runs when TMDB found nothing), and an
+    existing tvdb_id means some earlier run already attached one. Race-safe
+    like backfill_title_tmdb_id, against the same kind of crosswalk
+    collision (via uq_title_tvdb instead of uq_title_tmdb).
+    """
+    if title_row.tmdb_id is not None or title_row.tvdb_id is not None:
+        return
+    try:
+        with db.begin_nested():
+            title_row.tvdb_id = tvdb_id
+            title_row.title_key = None
+            if title:
+                title_row.title = title
+            if poster_url and not title_row.poster_url:
+                title_row.poster_url = poster_url
+            if runtime_minutes and not title_row.runtime_minutes:
+                title_row.runtime_minutes = runtime_minutes
+            if total_episodes and not title_row.total_episodes:
+                title_row.total_episodes = total_episodes
+            db.flush()
+    except IntegrityError:
+        _log.info("tvdb_id=%s already claimed by another title; leaving %r unmatched", tvdb_id, title_row.title)
+
+
 def find_or_create_title(
     db: Session,
     media_type: MediaType,
     tmdb_id: int | None,
     title: str,
     *,
+    tvdb_id: int | None = None,
     year: int | None = None,
     poster_url: str | None = None,
     runtime_minutes: int | None = None,
@@ -123,13 +179,14 @@ def find_or_create_title(
     has tracked or commented on it yet. Race-safe: a concurrent insert of
     the same identity is resolved by re-querying after the unique-index hit.
     """
-    found = find_title(db, media_type, tmdb_id, title)
+    found = find_title(db, media_type, tmdb_id, title, tvdb_id=tvdb_id)
     if found:
         return found
     new_title = Title(
         media_type=media_type,
         tmdb_id=tmdb_id,
-        title_key=None if tmdb_id is not None else normalize_title_key(title),
+        tvdb_id=tvdb_id,
+        title_key=None if (tmdb_id is not None or tvdb_id is not None) else normalize_title_key(title),
         title=title,
         year=year,
         poster_url=poster_url,
@@ -143,7 +200,7 @@ def find_or_create_title(
     except IntegrityError:
         # another import/request created the same global Title in the meantime
         db.rollback()
-        existing = find_title(db, media_type, tmdb_id, title)
+        existing = find_title(db, media_type, tmdb_id, title, tvdb_id=tvdb_id)
         if existing is None:  # rollback also undid unrelated state; caller must retry
             raise
         return existing
