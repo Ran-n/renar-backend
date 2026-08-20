@@ -1633,6 +1633,33 @@ can't outlive their reloader).
 
 ---
 
+## Observability
+
+### Crash/error visibility: a split local log file, not Sentry
+
+`__main__.py`'s `_log_config()` writes a second rotating file,
+`logs/renar-backend-errors.log`, containing only WARNING+ records (the same
+records that land in the full `renar-backend.log`, just filtered) — including
+unhandled-request-exception tracebacks, which propagate through uvicorn's
+`uvicorn.error` logger into `uvicorn`'s handlers.
+
+**Why not Sentry (or an equivalent hosted service):** evaluated and
+explicitly declined. It would have covered the same gap (a production crash
+failing silently) with more capability — dashboard, alerting, dedup/grouping
+of repeat errors — but requires signing up for a third-party account, which
+wasn't something to just go do unilaterally on the project owner's behalf.
+The split-log approach needed zero new dependencies, zero new accounts, and
+zero new infrastructure — a pure stdlib `logging` change.
+
+**Trade-off accepted:** this is fully passive. Nothing pushes a notification
+when a new error appears; the error log still has to be opened and checked.
+Revisit Sentry/GlitchTip (self-hosted, Sentry-protocol-compatible) once
+there's a deployed production environment and a decision to actually use a
+hosted or self-hosted error-tracking account — see `docs/backlog.md`'s
+HTTPS-by-default entry for the matching "needs prod access" pattern.
+
+---
+
 ## Package structure (Common Closure Principle)
 
 ### Splitting `routers/admin.py` into `routers/admin/`

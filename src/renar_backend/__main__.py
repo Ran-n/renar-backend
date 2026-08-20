@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:13.871671
-Revised: 2026/08/18 17:25:23.882666
+Revised: 2026/08/20 16:59:28.664042
 """
 
 import logging
@@ -21,6 +21,9 @@ from renar_backend._devserver import ensure_port_free
 _SRC_DIR = str(Path(__file__).resolve().parents[1])
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _LOG_FILE = _BACKEND_DIR / "logs" / "renar-backend.log"
+# WARNING+ only, same records as _LOG_FILE — lets a crash/error check skim
+# one small file instead of grepping the full (mostly INFO/access-log) one.
+_ERROR_LOG_FILE = _BACKEND_DIR / "logs" / "renar-backend-errors.log"
 
 _HOST = "0.0.0.0"  # nosec B104 -- must listen on all interfaces for LAN/mobile clients
 _PORT = 8000
@@ -61,13 +64,24 @@ def _log_config() -> dict:
         "backupCount": 5,
         "encoding": "utf-8",
     }
-    # uvicorn's own loggers keep their coloured console handler and gain the file handler.
-    config["loggers"]["uvicorn"]["handlers"].append("file")
+    config["handlers"]["errors_file"] = {
+        "formatter": "app",
+        "class": "logging.handlers.RotatingFileHandler",
+        "filename": str(_ERROR_LOG_FILE),
+        "maxBytes": 10_000_000,
+        "backupCount": 5,
+        "encoding": "utf-8",
+        "level": "WARNING",
+    }
+    # uvicorn's own loggers keep their coloured console handler and gain the file handlers.
+    # uvicorn.error (unhandled exception tracebacks) propagates into "uvicorn" — no separate
+    # entry needed for it to reach errors_file too.
+    config["loggers"]["uvicorn"]["handlers"].extend(["file", "errors_file"])
     config["loggers"]["uvicorn.access"]["handlers"].append("file")
     # Root logger: this is what every renar_backend.* module logger propagates to.
     # basicConfig() in main.py becomes a no-op once this runs, since it only acts when
     # the root logger has no handlers yet — so this replaces it, not duplicates it.
-    config["root"] = {"handlers": ["app_console", "file"], "level": "INFO"}
+    config["root"] = {"handlers": ["app_console", "file", "errors_file"], "level": "INFO"}
     return config
 
 

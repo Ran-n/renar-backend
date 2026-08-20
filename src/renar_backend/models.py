@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/08/18 20:18:51.358776
+Revised: 2026/08/20 17:21:29.513060
 """
 
 import enum
@@ -945,6 +945,10 @@ class LibraryEntry(Base):
     @property
     def show_status(self) -> str | None:
         return self.title_ref.show_status
+
+    @property
+    def release_date(self) -> date | None:
+        return self.title_ref.release_date
 
     @property
     def genres(self) -> list[str]:
