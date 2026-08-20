@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/07/27 00:00:00.000000
+Revised: 2026/08/19 19:11:30.880427
 
 Import a TV Time GDPR export zip: shows, episode history, movies, favorites.
 One of several importers registered in routers/imports.py's dispatch table
@@ -47,6 +47,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
+from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -583,6 +584,10 @@ def _upsert_library_entry(
                 runtime_minutes=title_meta.get("runtime_minutes"),
                 total_episodes=title_meta.get("total_episodes"),
             )
+        if inspect(title_row).deleted:
+            # tmdb_id/tvdb_id was already claimed by another Title: merged
+            # into it and this row no longer exists — nothing left to sync.
+            return
         if tvdb_episodes and title_row.tmdb_id is None:
             sync_tvdb_episodes(db, title_row, tvdb_episodes)
 

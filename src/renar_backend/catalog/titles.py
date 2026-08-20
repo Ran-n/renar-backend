@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/08/18 14:35:48.776130
+Revised: 2026/08/20 08:24:31.428234
 
 Shared Title resolution: every place that addresses a global title by
 (media_type, tmdb_id-or-title text) — library adds, imports, comments,
@@ -12,10 +12,21 @@ implementation of the identity rules described on the Title model.
 
 import logging
 
+from sqlalchemy import func as db_func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from ..models import Genre, LibraryEntry, MediaType, Title, normalize_title_key
+from ..models import (
+    Comment,
+    Episode,
+    EpisodeRatingAggregate,
+    Genre,
+    LibraryEntry,
+    MediaType,
+    Title,
+    TmdbCache,
+    normalize_title_key,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -74,6 +85,34 @@ def find_title(
     return None
 
 
+def search_local_titles(db: Session, media_type: MediaType, query: str, limit: int = 10) -> list[Title]:
+    """Fallback for /tmdb/search when TMDB is unreachable: substring match
+    against titles Renar already knows about (tmdb_id required — these feed
+    the same add/detail flow as live TMDB results, which key off it)."""
+    return (
+        db.query(Title)
+        .filter(Title.media_type == media_type, Title.tmdb_id.isnot(None), Title.title.ilike(f"%{query}%"))
+        .order_by(Title.title)
+        .limit(limit)
+        .all()
+    )
+
+
+def popular_local_titles(db: Session, media_type: MediaType, limit: int = 20) -> list[Title]:
+    """Fallback for /tmdb/trending and /tmdb/popular when TMDB is
+    unreachable: titles ranked by how many users have added them, since
+    there's no TMDB popularity score to fall back on locally."""
+    return (
+        db.query(Title)
+        .join(LibraryEntry, LibraryEntry.title_id == Title.id)
+        .filter(Title.media_type == media_type, Title.tmdb_id.isnot(None))
+        .group_by(Title.id)
+        .order_by(db_func.count(LibraryEntry.id).desc())
+        .limit(limit)
+        .all()
+    )
+
+
 def backfill_title_tmdb_id(
     db: Session,
     title_row: Title,
@@ -119,7 +158,20 @@ def backfill_title_tmdb_id(
                 title_row.total_episodes = total_episodes
             db.flush()
     except IntegrityError:
-        _log.info("tmdb_id=%s already claimed by another title; leaving %r unmatched", tmdb_id, title_row.title)
+        winner = find_title(db, title_row.media_type, tmdb_id, None)
+        if winner is None or winner.id == title_row.id:
+            _log.info("tmdb_id=%s already claimed by another title; leaving %r unmatched", tmdb_id, title_row.title)
+            return
+        try:
+            with db.begin_nested():
+                merge_titles(db, loser=title_row, winner=winner)
+        except IntegrityError:
+            _log.warning(
+                "tmdb_id=%s already claimed by title_id=%s; merge of duplicate %r also failed, leaving unmatched",
+                tmdb_id,
+                winner.id,
+                title_row.title,
+            )
 
 
 def backfill_title_tvdb_id(
@@ -159,7 +211,139 @@ def backfill_title_tvdb_id(
                 title_row.total_episodes = total_episodes
             db.flush()
     except IntegrityError:
-        _log.info("tvdb_id=%s already claimed by another title; leaving %r unmatched", tvdb_id, title_row.title)
+        winner = find_title(db, title_row.media_type, None, None, tvdb_id=tvdb_id)
+        if winner is None or winner.id == title_row.id:
+            _log.info("tvdb_id=%s already claimed by another title; leaving %r unmatched", tvdb_id, title_row.title)
+            return
+        try:
+            with db.begin_nested():
+                merge_titles(db, loser=title_row, winner=winner)
+        except IntegrityError:
+            _log.warning(
+                "tvdb_id=%s already claimed by title_id=%s; merge of duplicate %r also failed, leaving unmatched",
+                tvdb_id,
+                winner.id,
+                title_row.title,
+            )
+
+
+def merge_titles(db: Session, *, loser: Title, winner: Title) -> None:
+    """Fold a duplicate, still-unmatched Title into the Title that already
+    holds the identity (tmdb_id/tvdb_id) it was just about to claim.
+
+    Happens when a transient TMDB/TVDB outage let an import create a fresh
+    unmatched row for a show that's already tracked under a different Title
+    (see backfill_title_tmdb_id/backfill_title_tvdb_id's IntegrityError
+    branch) — without this, the two rows stay permanently split and every
+    caller resolving `winner` never sees `loser`'s library entries, watches,
+    ratings, or comments.
+
+    Every row referencing `loser` by title_id is repointed onto `winner`;
+    where that collides with something `winner` already has (same user's
+    LibraryEntry, a synced Episode, a cached TmdbCache entry), `winner`'s
+    own copy wins — it carries the actually-resolved identity — and the
+    loser's counterpart is dropped rather than reconciled field-by-field.
+    Per-episode rating aggregates are the one exception: those are real
+    summed user ratings, so on collision the two sides are added together
+    instead of one being discarded. `loser` is deleted once nothing
+    references it anymore. Caller must run this inside a still-open
+    transaction/savepoint (it's meant to be called from the `except
+    IntegrityError` branch of a failed backfill, itself inside one).
+    """
+    if loser.id == winner.id:
+        return
+
+    winner_users = {uid for (uid,) in db.query(LibraryEntry.user_id).filter(LibraryEntry.title_id == winner.id)}
+    for entry in db.query(LibraryEntry).filter(LibraryEntry.title_id == loser.id):
+        if entry.user_id in winner_users:
+            _log.warning(
+                "merge_titles: user_id=%s tracks both title_id=%s and title_id=%s; dropping the duplicate entry",
+                entry.user_id,
+                loser.id,
+                winner.id,
+            )
+            db.delete(entry)
+        else:
+            entry.title_id = winner.id
+            if entry.rating is not None:
+                winner.rating_sum += entry.rating
+                winner.rating_count += 1
+    db.flush()
+
+    winner_episodes = {
+        (season, num)
+        for season, num in db.query(Episode.season, Episode.episode_number).filter(Episode.title_id == winner.id)
+    }
+    for episode in db.query(Episode).filter(Episode.title_id == loser.id):
+        if (episode.season, episode.episode_number) in winner_episodes:
+            db.delete(episode)
+        else:
+            episode.title_id = winner.id
+    db.flush()
+
+    winner_aggregates = {
+        (agg.season, agg.episode): agg
+        for agg in db.query(EpisodeRatingAggregate).filter(EpisodeRatingAggregate.title_id == winner.id)
+    }
+    for agg in db.query(EpisodeRatingAggregate).filter(EpisodeRatingAggregate.title_id == loser.id):
+        existing = winner_aggregates.get((agg.season, agg.episode))
+        if existing is not None:
+            existing.rating_sum += agg.rating_sum
+            existing.rating_count += agg.rating_count
+            db.delete(agg)
+        else:
+            agg.title_id = winner.id
+    db.flush()
+
+    winner_cache_keys = {
+        (cache.kind, cache.season, cache.language)
+        for cache in db.query(TmdbCache).filter(TmdbCache.title_id == winner.id)
+    }
+    for cache in db.query(TmdbCache).filter(TmdbCache.title_id == loser.id):
+        if (cache.kind, cache.season, cache.language) in winner_cache_keys:
+            db.delete(cache)
+        else:
+            cache.title_id = winner.id
+    db.flush()
+
+    db.query(Comment).filter(Comment.title_id == loser.id).update({"title_id": winner.id})
+
+    # Via the ORM relationship, not a raw Core statement on title_genres:
+    # `loser` is about to be db.delete()'d, and the ORM independently manages
+    # its own secondary-table rows for that delete — a Core-level DELETE here
+    # would race it and blow up with StaleDataError when the ORM's cleanup
+    # finds nothing left to remove.
+    winner_genre_names = {g.name for g in winner.genre_rows}
+    for genre in list(loser.genre_rows):
+        if genre.name not in winner_genre_names:
+            winner.genre_rows.append(genre)
+            winner_genre_names.add(genre.name)
+    loser.genre_rows = []
+
+    for field in (
+        "poster_url",
+        "backdrop_url",
+        "runtime_minutes",
+        "total_episodes",
+        "total_seasons",
+        "overview",
+        "tagline",
+        "imdb_id",
+        "wikidata_id",
+    ):
+        if getattr(winner, field) is None and getattr(loser, field) is not None:
+            setattr(winner, field, getattr(loser, field))
+
+    db.flush()
+    db.delete(loser)
+    db.flush()
+    _log.info(
+        "merge_titles: merged duplicate title_id=%s (%r) into title_id=%s (%r)",
+        loser.id,
+        loser.title,
+        winner.id,
+        winner.title,
+    )
 
 
 def find_or_create_title(

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/08/18 18:07:58.731691
+Revised: 2026/08/19 19:11:30.683774
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -14,11 +14,11 @@ import logging
 import time
 from datetime import date, timedelta
 
-from sqlalchemy import or_
+from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session
 
 from .. import task_runs
-from ..catalog.titles import backfill_title_tmdb_id
+from ..catalog.titles import backfill_title_tmdb_id, find_title
 from ..database import SessionLocal
 from ..models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus, utcnow
 from ..tmdb.tmdb_http import tmdb_get
@@ -285,23 +285,29 @@ def retry_unmatched_titles(
             continue
 
         tmdb_id = found["id"]
-        name_field = "name" if title_row.media_type == MediaType.tv_show else "title"
+        media_type = title_row.media_type
+        name_field = "name" if media_type == MediaType.tv_show else "title"
         resolved_title = found.get(name_field) or title_row.title
         backfill_title_tmdb_id(db, title_row, tmdb_id, title=resolved_title)
-        if title_row.tmdb_id != tmdb_id:
+        # tmdb_id was already claimed by another Title: merge_titles (inside
+        # backfill_title_tmdb_id) folds title_row into that Title and deletes
+        # title_row, so the row now carrying tmdb_id is that other Title, not
+        # title_row itself — re-resolve before checking/using it below.
+        resolved = title_row if not inspect(title_row).deleted else find_title(db, media_type, tmdb_id, None)
+        if resolved is None or resolved.tmdb_id != tmdb_id:
             db.rollback()  # lost a race to another writer claiming this tmdb_id first
             continue
         db.commit()
 
         try:
-            fetch = fetch_show if title_row.media_type == MediaType.tv_show else fetch_film
+            fetch = fetch_show if media_type == MediaType.tv_show else fetch_film
             data = fetch(tmdb_id)
-            store_details(db, title_row, data)
+            store_details(db, resolved, data)
             db.commit()
         except Exception as exc:
             # identity (tmdb_id, title) is already saved above; only the
             # richer metadata (genres, overview, ...) is missing this round
-            _log.warning("TMDB details fetch failed after relinking title %s (tmdb %s): %s", title_row.id, tmdb_id, exc)
+            _log.warning("TMDB details fetch failed after relinking title %s (tmdb %s): %s", resolved.id, tmdb_id, exc)
         fixed += 1
         if pace_seconds:
             time.sleep(pace_seconds)  # spread requests instead of bursting TMDB

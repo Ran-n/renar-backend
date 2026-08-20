@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.246595
-Revised: 2026/07/19 03:50:40.385946
+Revised: 2026/08/20 08:25:22.088305
 
 TMDB write-through cache: persistence for tracked titles, freshness
 window, offline fallback, typed Title columns, notifier integration and
@@ -277,6 +277,52 @@ def test_trending_shows_premium_users_custom_poster(client, alice, monkeypatch):
     assert r.status_code == 200
     result = next(x for x in r.json() if x["tmdb_id"] == 100)
     assert result["poster_url"] == custom_poster_url
+
+
+def test_search_falls_back_to_local_catalog_when_tmdb_down(client, alice, monkeypatch):
+    _, headers = alice
+    add_show(client, headers, monkeypatch, tmdb_id=100)
+
+    def _search_down(path, params=None):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB")
+
+    monkeypatch.setattr(tmdb_router, "tmdb_get", _search_down)
+    r = client.get("/tmdb/search", params={"media_type": "tv_show", "query": "show"}, headers=headers)
+    assert r.status_code == 200
+    result = next(x for x in r.json() if x["tmdb_id"] == 100)
+    assert result["title"] == "The Show"
+    assert result["vote_average"] is None
+
+
+def test_search_404_does_not_fall_back(client, alice, monkeypatch):
+    """A genuine "nothing found" from TMDB is not TMDB being down — it must
+    surface as an empty/error result, not silently swap in local titles."""
+    _, headers = alice
+
+    def _search_404(path, params=None):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found on TMDB")
+
+    monkeypatch.setattr(tmdb_router, "tmdb_get", _search_404)
+    r = client.get("/tmdb/search", params={"media_type": "tv_show", "query": "show"}, headers=headers)
+    assert r.status_code == 404
+
+
+def test_popular_falls_back_to_local_catalog_ranked_by_library_adds(client, alice, bob, make_user, monkeypatch):
+    _, alice_headers = alice
+    _, bob_headers = bob
+    _, carol_headers = make_user("carol")
+    add_show(client, alice_headers, monkeypatch, tmdb_id=100)  # 1 add
+    add_show(client, bob_headers, monkeypatch, tmdb_id=200)  # 2 adds
+    add_show(client, carol_headers, monkeypatch, tmdb_id=200)
+
+    def _popular_down(path, params=None):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB")
+
+    monkeypatch.setattr(tmdb_router, "tmdb_get", _popular_down)
+    r = client.get("/tmdb/popular", params={"media_type": "tv_show"}, headers=alice_headers)
+    assert r.status_code == 200
+    ids = [x["tmdb_id"] for x in r.json()]
+    assert ids[0] == 200  # more library adds ranks first
 
 
 def test_trending_ignores_custom_poster_without_premium(client, alice, monkeypatch, db):

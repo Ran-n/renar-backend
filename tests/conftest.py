@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/07/21 09:51:05.354838
+Revised: 2026/08/20 10:49:47.970772
 
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
@@ -86,6 +86,7 @@ def _fresh_db():
     Base.metadata.create_all(engine)
     engine.dispose()
     from renar_backend import site_settings, task_runs
+    from renar_backend.routers import svc
     from renar_backend.users import export_queue, renar_import, tvtime_import
 
     task_runs._enabled_cache = None  # each test gets a fresh schema; don't leak a prior test's cache
@@ -101,6 +102,7 @@ def _fresh_db():
     export_queue._progress.clear()
     renar_import._progress.clear()
     tvtime_import._progress.clear()
+    svc._auth_failures.clear()
     yield
 
 

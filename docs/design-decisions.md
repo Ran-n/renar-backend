@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/19 12:36:49.479998 )
+[//]: # (+ Revised: 	2026/08/20 10:49:48.095429 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -722,6 +722,22 @@ collide with any existing or planned honeypot path.
 posture elsewhere in this file — an unauthenticated prober should see no
 evidence the route exists at all.
 
+**Why wrong-secret attempts get their own failure counter, not just the
+general flood limit:** `AbuseGuardMiddleware`'s probe-scanner ban
+(`_matches_no_route`) only fires for paths that don't match any route at
+all — `/svc/bans` always matches (it's a real route that 404s *on
+purpose*), so a caller hammering it with wrong secrets forever was invisible
+to that check and only bounded by the much higher generic flood-ban
+threshold. `_require_internal_secret` now keeps its own small
+per-IP sliding window and calls the same `strike_and_maybe_ban`/`permaban`
+escalation a probe hit would trigger once a caller clears a few failures a
+minute — so guessing the secret escalates like any other scanner, not like
+ordinary traffic. Checked against `site_settings.exempt_ips` first (same
+list `AbuseGuardMiddleware` itself honors) and skipped entirely for a match
+— the frontend calls this route from localhost, so a stale/misconfigured
+local deployment retrying with a wrong secret must never end up banning the
+machine it's running on.
+
 ### Admin panel: server-rendered HTML behind HTTP Basic, not a JSON API + SPA
 
 `/admin` renders HTML directly from FastAPI rather than exposing admin data
@@ -850,6 +866,24 @@ code path, and gating on "somebody tracks it" keeps growth bounded.
 Vote averages are deliberately *not* trusted from old copies of typed
 data — they change constantly and are read from the payload like
 everything else, stale only during outages.
+
+### Search/trending/popular fall back to the local catalog, but only on a genuine TMDB outage
+
+`GET /tmdb/search`, `/trending`, and `/popular` catch a 502/503/504 from
+`tmdb_get` (TMDB unreachable, misconfigured, or erroring) and serve results
+from `titles` instead — a substring title match for search, library-add
+count for trending/popular. A 404 (TMDB reached fine, genuinely nothing
+found) is not caught and still surfaces as-is. Both fallbacks require
+`tmdb_id` on the row, since results feed the same add/detail flow as live
+TMDB results, which key off it.
+
+**Why:** these three are the only remaining "browsing" endpoints that
+outright failed during a TMDB outage (details/season/credits already had
+the write-through cache's stale-copy fallback). Unlike that cache, there's
+nothing to persist here — the fallback is just Renar's own already-tracked
+titles — so it can only ever surface things someone has already added, not
+TMDB's full catalog; a title nobody's added yet is still undiscoverable
+until TMDB is back up.
 
 ### `GET /tmdb/credits` returns the full cast and a department-tagged crew list, uncapped
 
@@ -1439,6 +1473,33 @@ count as "new" and doesn't move the show. Re-ranking happens after the
 fully-caught-up exclusion and before the `limit` slice, so a show only
 bumped into view by the exclusion becoming false can still win the #2
 slot the same query.
+
+### Nested `EXISTS` correlation needs every outer level named explicitly
+
+`_unwatched_aired_episode_clause()`'s inner `EXISTS` (the `EpisodeWatch`
+check above) sits two query levels down from the `LibraryEntry` row it
+needs to match: the outer `EXISTS` correlates `Episode` to `LibraryEntry`,
+and this inner one correlates `EpisodeWatch` to that same `LibraryEntry`
+*and* to the outer `Episode`. SQLAlchemy's auto-correlation only reaches
+the immediately enclosing query by default — one level, not two — so a
+bare `~exists().where(EpisodeWatch.media_item_id == LibraryEntry.id, ...)`
+silently emitted `FROM episode_watches, media_items`, treating
+`media_items` as a fresh, uncorrelated table instead of the specific outer
+row. That turned "has *this* item's episode been watched" into "has *any*
+item's same season/episode number been watched by anyone" — in a large
+library that matched almost everywhere, so nearly every in-progress show
+was wrongly excluded as "fully caught up" and vanished from Home.
+
+**Fix:** `.correlate(LibraryEntry, Episode)` on the inner `exists()`,
+naming both outer levels explicitly. Passing only `LibraryEntry` isn't
+enough either — that stops SQLAlchemy's *automatic* correlation of
+`Episode` too, reintroducing the same bug one level up (`FROM
+episode_watches, episodes` instead of matching the outer `Episode`).
+General lesson for this codebase: any `EXISTS`/`exists()` nested inside
+another correlated subquery needs `.correlate(...)` listing every outer
+table it references, not just the nearest one — silent, uncorrelated SQL
+produces no error and no wrong-looking query when inspected casually
+(`str(query)` still looks plausible), only a wrong row count.
 
 ### `update_media` rejects TV-only fields on a film
 
