@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/20 11:54:15.788119 )
+[//]: # (+ Revised: 	2026/08/20 17:17:27.582996 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.16.0] - 2026-08-20
+
+### Added
+
+- `Title.release_date` exposed on `TitleOut` and `LibraryEntryOut` (via a new
+  `LibraryEntry.release_date` passthrough), so a not-yet-released movie/show
+  added to the library can show its release date — was already stored, just
+  never returned to clients.
+- `logs/renar-backend-errors.log`: a second rotating log file capturing only
+  WARNING+ records (including unhandled-request-exception tracebacks), so a
+  crash/error check doesn't mean scanning the full log's routine noise.
 
 ## [0.15.0] - 2026-08-20
 

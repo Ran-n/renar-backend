@@ -173,19 +173,6 @@ fallback identity, not just a name source".
   or private-only; does the TV Time importer target this once it exists (see
   the TV Time import section above).
 
-- **[Blocking for 1.0] Expose `MediaItem.release_date` in the media API response.**
-  The column exists (`models.py:568`) and is populated from TMDB, but no
-  response schema returns it, so the frontend has no way to show a movie's
-  or series' release date. Needed for renar-frontend's matching backlog
-  entry ("Unreleased titles/seasons/episodes need a clear 'not yet
-  launched' indicator, plus a release date") — a not-yet-released item
-  (e.g. an upcoming movie added to the library ahead of its premiere)
-  needs to show that date on the title page and info page. `Episode.
-  air_date` is already used server-side for the unaired-episode guard
-  (`routers/media.py`'s `_unwatched_aired_episode_clause`/`_check_episode_
-  not_future`) but likewise isn't exposed per-episode for display purposes
-  today — check whether it needs adding to the episode response too.
-
 - **[Future] Additional external rating sources (IMDb, Rotten Tomatoes, Metacritic)
   alongside TMDB's `vote_average`.** OMDb (omdbapi.com) is the candidate
   source — a single call returns IMDb rating + vote count, plus Rotten
@@ -482,17 +469,18 @@ fallback identity, not just a name source".
   check in `test_normalization.py`. Schema must stay BCNF (a review's rating
   is a fact about the user+title pair, not a copy of anything else).
 
-- **[Blocking for 1.0] Share — deep link still needed; frontend shipped without one.**
-  renar-frontend's share buttons (title cards, title page, comment tiles)
-  ship today generating a branded PNG card (Pillow, client-side) and handing
-  it to the native share sheet / clipboard — no link involved, since there's
-  no public web frontend hosted yet to link to (see renar-frontend's
-  `docs/backlog.md`). This backend half is still open for whenever that
-  changes: shareable deep links or redirect URLs for a title page, a
-  specific episode, and a comment (anchor within a thread). Options:
-  generate canonical share URLs in the API response, or add a
-  `/share/{type}/{id}` redirect endpoint. Decide on a URL scheme once
-  `renar.breren.com` is actually hosting something to redirect to.
+- **[Future] Share — add a deep link once the frontend's share cards are
+  ready for one.** renar-frontend's share buttons (title cards, title page,
+  comment tiles) already ship, generating a branded PNG card (Pillow,
+  client-side) and handing it to the native share sheet / clipboard — this
+  works standalone today, no link involved, since there's no public web
+  frontend hosted yet to link to (see renar-frontend's `docs/backlog.md`).
+  This backend half is the add-on for whenever that changes: shareable deep
+  links or redirect URLs for a title page, a specific episode, and a
+  comment (anchor within a thread). Options: generate canonical share URLs
+  in the API response, or add a `/share/{type}/{id}` redirect endpoint.
+  Decide on a URL scheme once `renar.breren.com` is actually hosting
+  something to redirect to.
 
 - **[Blocking for 1.0] Per-rewatch ratings, not a single overwritten rating.**
   Ratings are currently one value per user+title, overwritten on every
@@ -869,9 +857,3 @@ are tracked in renar-frontend's `docs/backlog.md`.
   web checkout is added, prefer a merchant-of-record processor (Stripe Tax,
   Paddle, or similar) rather than raw Stripe — it keeps VAT/sales-tax
   collection and PCI card-data scope off Renar entirely.
-
-- **[Blocking for 1.0] No crash/error monitoring wired anywhere.** No Sentry (or equivalent)
-  found in either repo. Worth adding before real (non-dev) traffic hits the
-  backend, so a production failure doesn't fail silently — ties into the
-  admin-roles and HTTPS-by-default items above as general pre-launch
-  hardening.

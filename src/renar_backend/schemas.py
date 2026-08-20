@@ -6,7 +6,7 @@ Revised: 2026/08/18 17:42:31.749953
 """
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -339,6 +339,7 @@ class TitleOut(BaseModel):
     overview: str | None = None
     tagline: str | None = None
     show_status: str | None = None
+    release_date: date | None = None
 
 
 class LibraryEntryCreate(BaseModel):
@@ -400,6 +401,7 @@ class LibraryEntryOut(BaseModel):
     overview: str | None = None
     tagline: str | None = None
     show_status: str | None = None
+    release_date: date | None = None
     url: str | None = None
     status: WatchStatus
     rating: int | None = None
