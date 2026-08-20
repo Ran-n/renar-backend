@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/20 09:36:18.287032 )
+[//]: # (+ Revised: 	2026/08/20 13:30:29.247151 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -834,15 +834,6 @@ are tracked in renar-frontend's `docs/backlog.md`.
   has accounts and comments). Blocked on the app's subdomain being picked
   to host the published pages on (`breren.com` itself is registered
   already).
-
-- **[Blocking for 1.0] TMDB attribution text is shown, but not their logo.** renar-frontend's
-  new Legal screen (`views/profile/legal_view.py`, Profile → About → Legal)
-  shows the required "This product uses the TMDB API but is not endorsed
-  or certified by TMDB" text, but TMDB's attribution guidelines also call
-  for their logo image alongside it. Download it from
-  themoviedb.org/about/logos-attribution, drop it in
-  `renar-frontend/src/renar_frontend/assets/`, and render it in that same
-  card (same pattern as `assets/tvtime_logo.png` in `import_view.py`).
 
 - **[Blocking for 1.0] No DMCA/takedown process for user-submitted content.**
   Comments and custom poster/backdrop uploads (`comments.py`, the
