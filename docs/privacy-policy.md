@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/16 09:19:09.907159 )
-[//]: # (+ Revised: 	2026/07/18 19:33:27.690167 )
+[//]: # (+ Revised: 	2026/08/20 07:56:46.188913 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 [//]: # ( ---------------------------------------------------------------------- )
@@ -26,7 +26,8 @@ _Last updated: [EFFECTIVE DATE]_
 
 Renar ("Renar", "we", "us") is a personal media tracker for films and TV
 shows, operated by Breren. This policy covers
-the Renar mobile apps, web app, and backend service. If you have
+the Renar mobile apps, web app, and backend service, and is incorporated
+by reference into our [Terms of Service](terms-of-service.md). If you have
 questions about this policy or your data, contact us at
 privacy@renar.breren.com.
 

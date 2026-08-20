@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 17:01:06.338846
-Revised: 2026/07/16 13:43:22.558615
+Revised: 2026/08/20 10:49:47.847588
 
 The /svc/bans and /svc/strikes endpoints the frontend's own anti-abuse guard
 uses to share this server's persisted ban/strike state.
@@ -38,6 +38,40 @@ def test_missing_secret_looks_like_no_route(client):
 def test_wrong_secret_looks_like_no_route(client):
     r = client.get("/svc/bans", headers={"X-Internal-Secret": "wrong"})
     assert r.status_code == 404
+
+
+def test_repeated_wrong_secret_strikes_the_caller(client):
+    for _ in range(5):
+        r = client.get("/svc/bans", headers={"X-Internal-Secret": "wrong"})
+        assert r.status_code == 404
+    with SessionLocal() as db:
+        assert db.query(Strike).filter(Strike.ip == "testclient").count() == 0
+
+    r = client.get("/svc/bans", headers={"X-Internal-Secret": "wrong"})
+    assert r.status_code == 404
+    with SessionLocal() as db:
+        strike = db.query(Strike).filter(Strike.ip == "testclient").one()
+        assert strike.count == 1
+
+
+def test_exempt_ip_never_strikes_even_with_wrong_secret(client):
+    """The frontend itself calls this from localhost — a stale/misconfigured
+    local deployment retrying with a wrong secret must never end up banning
+    the machine it's running on."""
+    with SessionLocal() as db:
+        row = db.get(SiteSettings, 1)
+        if row is None:
+            row = SiteSettings(id=1)
+            db.add(row)
+        row.exempt_ips = ["testclient"]
+        db.commit()
+    site_settings.invalidate()
+
+    for _ in range(10):
+        r = client.get("/svc/bans", headers={"X-Internal-Secret": "wrong"})
+        assert r.status_code == 404
+    with SessionLocal() as db:
+        assert db.query(Strike).filter(Strike.ip == "testclient").count() == 0
 
 
 def test_secret_unset_always_404(client):

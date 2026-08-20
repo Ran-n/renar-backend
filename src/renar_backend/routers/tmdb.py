@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/08/17 11:07:26.604818
+Revised: 2026/08/20 08:24:31.342139
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session, joinedload
 
+from ..catalog.titles import popular_local_titles, search_local_titles
 from ..database import SessionLocal, get_db
 from ..media.image_cache import store_external_image, stored_external_image
 from ..models import LibraryEntry, MediaType, Title, User
@@ -28,6 +29,15 @@ from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/tmdb", tags=["tmdb"])
 _log = logging.getLogger(__name__)
+
+# tmdb_get raises these when TMDB itself is unreachable/misconfigured/erroring
+# (as opposed to 404, which means TMDB reached us fine and genuinely has no
+# such result) — only these warrant falling back to Renar's own catalog.
+_TMDB_DOWN_STATUSES = {
+    status.HTTP_502_BAD_GATEWAY,
+    status.HTTP_503_SERVICE_UNAVAILABLE,
+    status.HTTP_504_GATEWAY_TIMEOUT,
+}
 
 
 def _locale_params(language: str) -> dict | None:
@@ -84,6 +94,27 @@ def _map_results(raw: list[dict], limit: int = 20, poster_overrides: dict[int, s
     return results
 
 
+def _map_local_titles(titles: list[Title], poster_overrides: dict[int, str] | None = None) -> list[dict]:
+    """Shape Title rows into the same result contract _map_results produces,
+    for the local-catalog fallback. No TMDB rating data lives on Title, so
+    vote_average/vote_count are always empty here."""
+    results = []
+    for t in titles:
+        poster_url = t.poster_url
+        if poster_overrides:
+            poster_url = poster_overrides.get(t.tmdb_id, poster_url)
+        results.append({
+            "tmdb_id": t.tmdb_id,
+            "title": t.title,
+            "year": t.year,
+            "poster_url": poster_url,
+            "overview": (t.overview or "")[:300],
+            "vote_average": None,
+            "vote_count": 0,
+        })
+    return results
+
+
 @router.get("/search")
 def search_tmdb(
     query: str = Query(min_length=1, max_length=200),
@@ -92,10 +123,18 @@ def search_tmdb(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    data = tmdb_get(
-        f"/search/{TMDB_KIND[media_type]}",
-        {"query": query, "include_adult": "false", **(_locale_params(language) or {})},
-    )
+    try:
+        data = tmdb_get(
+            f"/search/{TMDB_KIND[media_type]}",
+            {"query": query, "include_adult": "false", **(_locale_params(language) or {})},
+        )
+    except HTTPException as exc:
+        if exc.status_code not in _TMDB_DOWN_STATUSES:
+            raise
+        _log.warning("TMDB search unreachable (%s), falling back to local catalog for %r", exc.detail, query)
+        titles = search_local_titles(db, MediaType(media_type), query, limit=10)
+        overrides = _poster_overrides(db, user, media_type, {t.tmdb_id for t in titles})
+        return _map_local_titles(titles, poster_overrides=overrides)
     results = data.get("results", [])[:10]
     overrides = _poster_overrides(db, user, media_type, {r["id"] for r in results})
     return _map_results(results, limit=10, poster_overrides=overrides)
@@ -108,7 +147,15 @@ def trending_tmdb(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    data = tmdb_get(f"/trending/{TMDB_KIND[media_type]}/week", _locale_params(language))
+    try:
+        data = tmdb_get(f"/trending/{TMDB_KIND[media_type]}/week", _locale_params(language))
+    except HTTPException as exc:
+        if exc.status_code not in _TMDB_DOWN_STATUSES:
+            raise
+        _log.warning("TMDB trending unreachable (%s), falling back to local catalog", exc.detail)
+        titles = popular_local_titles(db, MediaType(media_type), limit=20)
+        overrides = _poster_overrides(db, user, media_type, {t.tmdb_id for t in titles})
+        return _map_local_titles(titles, poster_overrides=overrides)
     results = data.get("results", [])[:20]
     overrides = _poster_overrides(db, user, media_type, {r["id"] for r in results})
     return _map_results(results, poster_overrides=overrides)
@@ -121,7 +168,15 @@ def popular_tmdb(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    data = tmdb_get(f"/{TMDB_KIND[media_type]}/popular", _locale_params(language))
+    try:
+        data = tmdb_get(f"/{TMDB_KIND[media_type]}/popular", _locale_params(language))
+    except HTTPException as exc:
+        if exc.status_code not in _TMDB_DOWN_STATUSES:
+            raise
+        _log.warning("TMDB popular unreachable (%s), falling back to local catalog", exc.detail)
+        titles = popular_local_titles(db, MediaType(media_type), limit=20)
+        overrides = _poster_overrides(db, user, media_type, {t.tmdb_id for t in titles})
+        return _map_local_titles(titles, poster_overrides=overrides)
     results = data.get("results", [])[:20]
     overrides = _poster_overrides(db, user, media_type, {r["id"] for r in results})
     return _map_results(results, poster_overrides=overrides)

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 17:00:30.032438
-Revised: 2026/07/18 00:26:59.331987
+Revised: 2026/08/20 10:39:54.344580
 
 Machine-to-machine endpoints so the renar-frontend web server's own
 anti-abuse guard (renar-frontend/src/renar_frontend/anti_abuse.py) can
@@ -22,26 +22,61 @@ frontend exists.
 
 import hmac
 import logging
+import time
+from collections import defaultdict, deque
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from .. import site_settings
 from ..config import settings
 from ..database import get_db
 from ..models import BannedIP
-from ..users.security import load_active_temp_bans, permaban, strike_and_maybe_ban
+from ..users.security import client_ip, load_active_temp_bans, permaban, strike_and_maybe_ban
 
 router = APIRouter(prefix="/svc", tags=["svc"])
 _log = logging.getLogger(__name__)
 
+# A wrong-secret caller here is either a stale internal deployment (annoying
+# but harmless) or someone guessing the secret (not harmless) — the 404
+# posture below hides which, and unlike a real unknown-path probe this route
+# always resolves, so AbuseGuardMiddleware's own probe-scanner ban never
+# sees it. Track failures ourselves so repeated guessing still escalates
+# through the same strike/ban path a probing scanner would hit. Exempt IPs
+# (127.0.0.1/::1 by default — see site_settings) skip this entirely: the
+# frontend itself calls from localhost, and a misconfigured/stale local
+# deployment retrying with a wrong secret must never end up banning the
+# machine it's running on.
+_MINUTE = 60.0
+_FAIL_LIMIT_PER_MINUTE = 5
+_auth_failures: dict[str, deque[float]] = defaultdict(deque)
 
-def _require_internal_secret(x_internal_secret: str | None = Header(default=None)) -> None:
+
+def _require_internal_secret(request: Request, x_internal_secret: str | None = Header(default=None)) -> None:
     # 404 rather than 401/403: an unconfigured or wrong-secret caller should
     # see no evidence this route exists, matching the honeypot posture below.
-    if not settings.internal_service_secret or not hmac.compare_digest(
-        x_internal_secret or "", settings.internal_service_secret
-    ):
+    match = hmac.compare_digest(x_internal_secret or "", settings.internal_service_secret)
+    if not settings.internal_service_secret or not match:
+        _log.warning(
+            "svc auth rejected: header_present=%s header_len=%s configured_len=%s match=%s",
+            x_internal_secret is not None,
+            len(x_internal_secret or ""),
+            len(settings.internal_service_secret),
+            match,
+        )
+        ip = client_ip(request)
+        if ip in site_settings.current().exempt_ips:
+            raise HTTPException(status_code=404)
+        now = time.time()
+        failures = _auth_failures[ip]
+        while failures and failures[0] < now - _MINUTE:
+            failures.popleft()
+        failures.append(now)
+        if len(failures) > _FAIL_LIMIT_PER_MINUTE:
+            count, until = strike_and_maybe_ban(ip, f"repeated invalid /svc auth: >{_FAIL_LIMIT_PER_MINUTE}/min")
+            if until is None:
+                permaban(ip, f"{count} repeated invalid /svc auth offenses")
         raise HTTPException(status_code=404)
 
 

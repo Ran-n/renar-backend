@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/19 14:11:12.311332 )
+[//]: # (+ Revised: 	2026/08/20 11:54:15.788119 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.15.0] - 2026-08-20
+
+### Fixed
+
+- `list_media`'s `order_by=last_watched` (Home's Watch Next list):
+  `_unwatched_aired_episode_clause()`'s nested `EXISTS` wasn't correlated to
+  the outer `LibraryEntry` row, so SQLAlchemy silently cross-joined a fresh,
+  uncorrelated `media_items` into that subquery instead of matching the
+  specific item — turning "has *this* item's episode been watched" into
+  "has *any* item's same season/episode number been watched by anyone".
+  In a large library that matched almost everywhere, so nearly every
+  in-progress show was wrongly treated as fully caught up and dropped from
+  Home. Fixed with an explicit `.correlate(LibraryEntry, Episode)` on the
+  inner `EXISTS`.
+
+### Security
+
+- `/svc/bans` and `/svc/strikes` (the internal-secret-guarded endpoints
+  `renar_backend.routers.svc` exposes so the frontend's anti-abuse guard can
+  share ban state) now track repeated wrong-secret attempts per IP and
+  escalate through the same `strike_and_maybe_ban`/`permaban` path a probing
+  scanner would hit. Previously these were exempt from
+  `AbuseGuardMiddleware`'s probe-scanner ban entirely: the route is real (it
+  always resolves and 404s by design, to hide whether the secret was just
+  wrong or the route doesn't exist), so `_matches_no_route` never flagged it
+  — a caller could hammer the secret indefinitely with no consequence short
+  of the very high flood-ban threshold. Callers in `site_settings.exempt_ips`
+  (127.0.0.1/::1 by default) are skipped entirely, so a misconfigured local
+  deployment retrying with a stale secret can never end up banning the
+  machine it's running on.
+
+### Added
+
+- `/tmdb/search`, `/tmdb/trending`, and `/tmdb/popular` now fall back to
+  Renar's own catalog (substring title match / library-adds ranking) when
+  TMDB itself is unreachable (502/503/504), instead of failing outright.
+  A genuine "not found" (404) still surfaces as-is — only true TMDB
+  outages trigger the fallback. Limited to titles already tracked by
+  someone; discovering a title nobody's added yet still requires TMDB.
+- `docs/terms-of-service.md`: draft Terms of Service, matching
+  `docs/privacy-policy.md`'s DRAFT status and cross-linked with it.
+  Covers eligibility/age, accounts, acceptable use, user content, a
+  copyright/takedown contact path, TMDB attribution, premium, and
+  liability — still needs `[EFFECTIVE DATE]`/`[HOSTING PROVIDER]`/
+  `[JURISDICTION]`/`[GOVERNING LAW]` filled in and a legal review before
+  publishing.
+
+### Changed
+
+- `docs/backlog.md`: replaced the stale "no privacy policy or ToS exist"
+  item with an accurate "drafted but not published" one; added
+  `[Blocking for 1.0]` items for the still-missing TMDB logo image (the
+  required attribution text now ships in renar-frontend 0.17.4's new Legal
+  screen, but not the logo) and for the missing DMCA/takedown process for
+  user-submitted content; noted merchant-of-record/VAT/PCI scope on the
+  existing premium-payments item.
 
 ## [0.14.0] - 2026-08-19
 

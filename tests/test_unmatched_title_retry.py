@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 00:00:00.000000
-Revised: 2026/08/18 00:00:00.000000
+Revised: 2026/08/19 19:11:31.076036
 
 retry_unmatched_titles is the periodic counterpart to tmdb_get's retry/
 backoff and the raw-name-keyed import reconciliation: it's what heals a
@@ -156,11 +156,12 @@ def test_retry_survives_details_fetch_failure_but_keeps_the_match(client, alice)
     assert out["title"] == "Resolved Name"
 
 
-def test_retry_does_not_clobber_a_concurrently_claimed_tmdb_id(client, alice, bob):
-    """Mirrors backfill_title_tmdb_id's own race-safety test: if the tmdb_id
-    this row would resolve to is already owned by a *different* Title
-    (e.g. a live import just won that race), the unmatched row is left
-    alone rather than raising."""
+def test_retry_merges_into_a_concurrently_claimed_tmdb_id(client, alice, bob):
+    """If the tmdb_id this row would resolve to is already owned by a
+    *different* Title (e.g. a live import just won that race), the two rows
+    are duplicates of the same show — merge_titles folds this one into the
+    winner instead of leaving it permanently split off (see catalog/titles.py
+    and docs/backlog.md's "unmergeable Title row" entry)."""
     _, alice_headers = alice
     _, bob_headers = bob
     client.post("/media", json={"media_type": "film", "title": "Other Title", "tmdb_id": 777}, headers=bob_headers)
@@ -171,12 +172,16 @@ def test_retry_does_not_clobber_a_concurrently_claimed_tmdb_id(client, alice, bo
         n = retry_unmatched_titles(
             db, search_movie=lambda name, year: ({"id": 777, "title": "Resolved Name"}, False), pace_seconds=0
         )
-        assert n == 0
+        assert n == 1
     finally:
         db.close()
 
     out = client.get(f"/media/{item['id']}", headers=alice_headers).json()
-    assert out["tmdb_id"] is None
+    assert out["tmdb_id"] == 777
+    # winner's own title (already the canonical resolved identity) wins over
+    # the loser's — same "winner's copy wins on collision" rule merge_titles
+    # applies to every other field, not just genres/episodes/cache.
+    assert out["title"] == "Other Title"
     db = SessionLocal()
     try:
         assert db.query(Title).filter(Title.tmdb_id == 777).count() == 1

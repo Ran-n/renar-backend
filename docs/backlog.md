@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/18 21:31:16.890025 )
+[//]: # (+ Revised: 	2026/08/20 09:36:18.287032 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -113,22 +113,6 @@ tracked under `Title.tvdb_id`, upgraded to `tmdb_id` automatically the
 moment that resolves. See design-decisions.md's "TheTVDB as a genuine
 fallback identity, not just a name source".
 
-- **[Blocking for 1.0] A show already matched elsewhere can still get a second,
-  unmergeable `Title` row.** `find_or_create_title` (`catalog/titles.py`) only
-  dedups a *new* unmatched row against other unmatched rows sharing the same
-  `title_key` (`find_title`'s title-text branch) — it never cross-checks
-  against an already-*matched* `Title` stored under different text. So if, at
-  import time, TMDB's TVDB-crosswalk lookup, its name search, and every TVDB
-  alias retry all fail (a real outage, not a single-request blip — that's
-  already covered by `tmdb_get`'s retry/backoff) *and* TVDB itself has nothing
-  usable, a fresh unmatched `Title` is created even though the show is already
-  tracked under a different name. When it later resolves (periodic retry or
-  re-import), `backfill_title_tmdb_id` hits `uq_title_tmdb`, the savepoint
-  swallows the collision, and the two rows stay permanently split — same
-  failure mode as the pre-fix duplicates, just needing a rarer trigger
-  (TMDB+TVDB both down at once) instead of any transient blip. Confirmed still
-  live in the current code, not just a pre-fix artifact.
-
 - **[Blocking for 1.0] Minor: concurrent reconciles of the same entry are last-write-wins.**
   Two rows racing to reconcile into the same `LibraryEntry` aren't
   serialized — harmless today since both reconcile functions are monotonic
@@ -158,6 +142,25 @@ fallback identity, not just a name source".
   existing 1-100 rating for questionable value, and TV Time's emotion enum
   isn't fully documented from the sample export (only 4 of what's
   presumably ~8 values were observed, no confirmed label mapping).
+
+## Catalog sync
+
+- **[Future] A `Title` whose `tmdb_id` goes permanently dead (TMDB removed/
+  merged that id) never recovers on its own.** Distinct from the unmatched-
+  title case (`tmdb_id IS NULL`, healed by `retry_unmatched_titles`): this is
+  a `Title` that *has* a `tmdb_id`, but TMDB now 404s on it — observed live
+  (tmdb_id 328829/328830, `TMDB fetch failed for show <id>: 404`,
+  `tmdb_store.py`'s `sync_show_episodes`/`sync_title_details` fall back to
+  serving the last stored copy so the app stays functional, but nothing ever
+  re-resolves the id). `retry_unmatched_titles` only ever looks at `Title.
+  tmdb_id.is_(None)`, so a title stuck on a dead id is invisible to it — the
+  cached data is frozen forever unless a user manually relinks
+  (`routers/media.py`'s `_relink_tmdb`). Would need: a way to detect "this
+  tmdb_id 404s" during the existing periodic detail-resync
+  (`tmdb_store.py`), and then either the same relink-search flow unmatched
+  titles use (search by title/year for a likely successor id) or, if TMDB
+  publishes a redirect/merge crosswalk for retired ids, following that
+  directly instead of a fuzzy name search.
 
 ## Features
 
@@ -790,6 +793,16 @@ fallback identity, not just a name source".
   admin/mod-only actions per account if multiple privileged users are
   wanted, distinct from the existing single-operator panel.
 
+- **[Future] Log line formatting is hard to read.** Scheduled-job log output
+  (`social/notifier.py`'s cleanup/sync/check jobs, `catalog/titles.py`'s
+  unmatched-title retry, `tmdb/tmdb_store.py`'s fallback warnings, etc.) is
+  plain `logger.info`/`warning` text with no visual structure — scanning a
+  run's console output for the handful of lines that matter (warnings,
+  counts) among the routine ones is tedious. Worth a pass on the logging
+  setup (formatter, color/level distinction, consistent field ordering) to
+  make console output easier to skim at a glance. Not urgent — purely a
+  developer-experience/readability issue, no functional impact.
+
 - **[Blocking for 1.0] psycopg3 stale prepared plans after live schema changes.** psycopg3
   auto-prepares statements reused ~5+ times per connection. DDL that alters
   or recreates tables against a pool with existing prepared plans triggers
@@ -812,13 +825,32 @@ are tracked in renar-frontend's `docs/backlog.md`.
   the app's subdomain on `breren.com` (once picked) and the
   HTTPS-by-default item above wired to point at it.
 
-- **[Blocking for 1.0] No privacy policy or Terms of Service exist.** Both Apple and Google
-  require a live, publicly hosted URL to a privacy policy at submission
-  time (Google also wants ToS if the app has accounts/payments). The
-  `gdpr-data` folder at the workspace root suggests GDPR is already on the
-  radar — this is the point to turn that into an actual published policy
-  page, once the app's subdomain is picked to host it on (`breren.com`
-  itself is registered already).
+- **[Blocking for 1.0] Privacy policy and Terms of Service are drafted but not published.**
+  `docs/privacy-policy.md` and `docs/terms-of-service.md` exist but are
+  both marked DRAFT: `[EFFECTIVE DATE]`, `[HOSTING PROVIDER]`, and
+  `[JURISDICTION]` are unfilled placeholders, and neither has had a legal
+  review. Both Apple and Google require a live, publicly hosted URL to a
+  privacy policy at submission time (Google also wants ToS since the app
+  has accounts and comments). Blocked on the app's subdomain being picked
+  to host the published pages on (`breren.com` itself is registered
+  already).
+
+- **[Blocking for 1.0] TMDB attribution text is shown, but not their logo.** renar-frontend's
+  new Legal screen (`views/profile/legal_view.py`, Profile → About → Legal)
+  shows the required "This product uses the TMDB API but is not endorsed
+  or certified by TMDB" text, but TMDB's attribution guidelines also call
+  for their logo image alongside it. Download it from
+  themoviedb.org/about/logos-attribution, drop it in
+  `renar-frontend/src/renar_frontend/assets/`, and render it in that same
+  card (same pattern as `assets/tvtime_logo.png` in `import_view.py`).
+
+- **[Blocking for 1.0] No DMCA/takedown process for user-submitted content.**
+  Comments and custom poster/backdrop uploads (`comments.py`, the
+  custom-image fields on `LibraryEntry`) are user-generated content with no
+  documented copyright-complaint path. `routers/admin/moderation.py`
+  handles reports/removal internally, but there's no public-facing
+  takedown contact or process referenced from the ToS — needed once the
+  app is live with real users, not just for store submission.
 
 - **[Blocking for 1.0] No data-safety audit done for store submission.** Google Play's Data
   Safety form and Apple's Privacy Nutrition Label both require enumerating
@@ -842,7 +874,10 @@ are tracked in renar-frontend's `docs/backlog.md`.
   Decide before scoping: (a) wire RevenueCat or raw StoreKit/Play Billing
   for mobile premium, keeping any web-based Stripe flow separate, or (b)
   ship the first store release with premium still admin-granted only and
-  add IAP in a later version. Option (b) is the smaller first step.
+  add IAP in a later version. Option (b) is the smaller first step. If a
+  web checkout is added, prefer a merchant-of-record processor (Stripe Tax,
+  Paddle, or similar) rather than raw Stripe — it keeps VAT/sales-tax
+  collection and PCI card-data scope off Renar entirely.
 
 - **[Blocking for 1.0] No crash/error monitoring wired anywhere.** No Sentry (or equivalent)
   found in either repo. Worth adding before real (non-dev) traffic hits the

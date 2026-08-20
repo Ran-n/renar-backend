@@ -2,14 +2,14 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/08/18 12:42:15.332583
+Revised: 2026/08/20 10:36:39.730866
 """
 
 import logging
 from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from sqlalchemy import Date, and_, cast, exists, func, or_
+from sqlalchemy import Date, and_, cast, exists, func, inspect, or_
 from sqlalchemy.orm import Session
 
 from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, find_or_create_title, find_title
@@ -94,11 +94,23 @@ def _unwatched_aired_episode_clause(*, newer_than_last_watched: bool = False):
         Episode.title_id == LibraryEntry.title_id,
         Episode.air_date.isnot(None),
         Episode.air_date <= date.today(),
-        ~exists().where(
+        # .correlate(LibraryEntry): this EXISTS sits inside the outer Episode
+        # EXISTS, two levels down from the LibraryEntry it needs to match —
+        # SQLAlchemy's auto-correlation only reaches the immediately
+        # enclosing query, so without this it silently treated `media_items`
+        # as a fresh, uncorrelated table (`FROM episode_watches, media_items`)
+        # instead of the specific outer row. That turned "has this item's
+        # episode ever been watched" into "has *any* item's same season/
+        # episode number ever been watched by anyone" — which matched almost
+        # everywhere in a large library, wrongly marking nearly every show
+        # "fully caught up" and dropping it from Home's Watch Next list.
+        ~exists()
+        .where(
             EpisodeWatch.media_item_id == LibraryEntry.id,
             EpisodeWatch.season == Episode.season,
             EpisodeWatch.episode == Episode.episode_number,
-        ),
+        )
+        .correlate(LibraryEntry, Episode),
     ]
     if newer_than_last_watched:
         conditions.append(
@@ -501,6 +513,11 @@ def _relink_tmdb(item: LibraryEntry, tmdb_id: int, db: Session) -> None:
         runtime_minutes=details.get("runtime_minutes"),
         total_episodes=details.get("total_episodes"),
     )
+    if inspect(title_row).deleted:
+        # tmdb_id was already claimed by another Title: merge_titles (inside
+        # backfill_title_tmdb_id) folded title_row into it and repointed
+        # `item` onto the surviving row along the way — already resolved.
+        return
     if title_row.tmdb_id != tmdb_id:
         # lost a race to another request claiming the same tmdb_id first
         raise HTTPException(
