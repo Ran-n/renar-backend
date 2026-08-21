@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/16 09:19:09.907159 )
-[//]: # (+ Revised: 	2026/08/20 07:56:46.188913 )
+[//]: # (+ Revised: 	2026/08/20 19:03:01.572030 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 [//]: # ( ---------------------------------------------------------------------- )
@@ -13,7 +13,7 @@
 # Privacy Policy — Renar
 
 **Status: DRAFT.** Company is set (Breren); domain/contact are scoped under
-the app name (renar.breren.com, privacy@renar.breren.com).
+the app name (renar.app, privacy@renar.app).
 Still open: `[EFFECTIVE DATE]`, `[HOSTING PROVIDER]`, `[JURISDICTION]` —
 fill in once hosting is chosen (see `docs/backlog.md`, Infrastructure /
 Publishing sections). Have a lawyer review before publishing or linking
@@ -29,7 +29,7 @@ shows, operated by Breren. This policy covers
 the Renar mobile apps, web app, and backend service, and is incorporated
 by reference into our [Terms of Service](terms-of-service.md). If you have
 questions about this policy or your data, contact us at
-privacy@renar.breren.com.
+privacy@renar.app.
 
 ## What we collect
 
@@ -88,7 +88,7 @@ beyond running and securing the app.
 ## How long we keep it
 
 Account and library data is kept for as long as your account exists.
-Deleting your account (in-app, or via a request to privacy@renar.breren.com) removes
+Deleting your account (in-app, or via a request to privacy@renar.app) removes
 your user record and all associated library entries, images, and
 preferences. IP-based security logs (login attempts, rate-limit strikes)
 are kept only as long as needed for abuse detection and are not tied to
@@ -103,12 +103,12 @@ EU/EEA/UK), you may have the right to:
 - **Correct** inaccurate data (most of this you can already edit directly
   in your profile settings)
 - **Delete** your account and associated data — available directly in the
-  app, or by contacting privacy@renar.breren.com
+  app, or by contacting privacy@renar.app
 - **Export** your data in a portable format
 - **Object to or restrict** certain processing
 
 To exercise any of these, use the in-app options where available or
-contact us at privacy@renar.breren.com. We'll respond within the timeframe required
+contact us at privacy@renar.app. We'll respond within the timeframe required
 by applicable law.
 
 ## Children's privacy
@@ -117,7 +117,7 @@ Renar is not directed at children under 13 (or the minimum age required
 by your local law, e.g. 16 in some EU member states), and we do not
 knowingly collect personal information from children under that age. If
 you believe a child has created an account, contact us at
-privacy@renar.breren.com and we'll remove it.
+privacy@renar.app and we'll remove it.
 
 ## Data storage and security
 
@@ -146,4 +146,4 @@ we'll provide additional notice (e.g. in-app).
 ## Contact
 
 Questions, requests, or complaints about this policy or your data:
-privacy@renar.breren.com.
+privacy@renar.app.

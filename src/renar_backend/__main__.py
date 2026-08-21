@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:13.871671
-Revised: 2026/08/20 16:59:28.664042
+Revised: 2026/08/21 08:33:49.466180
 """
 
 import logging
@@ -28,9 +28,31 @@ _ERROR_LOG_FILE = _BACKEND_DIR / "logs" / "renar-backend-errors.log"
 _HOST = "0.0.0.0"  # nosec B104 -- must listen on all interfaces for LAN/mobile clients
 _PORT = 8000
 
+# Let's Encrypt cert for api.renar.app (DNS-01 via certbot-dns-cloudflare —
+# see docs/design-decisions.md's HTTPS entry for why DNS-01, not HTTP-01: an
+# unrelated service already owns port 80 on this host). `certs/` is
+# gitignored — nothing here ships in the repo, only exists on this
+# deployment once `certbot certonly` has been run. Falls back to plain HTTP
+# below when the files aren't present (a fresh checkout, or local dev before
+# ever running certbot) rather than crashing — this is the only run() this
+# module has, used for both the public deployment and same-machine local
+# dev, and dev shouldn't be blocked on a cert existing.
+#
+# The cert is only valid for the literal hostname api.renar.app, not
+# 127.0.0.1/localhost — connecting to this port by IP once HTTPS is active
+# will fail hostname validation. For local dev over HTTPS, add a hosts-file
+# entry (`127.0.0.1 api.renar.app`, needs an elevated editor on Windows —
+# C:\Windows\System32\drivers\etc\hosts) and connect to
+# https://api.renar.app:8000 instead: resolves straight to loopback, no
+# router round-trip, and the hostname still matches the real cert — no
+# separate self-signed cert or per-device CA install needed.
+_CERT_LIVE_DIR = _BACKEND_DIR / "certs" / "certbot-config" / "live" / "api.renar.app"
+_SSL_CERTFILE = _CERT_LIVE_DIR / "fullchain.pem"
+_SSL_KEYFILE = _CERT_LIVE_DIR / "privkey.pem"
+
 # Frontend polls these on a timer / fetches images in bulk; logging every hit just drowns out real traffic.
 # Only the console is quieted — the file handler below keeps every request, filter-free.
-_QUIET_PATHS = re.compile(r"(/import/\w+/status|/auth/me|/tmdb/image/)\b")
+_QUIET_PATHS = re.compile(r"(/import/\w+/status|/auth/me|/tmdb/image/|/auth/turnstile-token/)\b")
 
 
 class _QuietPollingFilter(logging.Filter):
@@ -87,6 +109,9 @@ def _log_config() -> dict:
 
 def run():
     ensure_port_free(_HOST, _PORT)
+    ssl_kwargs = {}
+    if _SSL_CERTFILE.exists() and _SSL_KEYFILE.exists():
+        ssl_kwargs = {"ssl_certfile": str(_SSL_CERTFILE), "ssl_keyfile": str(_SSL_KEYFILE)}
     uvicorn.run(
         "renar_backend.main:asgi_app",
         host=_HOST,
@@ -103,6 +128,7 @@ def run():
         # closed its stream, needing a second Ctrl+C to force-exit. This
         # caps that wait instead of relying on the user to force it.
         timeout_graceful_shutdown=5,
+        **ssl_kwargs,
     )
 
 

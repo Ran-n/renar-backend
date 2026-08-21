@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/07/29 13:55:30.394418
+Revised: 2026/08/21 16:27:42.599569
 """
 
 from pathlib import Path
@@ -41,8 +41,22 @@ class Settings(BaseSettings):
     # the check entirely (dev default) rather than 503-ing registration. The
     # on/off switch itself is `registration_open`-style (see below) — a seed
     # default here, owned live by the admin panel from then on.
-    turnstile_site_key: str = ""
-    turnstile_secret_key: str = ""
+    prod_turnstile_site_key: str = ""
+    prod_turnstile_secret_key: str = ""
+    # Second widget pair, scoped to `localhost` in Cloudflare, for requests
+    # arriving at a dev hostname (SiteSettings.turnstile_dev_hostnames, admin
+    # panel, seeded below) instead of the prod domain. Which pair applies is
+    # decided purely from the request's own Host header (see
+    # turnstile_site_key_for/turnstile_secret_key_for) — no client-sent
+    # flag, nothing to remember to flip. A request to any other hostname
+    # always gets the prod pair regardless of what any other client happens
+    # to be doing.
+    dev_turnstile_site_key: str = ""
+    dev_turnstile_secret_key: str = ""
+    # Seed default only — SiteSettings.turnstile_dev_hostnames (admin panel,
+    # Registration section) owns the live value from first read onward, same
+    # as exempt_ips below.
+    turnstile_dev_hostnames: list[str] = []
     # Brevo (transactional email) for the registration/email-change confirmation
     # codes. Empty key means "log the would-be email instead of sending" — see
     # users/email_confirmation.py::send_confirmation_email — so this stays safe
@@ -111,6 +125,12 @@ class Settings(BaseSettings):
         whatever directory the server happened to be launched from."""
         path = Path(value)
         return str(path if path.is_absolute() else (_ROOT / path).resolve())
+
+    def turnstile_site_key_for(self, host: str | None, dev_hostnames: list[str]) -> str:
+        return self.dev_turnstile_site_key if host in dev_hostnames else self.prod_turnstile_site_key
+
+    def turnstile_secret_key_for(self, host: str | None, dev_hostnames: list[str]) -> str:
+        return self.dev_turnstile_secret_key if host in dev_hostnames else self.prod_turnstile_secret_key
 
 
 settings = Settings()

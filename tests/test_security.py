@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/07/11 15:23:12.394399
+Revised: 2026/08/20 19:24:48.805603
 
 AbuseGuardMiddleware + login backoff: what gets stopped, and — just as
 important for a commercial deployment — what must never be flagged.
@@ -341,6 +341,10 @@ def make_headers_client() -> TestClient:
     def api_route():
         return {"ok": True}
 
+    @app.get("/auth/turnstile-widget/{session_id}")
+    def turnstile_widget(session_id: str):
+        return {"ok": True}
+
     return TestClient(app)
 
 
@@ -357,3 +361,16 @@ def test_api_routes_send_no_referrer():
     r = make_headers_client().get("/titles")
     assert r.headers["Referrer-Policy"] == "no-referrer"
     assert r.headers["Content-Security-Policy"].startswith("default-src 'none'")
+
+
+def test_turnstile_widget_csp_allows_cloudflare_script():
+    """Regression: the blanket `default-src 'none'` on every non-admin route
+    silently blocked the widget page's own inline <script> and Cloudflare's
+    https://challenges.cloudflare.com/turnstile/v0/api.js — the checkbox
+    never rendered (blank page), independent of any domain-allowlist issue
+    on the Cloudflare dashboard side."""
+    r = make_headers_client().get("/auth/turnstile-widget/some-session")
+    csp = r.headers["Content-Security-Policy"]
+    assert "https://challenges.cloudflare.com" in csp
+    assert "'unsafe-inline'" in csp
+    assert "frame-ancestors 'none'" in csp

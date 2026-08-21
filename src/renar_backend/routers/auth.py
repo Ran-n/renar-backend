@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/08/18 17:42:31.851466
+Revised: 2026/08/21 16:27:42.883659
 """
 
 import logging
@@ -72,7 +72,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.get("/registration-status", response_model=RegistrationStatus)
-def registration_status(response: Response, db: Session = Depends(get_db)):
+def registration_status(request: Request, response: Response, db: Session = Depends(get_db)):
     """Unauthenticated: lets the signup screen decide whether to render an
     invite-code field, and whether/with which site key to render the
     Turnstile widget, before the user ever submits the form.
@@ -85,16 +85,17 @@ def registration_status(response: Response, db: Session = Depends(get_db)):
     ever serve it stale, never for free."""
     response.headers["Cache-Control"] = "no-store"
     ss = get_site_settings(db)
+    site_key = settings.turnstile_site_key_for(request.url.hostname, ss.turnstile_dev_hostnames)
     return RegistrationStatus(
         registration_open=ss.registration_open,
         invite_only=ss.invite_only,
-        turnstile_site_key=(settings.turnstile_site_key or None) if ss.turnstile_enabled else None,
+        turnstile_site_key=(site_key or None) if ss.turnstile_enabled else None,
         email_confirmation_enabled=ss.email_confirmation_enabled,
     )
 
 
 @router.post("/turnstile-session", response_model=TurnstileSession)
-def turnstile_session(response: Response, db: Session = Depends(get_db)):
+def turnstile_session(request: Request, response: Response, db: Session = Depends(get_db)):
     """Unauthenticated: one-time session for the register screen's Turnstile
     widget (see users/turnstile.py's module docstring for why this lives on
     the backend rather than the frontend). 404 if Turnstile isn't currently
@@ -102,38 +103,48 @@ def turnstile_session(response: Response, db: Session = Depends(get_db)):
     — a client that saw a null site key there has no reason to call this."""
     response.headers["Cache-Control"] = "no-store"
     ss = get_site_settings(db)
-    if not ss.turnstile_enabled or not settings.turnstile_site_key:
+    site_key = settings.turnstile_site_key_for(request.url.hostname, ss.turnstile_dev_hostnames)
+    if not ss.turnstile_enabled or not site_key:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Turnstile is not configured")
-    return TurnstileSession(session_id=new_widget_session(), site_key=settings.turnstile_site_key)
+    return TurnstileSession(session_id=new_widget_session(db), site_key=site_key)
 
 
 @router.get("/turnstile-widget/{session_id}", response_class=HTMLResponse, include_in_schema=False)
-def turnstile_widget(session_id: str, response: Response, theme: str = "dark"):
+def turnstile_widget(
+    request: Request,
+    session_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+    theme: str = "dark",
+    standalone: bool = False,
+):
     response.headers["Cache-Control"] = "no-store"
-    if not widget_session_exists(session_id):
+    if not widget_session_exists(db, session_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session expired — reload the register page")
-    return widget_html(settings.turnstile_site_key, session_id, theme)
+    ss = get_site_settings(db)
+    site_key = settings.turnstile_site_key_for(request.url.hostname, ss.turnstile_dev_hostnames)
+    return widget_html(site_key, session_id, theme, standalone=standalone)
 
 
 @router.post("/turnstile-callback/{session_id}", response_class=PlainTextResponse, include_in_schema=False)
-def turnstile_callback(session_id: str, token: str, response: Response):
+def turnstile_callback(session_id: str, token: str, response: Response, db: Session = Depends(get_db)):
     response.headers["Cache-Control"] = "no-store"
-    if not set_widget_token(session_id, token):
+    if not set_widget_token(db, session_id, token):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session expired")
     return "ok"
 
 
 @router.get("/turnstile-token/{session_id}", response_model=TurnstileTokenStatus)
-def turnstile_token(session_id: str, response: Response):
+def turnstile_token(session_id: str, response: Response, db: Session = Depends(get_db)):
     """Polled by the register screen (see turnstile_field.py's _poll_for_token)
     until the widget's callback reports a resolved token. no-store matters
     even more here than on registration_status: a cache serving a stale
     {"token": null} would make the poll loop wait out its full timeout and
     never see a token that already resolved."""
     response.headers["Cache-Control"] = "no-store"
-    token = get_widget_token(session_id)
+    token = get_widget_token(db, session_id)
     if token:
-        clear_widget_session(session_id)
+        clear_widget_session(db, session_id)
     return TurnstileTokenStatus(token=token)
 
 
@@ -147,7 +158,10 @@ def register(data: UserCreate, request: Request, background_tasks: BackgroundTas
             detail="Registration is currently closed",
         )
 
-    if not verify_turnstile(data.turnstile_token, client_ip(request), enabled=ss.turnstile_enabled):
+    secret_key = settings.turnstile_secret_key_for(request.url.hostname, ss.turnstile_dev_hostnames)
+    if not verify_turnstile(
+        data.turnstile_token, client_ip(request), enabled=ss.turnstile_enabled, secret_key=secret_key
+    ):
         _log.info("registration rejected: turnstile verification failed (username=%r)", data.username)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

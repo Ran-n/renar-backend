@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/08/20 17:21:29.513060
+Revised: 2026/08/21 16:27:42.694055
 """
 
 import enum
@@ -122,6 +122,25 @@ class Strike(Base):
     reason: Mapped[str] = mapped_column(String(255), default="")
     banned_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_offense_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TurnstileWidgetSession(Base):
+    """One row per register-screen Turnstile widget session, persisted so a
+    session created just before a backend restart doesn't 404 when its
+    callback/poll lands on the fresh process (see users/turnstile.py).
+
+    `id` is the session_id itself (secrets.token_urlsafe(24)) — unguessable
+    and unique on its own, so no separate surrogate key is worth carrying.
+    Expired rows (see users/turnstile.py's TTL) are swept opportunistically
+    on creation of a new session, not by a scheduled job — traffic to this
+    endpoint is register-screen-only, never high enough to need one.
+    """
+
+    __tablename__ = "turnstile_widget_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class User(Base):
@@ -294,10 +313,16 @@ class SiteSettings(Base):
     invite_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     registration_open: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     # On/off switch for the Cloudflare Turnstile check on /auth/register,
-    # independent of whether TURNSTILE_SITE_KEY/TURNSTILE_SECRET_KEY are set
-    # in .env (see config.py) — lets an admin fall back to IP rate-limiting
+    # independent of whether PROD_TURNSTILE_*/DEV_TURNSTILE_* are set in
+    # .env (see config.py) — lets an admin fall back to IP rate-limiting
     # only without touching those credentials.
     turnstile_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Hostnames (exact match against the request's Host header, no scheme/
+    # port) that get DEV_TURNSTILE_SITE_KEY/DEV_TURNSTILE_SECRET_KEY instead
+    # of the PROD_TURNSTILE_* pair — see config.py's turnstile_site_key_for/
+    # turnstile_secret_key_for, called with this list from routers/auth.py.
+    # Empty means every request gets the prod pair.
+    turnstile_dev_hostnames: Mapped[list[str]] = mapped_column(JSONB, default=list)
     # On/off switch for the registration/email-change confirmation-code flow
     # (see users/email_confirmation.py, routers/auth.py's register/login).
     # Off: new accounts are marked email_confirmed on creation instead of

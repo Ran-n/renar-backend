@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/08/20 08:24:31.342139
+Revised: 2026/08/20 21:15:27.769249
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -233,6 +233,13 @@ def _map_details(media_type: str, tmdb_id: int, data: dict) -> dict:
         "show_status": show_status,
         "last_air_year": last_air_year,
         "seasons": seasons,
+        # movie release date / show first-air date, verbatim TMDB
+        # "YYYY-MM-DD" — used to badge a not-yet-released title on the
+        # frontend's title page (see docs/backlog.md's "Not-yet-released
+        # content" item). Distinct from `year` above, which is just the
+        # first 4 digits and can't tell an already-aired title from one
+        # premiering later this year.
+        "release_date": date or None,
     }
 
 

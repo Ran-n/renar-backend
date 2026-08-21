@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/20 17:17:27.582996 )
+[//]: # (+ Revised: 	2026/08/21 18:20:58.949412 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.17.0] - 2026-08-21
+
+### Added
+
+- HTTPS support in `__main__.py`: serves `certs/certbot-config/live/api.renar.app/{fullchain,privkey}.pem`
+  via uvicorn's native `ssl_certfile`/`ssl_keyfile` when present (Let's
+  Encrypt, DNS-01 via `certbot-dns-cloudflare` — see
+  `docs/design-decisions.md`), falling back to plain HTTP when the cert
+  files don't exist so local dev and a fresh checkout aren't blocked on one.
+- `Title.release_date` exposed as `release_date` on `/tmdb` movie/show
+  detail payloads (`routers/tmdb.py`'s `_map_details`), so the frontend can
+  badge a not-yet-released title with its date.
+- Dev/prod Cloudflare Turnstile key pairs, chosen per request from the
+  incoming `Host` header against a new admin-panel-editable allowlist
+  (`SiteSettings.turnstile_dev_hostnames`, Registration section — tag-input
+  like Exempt IPs). `TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET_KEY` renamed to
+  `PROD_TURNSTILE_SITE_KEY`/`PROD_TURNSTILE_SECRET_KEY`; new
+  `DEV_TURNSTILE_SITE_KEY`/`DEV_TURNSTILE_SECRET_KEY` for a second,
+  `localhost`/dev-domain-scoped Cloudflare widget. Purely per-request and
+  stateless — no client-sent flag, no global toggle to leave on by mistake
+  (see `docs/design-decisions.md` for why the earlier `dev_mode` admin
+  toggle broke a production APK build).
+- `SecurityHeadersMiddleware`: the Turnstile widget page
+  (`/auth/turnstile-widget/*`) now gets its own scoped CSP permitting
+  Cloudflare's `challenges.cloudflare.com` script/iframe, instead of
+  inheriting the strict `default-src 'none'` meant for JSON-only routes.
+
+### Fixed
+
+- Legal doc contact addresses and domain references (`docs/privacy-policy.md`,
+  `docs/terms-of-service.md`, `docs/backlog.md`) updated from
+  `renar.breren.com`/`*@renar.breren.com` to the now-registered `renar.app`
+  domain.
 
 ## [0.16.0] - 2026-08-20
 

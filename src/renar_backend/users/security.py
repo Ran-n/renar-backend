@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/07/17 19:32:52.382654
+Revised: 2026/08/20 19:23:52.306446
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -473,8 +473,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Baseline hardening headers.
 
     The admin panel (settings.admin_path) is server-rendered HTML with
-    inline <style>/<script> blocks, so it gets a CSP that permits those;
-    every other route is JSON-only and gets the strict `default-src 'none'`.
+    inline <style>/<script> blocks, so it gets a CSP that permits those; the
+    Turnstile widget page (users/turnstile.py's widget_html) is also
+    server-rendered HTML — it needs its own inline <style>/<script> plus
+    Cloudflare's own https://challenges.cloudflare.com script and iframe —
+    so it gets a third, narrowly-scoped CSP; every other route is JSON-only
+    and gets the strict `default-src 'none'`.
 
     The admin panel also gets `Referrer-Policy: same-origin` instead of
     `no-referrer`: per the Fetch spec, the Origin header on non-GET
@@ -493,6 +497,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                 "script-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
+            )
+        elif request.url.path.startswith("/auth/turnstile-widget/"):
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "script-src 'unsafe-inline' https://challenges.cloudflare.com; "
+                "frame-src https://challenges.cloudflare.com; "
+                "connect-src 'self' https://challenges.cloudflare.com; "
+                "frame-ancestors 'none'"
             )
         else:
             response.headers["Referrer-Policy"] = "no-referrer"

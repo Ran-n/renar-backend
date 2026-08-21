@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/07/17 18:08:59.133057
+Revised: 2026/08/21 16:27:43.463992
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -412,8 +412,8 @@ def test_admin_settings_page_renders_exempt_ip_pills(client, admin_enabled):
     r = client.get("/admin/settings", auth=BASIC)
     assert r.status_code == 200
     # one pill per exempt IP, plus the hidden field the form actually submits
-    assert '<span class="tag-pill" data-ip="127.0.0.1">127.0.0.1' in r.text
-    assert '<span class="tag-pill" data-ip="::1">::1' in r.text
+    assert '<span class="tag-pill" data-value="127.0.0.1">127.0.0.1' in r.text
+    assert '<span class="tag-pill" data-value="::1">::1' in r.text
     assert 'name="exempt_ips" value="127.0.0.1, ::1"' in r.text
 
 
