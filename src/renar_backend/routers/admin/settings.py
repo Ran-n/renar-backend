@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/08/10 16:09:56.644080
+Revised: 2026/08/21 16:27:42.977622
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
@@ -173,11 +173,16 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
     invite_dot = "#fabd2f" if ss.invite_only else "#928374"
     turnstile_dot = "#b8bb26" if ss.turnstile_enabled else "#928374"
     email_confirm_dot = "#b8bb26" if ss.email_confirmation_enabled else "#928374"
-    exempt_pills = "".join(
-        f'<span class="tag-pill" data-ip="{sv(ip)}">{sv(ip)}'
-        f'<button type="button" class="tag-remove" aria-label="Remove {sv(ip)}">&times;</button></span>'
-        for ip in ss.exempt_ips
-    )
+
+    def tag_pills(values: list[str]) -> str:
+        return "".join(
+            f'<span class="tag-pill" data-value="{sv(v)}">{sv(v)}'
+            f'<button type="button" class="tag-remove" aria-label="Remove {sv(v)}">&times;</button></span>'
+            for v in values
+        )
+
+    exempt_pills = tag_pills(ss.exempt_ips)
+    turnstile_dev_hostname_pills = tag_pills(ss.turnstile_dev_hostnames)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -274,13 +279,33 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
         </p>
         {
         ""
-        if (settings.turnstile_site_key and settings.turnstile_secret_key)
+        if (settings.prod_turnstile_site_key and settings.prod_turnstile_secret_key)
         else (
-            '<p class="settings-warning">&#x26A0; TURNSTILE_SITE_KEY / TURNSTILE_SECRET_KEY '
+            '<p class="settings-warning">&#x26A0; PROD_TURNSTILE_SITE_KEY / PROD_TURNSTILE_SECRET_KEY '
             "are not set in this server's .env &mdash; turning this on has no effect until "
             "both are configured and the server is restarted.</p>"
         )
     }
+        <div class="settings-grid" style="margin-top:.9rem">
+          <div class="settings-field" style="grid-column: 1 / -1">
+            <label for="turnstile_dev_hostnames_input">Turnstile dev hostnames</label>
+            <div class="tag-input" id="turnstile_dev_hostnames_tags">
+              {turnstile_dev_hostname_pills}
+              <input type="text" id="turnstile_dev_hostnames_input" placeholder="Add a hostname, press Enter">
+            </div>
+            <input
+              type="hidden"
+              id="turnstile_dev_hostnames"
+              name="turnstile_dev_hostnames"
+              value="{sv(", ".join(ss.turnstile_dev_hostnames))}"
+            >
+          </div>
+        </div>
+        <p class="settings-hint">
+          A request whose Host header exactly matches one of these gets DEV_TURNSTILE_SITE_KEY/
+          DEV_TURNSTILE_SECRET_KEY instead of the PROD_TURNSTILE_* pair &mdash; e.g. <code>api.dev.renar.app</code>.
+          Empty means every request gets the prod pair.
+        </p>
         {
         ""
         if settings.brevo_api_key
@@ -486,20 +511,23 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
   </div>
 
   <script>
-    // Exempt-IPs tag input: pills for each existing entry plus a bare text
-    // field in the same bordered box; Enter/comma commits the typed value
-    // as a new pill, Backspace on an empty field drops the last pill. The
-    // hidden #exempt_ips input (what the form actually submits) is kept in
-    // sync as a comma-separated list on every add/remove, same shape the
-    // backend already parses.
-    (function () {{
-      var container = document.getElementById('exempt_ips_tags');
-      var hidden = document.getElementById('exempt_ips');
-      var input = document.getElementById('exempt_ips_input');
+    // Tag input: pills for each existing entry plus a bare text field in the
+    // same bordered box; Enter/comma commits the typed value as a new pill,
+    // Backspace on an empty field drops the last pill. The hidden input
+    // (what the form actually submits) is kept in sync as a comma-separated
+    // list on every add/remove, same shape the backend already parses.
+    // Shared by every tag-style field on this page (exempt IPs, Turnstile
+    // dev hostnames) — one binding per field, same behavior everywhere.
+    function bindTagInput(prefix) {{
+      var container = document.getElementById(prefix + '_tags');
+      var hidden = document.getElementById(prefix);
+      var input = document.getElementById(prefix + '_input');
 
       function syncHidden() {{
-        var ips = Array.from(container.querySelectorAll('.tag-pill')).map(function (p) {{ return p.dataset.ip; }});
-        hidden.value = ips.join(', ');
+        var values = Array.from(container.querySelectorAll('.tag-pill')).map(function (p) {{
+          return p.dataset.value;
+        }});
+        hidden.value = values.join(', ');
       }}
 
       function bindRemove(btn) {{
@@ -510,20 +538,20 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
       }}
       container.querySelectorAll('.tag-remove').forEach(bindRemove);
 
-      function addPill(ip) {{
-        ip = ip.trim();
-        if (!ip) return;
+      function addPill(value) {{
+        value = value.trim();
+        if (!value) return;
         var dup = Array.from(container.querySelectorAll('.tag-pill'))
-          .some(function (p) {{ return p.dataset.ip === ip; }});
+          .some(function (p) {{ return p.dataset.value === value; }});
         if (dup) return;
         var pill = document.createElement('span');
         pill.className = 'tag-pill';
-        pill.dataset.ip = ip;
-        pill.appendChild(document.createTextNode(ip));
+        pill.dataset.value = value;
+        pill.appendChild(document.createTextNode(value));
         var rm = document.createElement('button');
         rm.type = 'button';
         rm.className = 'tag-remove';
-        rm.setAttribute('aria-label', 'Remove ' + ip);
+        rm.setAttribute('aria-label', 'Remove ' + value);
         rm.textContent = '×';
         bindRemove(rm);
         pill.appendChild(rm);
@@ -553,7 +581,10 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
       container.addEventListener('click', function (e) {{
         if (e.target === container) input.focus();
       }});
-    }})();
+    }}
+
+    bindTagInput('exempt_ips');
+    bindTagInput('turnstile_dev_hostnames');
   </script>
 </body>
 </html>"""
@@ -573,6 +604,7 @@ def save_settings(
     registration_open: str | None = Form(default=None),
     invite_only: str | None = Form(default=None),
     turnstile_enabled: str | None = Form(default=None),
+    turnstile_dev_hostnames: str = Form(default=""),
     email_confirmation_enabled: str | None = Form(default=None),
     rate_limit_per_minute: int = Form(...),
     flood_ban_per_minute: int = Form(...),
@@ -600,6 +632,7 @@ def save_settings(
     ss.registration_open = registration_open == "1"
     ss.invite_only = invite_only == "1"
     ss.turnstile_enabled = turnstile_enabled == "1"
+    ss.turnstile_dev_hostnames = [h.strip() for h in turnstile_dev_hostnames.split(",") if h.strip()]
     was_email_confirmation_enabled = ss.email_confirmation_enabled
     ss.email_confirmation_enabled = email_confirmation_enabled == "1"
     if was_email_confirmation_enabled and not ss.email_confirmation_enabled:

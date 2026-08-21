@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/20 10:49:48.095429 )
+[//]: # (+ Revised: 	2026/08/21 16:27:43.649251 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -790,6 +790,153 @@ the anti-abuse caveat above) or when TLS termination/load-balancing
 requirements outgrow what uvicorn does alone. Either is a natural point to
 add a proxy layer, not before.
 
+### Real HTTPS via a Let's Encrypt cert, DNS-01 through Cloudflare
+
+`__main__.py`'s `run()` passes `ssl_certfile`/`ssl_keyfile` to
+`uvicorn.run()` — uvicorn terminates TLS natively (see "No reverse proxy"
+above), so this is the only piece that was missing. The cert itself is
+obtained out-of-band with `certbot` + `certbot-dns-cloudflare`, output
+directed at `certs/` (gitignored — nothing under it ships in the repo, only
+exists on a deployment that's actually run `certbot certonly`). `run()`
+checks whether `certs/certbot-config/live/api.renar.app/{fullchain,privkey}.pem`
+exist and falls back to plain HTTP when they don't, rather than crashing —
+this is the one `run()` used both for the public deployment and same-machine
+local dev, and dev shouldn't be blocked on a cert existing.
+
+**Why DNS-01, not HTTP-01:** HTTP-01 needs port 80, which an unrelated
+pre-existing service (`Server: Kestrel`, not this project) already owns on
+this host — see the git history around 2026-07-19 for the original
+investigation. DNS-01 sidesteps that entirely: it proves domain ownership by
+writing a TXT record instead of serving a file on port 80, which
+`certbot-dns-cloudflare` automates using the same Cloudflare DNS-edit token
+already used for the `api.renar.app` A record itself.
+
+**Why not the "flip to Cloudflare-proxied + Flexible SSL" alternative**
+considered earlier: that terminates TLS at Cloudflare's edge but leaves
+Cloudflare↔origin traffic (including login POSTs) unencrypted, and makes
+every request appear to originate from Cloudflare's IP — breaking the
+existing per-IP anti-abuse system (`security.py`) unless `TRUST_PROXY_HEADERS`
+and the `CF-Connecting-IP` header are wired in at the same time. A real cert
+on the origin avoids both: genuine end-to-end encryption, and `client_ip()`
+keeps reading `request.client.host` exactly as it does today.
+
+**Windows-specific friction:** `certbot` refuses to run at all without an
+elevated shell on Windows (`raise_for_non_administrative_windows_rights()`,
+unconditional, independent of which directories are used) — has to be run
+from an Administrator PowerShell. `--config-dir`/`--work-dir`/`--logs-dir`
+all point under `certs/` rather than the Windows-wide default location, so
+nothing this project owns lands outside the repo tree.
+
+**Renewal:** not automated yet — the cert is valid ~90 days from issuance
+and needs `certbot certonly` re-run (same command, same elevated shell)
+before it expires. A scheduled task running that command is a natural
+follow-up, not done as part of getting HTTPS working the first time.
+
+**Local dev over HTTPS:** the cert is only valid for the literal hostnames it
+was issued for — connecting by IP (`127.0.0.1`/`localhost`) fails hostname
+validation once HTTPS is active. Rather than a separate self-signed cert
+(which needs installing its CA on every test device, including phones —
+exactly the kind of per-device trust setup this was trying to avoid), a
+hosts-file entry lets local requests resolve straight to loopback while
+still presenting a hostname the real cert matches — same trusted cert
+everywhere, prod and dev, zero extra CA installs.
+
+**Dev/prod domain split:** dev uses `api.dev.renar.app`, prod uses
+`api.renar.app` — separate DNS A records (both currently pointing at the
+same origin, since there's only one server today), covered by one SAN cert
+(`certbot --cert-name api.renar.app --expand -d api.renar.app -d
+api.dev.renar.app`, so a single renewal covers both). The frontend's
+`RENAR_API_URL` (dev) and `RENAR_BUILD_API_URL` (packaged builds) point at
+the two hostnames respectively — see renar-frontend's `.env`. Reasoning: once
+prod moves to its own box, only the DNS record and hosts-file entry need to
+change — no code, no new cert flow, no re-pointing packaged builds. Local dev
+needs `127.0.0.1 api.dev.renar.app` in the hosts file (elevated editor on
+Windows — `C:\Windows\System32\drivers\etc\hosts`); this is separate from,
+and in addition to, the plain `api.renar.app` entry if one was added earlier
+for straight local testing.
+
+**Turnstile follows the same split:** the widget's allowed-domains list
+(Cloudflare dashboard → Turnstile → widget → Settings → Domains) has to
+include every hostname that will ever serve the widget page — `api.dev.renar.app`
+was added there manually alongside `api.renar.app`. The DNS-edit API token
+used elsewhere in this doc has no Turnstile-management scope, so this step
+can't be automated; it's dashboard-only.
+
+**Android's cleartext-traffic manifest patch stays** even now that the
+default deployment has real HTTPS — see the Turnstile entry in
+`docs/backlog.md` and renar-frontend's `docs/design-decisions.md`'s
+"Android APK manifest..." entry: the register screen's self-hosted-server
+field is a documented first-class `http://` use case independent of this
+deployment's own scheme.
+
+### Turnstile widget sessions are DB-backed, not an in-memory dict
+
+`users/turnstile.py`'s `new_widget_session`/`get_widget_token`/`set_widget_token`/
+`clear_widget_session` read and write a real table (`TurnstileWidgetSession`
+in `models.py`), not a module-level dict.
+
+**Why:** the in-memory version shipped first and hit its own documented
+failure mode almost immediately — a session created via `POST
+/auth/turnstile-session` just before a `be.exe` restart would 404 when its
+callback/poll landed on the freshly-started process, since the dict was
+gone. Observed for real during 2026-08-20's Turnstile domain migration
+(several restarts in quick succession while iterating). The table is a
+single row per session, keyed by the session_id itself (already an
+unguessable `secrets.token_urlsafe(24)`, so no separate surrogate key is
+worth carrying) — trivially in BCNF, no candidate-key dependencies to
+untangle.
+
+**Not Redis:** a table read/write per widget-session step (session create,
+callback, a handful of 0.7s-interval polls) is nowhere near enough traffic
+to need a cache-speed store, and it means one fewer service to run/operate
+for what's currently a single-process deployment (see "No reverse proxy"
+above). Revisit if this backend ever runs multiple workers behind a load
+balancer — then Redis (or any store shared across workers) earns its keep
+for the same reason the anti-abuse rate-limit counters would.
+
+### Dev/prod Turnstile key choice is derived from the request's own Host header
+
+`PROD_TURNSTILE_SITE_KEY`/`PROD_TURNSTILE_SECRET_KEY` and
+`DEV_TURNSTILE_SITE_KEY`/`DEV_TURNSTILE_SECRET_KEY` both sit in `.env` at
+once. Which pair a given `/auth/registration-status`,
+`/auth/turnstile-session`, `/auth/turnstile-widget/{id}`, or `/auth/register`
+call uses is decided from `request.url.hostname` against
+`SiteSettings.turnstile_dev_hostnames` (`Settings.turnstile_site_key_for`/
+`turnstile_secret_key_for` in `config.py`, called with that list) — not a
+client-sent flag, not a dev/prod toggle, and no state persisted per-request
+anywhere. A request to a listed hostname (e.g. `api.dev.renar.app`) always
+gets the dev pair; a request to any other hostname always gets the prod
+pair, regardless of what any other client is doing concurrently.
+
+The hostname list itself *is* admin-panel-editable (Registration section, a
+tag-input like Exempt IPs) — `TURNSTILE_DEV_HOSTNAMES` in `.env` is only the
+seed default for `SiteSettings.turnstile_dev_hostnames`, same pattern as
+`exempt_ips`/`registration_open`/etc. That's a deliberate difference from
+*which key pair applies*: the Host-header rule itself has no toggle because
+per-request derivation is inherently safe (one client's request can't affect
+another's), but *which hostnames count as dev* is exactly the kind of thing
+worth changing without an `.env` edit + restart — e.g. adding a second dev
+hostname for a new test environment.
+
+**Why (2026-08-21):** two earlier approaches to the key-pair choice were
+built and reverted — a `SiteSettings.dev_mode` admin toggle (a *global*
+switch: turning it on for local testing also served the dev-scoped sitekey
+to every other concurrent request, including real users, and broke a
+previously-working APK build exactly that way during testing) and a
+per-request design driven by a frontend-sent header (`X-Renar-Dev-Client`,
+computed from which backend a build was compiled to talk to). The header
+approach worked but needed the frontend to actively participate and pin
+state on `TurnstileWidgetSession` for the widget-page load to read back.
+Deriving it straight from the Host header needs neither: the backend
+already knows which hostname it was reached at on every single request,
+with zero coordination from the client and zero persisted per-request
+state. The hostname list started as a pure `.env` var
+(`TURNSTILE_DEV_HOSTNAMES`, explicit allowlist rather than a hardcoded
+`"dev" in hostname.split(".")`-style pattern match, so the rule wouldn't
+silently assume a naming convention that might not hold for every
+deployment) and was then moved to `SiteSettings` so it doesn't need a
+restart to change.
+
 ### `ENABLE_DOCS` defaults to `false`
 
 `/docs` and `/openapi.json` are FastAPI's built-in interactive API
@@ -913,6 +1060,23 @@ dropped — now travels alongside it in both payloads.
 TMDB's by vote count (more voters, more weight) to produce a single
 "overall" score — that weighting is meaningless without `vote_count`
 actually reaching the client.
+
+### `/tmdb/details` now passes through the raw release/first-air date
+
+`_map_details` already derived `year` (the release/first-air date's first
+4 digits) but never exposed the full date — added as `"release_date"`,
+the same `date` variable already computed for `year`, verbatim TMDB
+"YYYY-MM-DD" for either a film's `release_date` or a show's
+`first_air_date`. `year` alone can't tell an already-released title from
+one premiering later the same calendar year.
+
+**Why:** frontend "not-yet-released" badge (title page header, season
+header, episode row, episode detail page) needs an exact date to compare
+against today and to display, not just the year. `Title.release_date`
+(`models.py`) is film-only — TV release timing lives in
+`next_episode_air_date` instead and isn't exposed in `schemas.py` at
+all — so the TMDB detail payload is the only source with an exact date for
+both media types.
 
 ### `warm_title_translations` opens one DB session per title, not one for the whole loop
 

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/20 13:30:29.247151 )
+[//]: # (+ Revised: 	2026/08/21 08:33:49.228436 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -479,7 +479,7 @@ fallback identity, not just a name source".
   links or redirect URLs for a title page, a specific episode, and a
   comment (anchor within a thread). Options: generate canonical share URLs
   in the API response, or add a `/share/{type}/{id}` redirect endpoint.
-  Decide on a URL scheme once `renar.breren.com` is actually hosting
+  Decide on a URL scheme once `renar.app` is actually hosting
   something to redirect to.
 
 - **[Blocking for 1.0] Per-rewatch ratings, not a single overwritten rating.**
@@ -690,42 +690,10 @@ fallback identity, not just a name source".
 
 ## Infrastructure
 
-- **[Blocking for 1.0] Wire up HTTPS by default; currently opt-in only.** Caddy-based TLS
-  termination was added then dropped (see git history); the current
-  approach is documented in `docs/design-decisions.md:298-310` as relying
-  on uvicorn's native `--ssl-keyfile`/`--ssl-certfile` flags (see
-  README.md:35). No certs, `.env` entries, or docker-compose wiring ship
-  by default, so a normal run is still plain HTTP. Needs a default
-  cert/TLS setup (or reverse proxy) plus updating the frontend's stored
-  base URL scheme once it's on by default.
-
-  **Deployment-specific state (2026-07-19), `api.renar.breren.com`:**
-  currently plain HTTP on a non-standard port (8882, port-forwarded to the
-  backend's 8000) — not even the usual 80/443. Investigated during the
-  Turnstile rollout below and parked rather than rushed:
-  - Plain `certbot` HTTP-01 (port 80) is blocked: an unrelated, pre-existing
-    service (`Server: Kestrel` — .NET, not this project) already owns port
-    80 on that host. Do not touch it without confirming what it is first.
-  - This domain's DNS is on Cloudflare (`gerardo.ns.cloudflare.com` /
-    `melody.ns.cloudflare.com`), currently in "DNS only" (grey-cloud) mode
-    — it resolves straight to the origin's residential IP.
-  - Two viable paths, neither started: (a) `certbot-dns-cloudflare` for a
-    DNS-01 challenge (needs a Cloudflare API token scoped to "Edit zone
-    DNS" for `breren.com`), or (b) — simpler, zero cert management on this
-    host — flip the `api` record to Cloudflare-proxied ("orange cloud") and
-    set SSL/TLS mode to "Flexible": Cloudflare's Universal SSL terminates
-    TLS at their edge for free, origin keeps serving plain HTTP internally.
-    Option (b) was the recommendation when this was parked.
-  - Until one of these lands, the register screen's Turnstile widget relies
-    on `android:usesCleartextTraffic="true"` (see this repo's sibling entry
-    below and renar-frontend's `docs/design-decisions.md` "Android APK
-    manifest is hand-patched..." entry) — real HTTPS would make that
-    manifest patch unnecessary too, not just close this item.
-
 - **[Blocking for 1.0] Cloudflare Turnstile captcha on `/auth/register` — shipped, a few
   loose ends remain.** Added to combat fake-account registration inflating
   stats/rankings. Live keys configured (`TURNSTILE_SITE_KEY`/
-  `TURNSTILE_SECRET_KEY` in `.env`, hostname `api.renar.breren.com`
+  `TURNSTILE_SECRET_KEY` in `.env`, hostname `api.renar.app`
   registered in the Cloudflare Turnstile dashboard), on/off toggle is a
   live admin Site Settings switch (`site_settings.turnstile_enabled`, not
   an env var — flips instantly, no restart). `/auth/registration-status`,
@@ -735,26 +703,13 @@ fallback identity, not just a name source".
   `registration-status`/`turnstile-token` response for several minutes
   after an admin toggle, which for the token-poll endpoint specifically
   could have meant the register screen never seeing an already-resolved
-  token). Remaining gaps:
-  - **In-memory widget session store (`users/turnstile.py`'s
-    `_widget_sessions` dict) doesn't survive a restart or multiple
-    workers.** Fine for the current single-process deployment (see the
-    "No reverse proxy" design-decision) — a session created just before a
-    restart, or landing on a different worker than its later poll/callback
-    under a future multi-worker setup, would 404/never resolve. Move to
-    Redis or the DB if/when this backend ever runs more than one worker.
-  - **Desktop (Windows/Linux) frontend builds silently skip the widget
-    entirely** — `flet_webview` has no `WebView` support there at all
-    (flet-dev/flet-webview#17). If `TURNSTILE_SECRET_KEY` is set,
-    desktop registration will 400 with no client-side warning that a
-    check it can't complete is even required. Low priority: desktop
-    isn't a maintained distribution target per the frontend README, but
-    worth a friendlier client-side message if that ever changes.
-  - **Mobile relies on a hand-patched, fragile Android manifest attribute**
-    (`usesCleartextTraffic="true"`) to load the widget's `http://` page at
-    all — see the HTTPS item above and renar-frontend's
-    `docs/design-decisions.md`. Real HTTPS on the backend removes the need
-    for that patch entirely, not just the manual-edit fragility.
+  token). Mobile's `android:usesCleartextTraffic="true"` is patched into
+  the Android manifest automatically on every build (`launcher.py`'s
+  `_patch_android_manifest()`), not a hand-edit that silently went missing
+  after a template regen — kept intentionally even now that the backend
+  serves real HTTPS (see `docs/design-decisions.md`'s HTTPS entry), since
+  the register screen's self-hosted-server field is a documented first-class
+  `http://` use case independent of the default deployment's own scheme.
 
 - **[Future] No human-facing mailbox on `breren.com` yet (e.g. `support@`/`hello@`).**
   Distinct from the OTP-sending item above (Brevo, transactional-only, no
@@ -768,8 +723,7 @@ fallback identity, not just a name source".
   more than just Renar. Needs, once the subdomain/DNS work above lands:
   domain verification TXT, MX records (`mx.zoho.com`/`mx2`/`mx3`), SPF/DKIM
   TXT records, optionally DMARC. Not started — same Cloudflare DNS zone as
-  the HTTPS/Turnstile items above, so batch with those when DNS is next
-  touched.
+  the Turnstile item above, so batch with that when DNS is next touched.
 
 - **[Future] Admin/mod accounts still lack per-account roles.** `routers/admin.py`
   is a working operator dashboard (users, usage, comments, banned IPs)
@@ -807,11 +761,11 @@ before picking it up. Store-specific build steps (Android/iOS/web packaging)
 are tracked in renar-frontend's `docs/backlog.md`.
 
 - **[Blocking for 1.0] Production hosting isn't chosen or set up.** No Dockerfile/compose file
-  exists in either repo and nothing is deployed anywhere. Needs a host
-  (Fly.io/Railway/a VPS are all viable) running a persistent Postgres
-  (sqlite is fine locally, not for production) with a backup plan, plus
-  the app's subdomain on `breren.com` (once picked) and the
-  HTTPS-by-default item above wired to point at it.
+  exists in either repo; the only thing running right now is a single
+  residential-machine deployment behind a router port-forward (`api.renar.app`,
+  see `docs/design-decisions.md`'s HTTPS entry), not a real host. Needs an
+  actual host (Fly.io/Railway/a VPS are all viable) running a persistent
+  Postgres (sqlite is fine locally, not for production) with a backup plan.
 
 - **[Blocking for 1.0] Privacy policy and Terms of Service are drafted but not published.**
   `docs/privacy-policy.md` and `docs/terms-of-service.md` exist but are

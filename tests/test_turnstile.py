@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/19 00:00:00.000000
-Revised: 2026/07/21 09:51:08.553980
+Revised: 2026/08/21 16:27:43.371727
 
 Cloudflare Turnstile gate on /auth/register. Mocks the siteverify HTTP call
 (no real network dependency in the suite) — verify_turnstile() itself is a
@@ -30,13 +30,13 @@ class _FakeResponse:
 def _configure_turnstile(monkeypatch, *, siteverify_success: bool):
     """Enable Turnstile for one test and return a callable that restores the
     conftest default (unconfigured — see conftest.py's env setup)."""
-    settings.turnstile_site_key = "test-site-key"
-    settings.turnstile_secret_key = "test-secret-key"
+    settings.prod_turnstile_site_key = "test-site-key"
+    settings.prod_turnstile_secret_key = "test-secret-key"
     monkeypatch.setattr(turnstile_module.http_client, "post", lambda *a, **kw: _FakeResponse(siteverify_success))
 
     def cleanup():
-        settings.turnstile_site_key = ""
-        settings.turnstile_secret_key = ""
+        settings.prod_turnstile_site_key = ""
+        settings.prod_turnstile_secret_key = ""
 
     return cleanup
 

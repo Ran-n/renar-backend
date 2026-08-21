@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/08/20 10:49:47.970772
+Revised: 2026/08/21 16:27:43.276805
 
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
@@ -31,8 +31,10 @@ os.environ["TVDB_API_KEY"] = ""
 # Real keys in .env (for live/manual testing) must never leak into the suite —
 # test_turnstile.py configures them per-test via monkeypatch instead, and
 # every other register() call in the suite expects the check to no-op.
-os.environ["TURNSTILE_SITE_KEY"] = ""
-os.environ["TURNSTILE_SECRET_KEY"] = ""
+os.environ["PROD_TURNSTILE_SITE_KEY"] = ""
+os.environ["PROD_TURNSTILE_SECRET_KEY"] = ""
+os.environ["DEV_TURNSTILE_SITE_KEY"] = ""
+os.environ["DEV_TURNSTILE_SECRET_KEY"] = ""
 os.environ["ADMIN_USERNAME"] = ""
 os.environ["ADMIN_PASSWORD"] = ""
 os.environ["ADMIN_PATH"] = "/admin"

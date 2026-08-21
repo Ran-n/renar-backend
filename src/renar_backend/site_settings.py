@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 13:30:00.000000
-Revised: 2026/08/02 18:29:48.977769
+Revised: 2026/08/21 16:27:42.788269
 
 Runtime-tunable site settings backed by the `site_settings` singleton row.
 
@@ -44,6 +44,7 @@ def _make_defaults() -> SiteSettings:
         invite_only=False,
         registration_open=settings.registration_open,
         turnstile_enabled=settings.turnstile_enabled,
+        turnstile_dev_hostnames=settings.turnstile_dev_hostnames,
         email_confirmation_enabled=True,
         premium_style_enabled=True,
         premium_verification_enabled=True,

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/08/20 00:00:00.000000 )
-[//]: # (+ Revised: 	2026/08/20 07:56:30.524302 )
+[//]: # (+ Revised: 	2026/08/20 19:03:01.669656 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 [//]: # ( ---------------------------------------------------------------------- )
@@ -13,7 +13,7 @@
 # Terms of Service — Renar
 
 **Status: DRAFT.** Company is set (Breren); domain/contact are scoped under
-the app name (renar.breren.com, legal@renar.breren.com).
+the app name (renar.app, legal@renar.app).
 Still open: `[EFFECTIVE DATE]`, `[HOSTING PROVIDER]`, `[JURISDICTION]`,
 `[GOVERNING LAW]` — fill in once hosting is chosen (see `docs/backlog.md`,
 Infrastructure / Publishing sections). Have a lawyer review before
@@ -43,7 +43,7 @@ You're responsible for the security of your account credentials and for
 all activity under your account. Registration may require an invite code
 while Renar is invite-gated. You agree to provide accurate information
 (username, email) and to keep your login credentials confidential. Notify
-us at legal@renar.breren.com if you suspect unauthorized access.
+us at legal@renar.app if you suspect unauthorized access.
 
 ## Acceptable use
 
@@ -78,7 +78,7 @@ rights necessary to post it.
 ## Copyright and takedowns
 
 If you believe content on Renar (a comment, an uploaded image) infringes
-your copyright, contact us at legal@renar.breren.com with: (1) a
+your copyright, contact us at legal@renar.app with: (1) a
 description of the copyrighted work, (2) the location of the infringing
 material on Renar, (3) your contact information, and (4) a statement that
 you have a good-faith belief the use is unauthorized. We'll review and
@@ -103,7 +103,7 @@ feature ships.
 ## Termination
 
 You may delete your account at any time via in-app account deletion or by
-contacting legal@renar.breren.com. We may suspend or terminate your
+contacting legal@renar.app. We may suspend or terminate your
 access for violating these Terms, extended inactivity, or if required by
 law. Account deletion is handled per the Privacy Policy's data-retention
 terms.
@@ -135,4 +135,4 @@ requires otherwise.
 
 ## Contact
 
-Questions about these Terms: legal@renar.breren.com.
+Questions about these Terms: legal@renar.app.

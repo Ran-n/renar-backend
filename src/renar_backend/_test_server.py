@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 14:33:20.294880
-Revised: 2026/08/18 20:15:32.518260
+Revised: 2026/08/21 16:27:43.183689
 
 Opt-in server for integration tests that need the real app reachable over
 real HTTP, not the in-process ASGI transport TestClient uses: this repo's
@@ -53,8 +53,10 @@ def main() -> None:
     # Explore's actual search-and-add UI) gets to keep it.
     os.environ.setdefault("TMDB_API_KEY", "")
     os.environ.setdefault("TVDB_API_KEY", "")
-    os.environ["TURNSTILE_SITE_KEY"] = ""
-    os.environ["TURNSTILE_SECRET_KEY"] = ""  # nosec B105 -- empty, disables Turnstile for the test run
+    os.environ["PROD_TURNSTILE_SITE_KEY"] = ""
+    os.environ["PROD_TURNSTILE_SECRET_KEY"] = ""  # nosec B105 -- empty, disables Turnstile for the test run
+    os.environ["DEV_TURNSTILE_SITE_KEY"] = ""
+    os.environ["DEV_TURNSTILE_SECRET_KEY"] = ""  # nosec B105 -- empty, disables Turnstile for the test run
     os.environ["ADMIN_USERNAME"] = ""
     os.environ["ADMIN_PASSWORD"] = ""  # nosec B105 -- empty, disables the admin panel for the test run
     os.environ["ADMIN_PATH"] = "/admin"

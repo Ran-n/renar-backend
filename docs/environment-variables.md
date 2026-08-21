@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.275749 )
-[//]: # (+ Revised: 	2026/07/31 13:46:32.708844 )
+[//]: # (+ Revised: 	2026/08/21 16:27:43.554512 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Environment variables
@@ -42,7 +42,9 @@ Tasks page (`<ADMIN_PATH>/periodic-tasks`), stored in the database.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | empty | [Cloudflare Turnstile](https://dash.cloudflare.com/?to=/:account/turnstile) keys, checked on `/auth/register`. Leaving both empty skips the check entirely (dev default). The on/off switch itself is `SiteSettings.turnstile_enabled` (admin panel, seeded from this same `TURNSTILE_*`-adjacent config), not an env var — disabling it falls back to IP rate-limiting only, no keys needed. **Stays in `.env`** (real secrets). |
+| `PROD_TURNSTILE_SITE_KEY` / `PROD_TURNSTILE_SECRET_KEY` | empty | [Cloudflare Turnstile](https://dash.cloudflare.com/?to=/:account/turnstile) keys, checked on `/auth/register`. Leaving both empty skips the check entirely (dev default). The on/off switch itself is `SiteSettings.turnstile_enabled` (admin panel, seeded from this same `TURNSTILE_*`-adjacent config), not an env var — disabling it falls back to IP rate-limiting only, no keys needed. **Stays in `.env`** (real secrets). |
+| `DEV_TURNSTILE_SITE_KEY` / `DEV_TURNSTILE_SECRET_KEY` | empty | Second Turnstile widget, used instead of the `PROD_TURNSTILE_*` pair for any request whose `Host` header matches the admin panel's "Turnstile dev hostnames" field (`SiteSettings.turnstile_dev_hostnames`, Registration section — **seeded** from `TURNSTILE_DEV_HOSTNAMES` here, live value owned by the admin panel from first read onward, same as `exempt_ips`). Decided purely from the incoming request (`Settings.turnstile_site_key_for`/`turnstile_secret_key_for` in `config.py`) — no client-sent flag, nothing to remember to flip; a request to any other hostname always gets the prod pair. **Stays in `.env`**. |
+| `TURNSTILE_DEV_HOSTNAMES` | `[]` | **Seed default only.** Live value in `site_settings.turnstile_dev_hostnames`, editable from `{ADMIN_PATH}/settings` (a tag-input, like Exempt IPs) — JSON list here, comma-separated there. Hostnames must exactly match the request's `Host` header, no scheme/port — e.g. `["api.dev.renar.app"]`. |
 
 ## Email
 
