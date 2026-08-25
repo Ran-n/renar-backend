@@ -113,12 +113,6 @@ tracked under `Title.tvdb_id`, upgraded to `tmdb_id` automatically the
 moment that resolves. See design-decisions.md's "TheTVDB as a genuine
 fallback identity, not just a name source".
 
-- **[Blocking for 1.0] Minor: concurrent reconciles of the same entry are last-write-wins.**
-  Two rows racing to reconcile into the same `LibraryEntry` aren't
-  serialized — harmless today since both reconcile functions are monotonic
-  (favorite only flips true, rating only fills when empty), but worth a note
-  if reconcile logic grows less monotonic later.
-
 - **[Future] Minor: `_progress` entries are never pruned.** Negligible memory; clears
   on process restart. Not worth fixing unless it becomes visible.
 

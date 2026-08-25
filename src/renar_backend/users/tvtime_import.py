@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/08/24 14:05:47.177046
+Revised: 2026/08/25 14:53:01.736429
 
 Import a TV Time GDPR export zip: shows, episode history, movies, favorites.
 One of several importers registered in routers/imports.py's dispatch table
@@ -608,7 +608,10 @@ def _upsert_library_entry(
                 db.rollback()
                 winner_title = find_title(db, media_type, tmdb_id, title, tvdb_id=tvdb_id)
                 winner = (
-                    db.query(LibraryEntry).filter_by(user_id=user_id, title_id=winner_title.id).first()
+                    db.query(LibraryEntry)
+                    .filter_by(user_id=user_id, title_id=winner_title.id)
+                    .with_for_update()
+                    .first()
                     if winner_title
                     else None
                 )
@@ -624,7 +627,7 @@ def _upsert_library_entry(
                 sync_tvdb_episodes(db, db_title, tvdb_episodes)
                 db.commit()
             return entry.id, True, False, False, False
-        entry = db.get(LibraryEntry, item_id)
+        entry = db.get(LibraryEntry, item_id, with_for_update=True)
         if entry is None:
             return None, False, False, False, False
         title_row = db.get(Title, entry.title_id)

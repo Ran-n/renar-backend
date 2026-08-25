@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/25 14:43:33.112551 )
+[//]: # (+ Revised: 	2026/08/25 14:55:49.040799 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.18.1] - 2026-08-25
+
+### Fixed
+
+- TV Time import: lock the target `LibraryEntry` row (`with_for_update`) before
+  reconciling, closing a race where two concurrent imports could interleave
+  reads/writes on the same entry instead of serializing.
 
 ## [0.18.0] - 2026-08-25
 
