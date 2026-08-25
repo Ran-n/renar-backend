@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/08/18 17:42:31.749953
+Revised: 2026/08/24 12:39:04.306500
 """
 
 import re
@@ -178,8 +178,27 @@ class UserOut(BaseModel):
     # frontend show the actual remaining count instead of a hardcoded mirror
     # of the grace-period constant (see renar-frontend's confirm_email_view.py).
     grace_days_remaining: int | None = None
+    # Set while a self-service deletion is pending (see routers/auth.py's
+    # DELETE /auth/me and POST /auth/me/cancel-deletion) — None means no
+    # deletion is scheduled. Lets the frontend show a grace-period banner
+    # with a cancel action.
+    deletion_requested_at: datetime | None = None
+    # Days left before the account_purge periodic task permanently deletes
+    # the account — None while no deletion is pending. Computed in
+    # routers/auth.py's `me()`, same pattern as grace_days_remaining above.
+    deletion_grace_days_remaining: int | None = None
     verified: bool = False
     verification_requested: bool = False
+    # Whether this user is on the reviews whitelist (see models.py's
+    # ReviewWhitelist) — computed in routers/auth.py's `me()`, lets the
+    # frontend gate the Reviews composer without a separate round trip.
+    can_review: bool = False
+    # Mirrors can_review — same ReviewWhitelist check, under the key
+    # premium.flair()'s public payloads (comments/reviews/profiles/feed) use
+    # for the same fact, so the frontend's badge rendering can read one key
+    # regardless of whether it's looking at its own profile or someone
+    # else's.
+    is_reviewer: bool = False
     badge: str | None = None
     ring_color: str | None = None
     name_color: str | None = None
@@ -434,6 +453,45 @@ class EpisodeBulk(BaseModel):
     watched: bool = True
 
 
+# ---------- lists ----------
+
+
+class ListCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class ListUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class ListItemCreate(BaseModel):
+    # same target-resolution shape as CommentCreate below — the frontend
+    # knows a title by (media_type, tmdb_id), never the internal title_id
+    media_type: MediaType
+    tmdb_id: int | None = None
+    title: str | None = Field(default=None, max_length=300)
+
+
+class ListItemReorder(BaseModel):
+    # every item id currently in the list, in the caller's desired order —
+    # position is rewritten wholesale from this, not diffed against the
+    # existing order (see routers/lists.py)
+    item_ids: list[int] = Field(min_length=1, max_length=2000)
+
+
+# ---------- reviews ----------
+
+
+class ReviewCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=10000)
+    rating: int = Field(ge=1, le=100)
+
+
+class ReviewUpdate(BaseModel):
+    text: str = Field(min_length=1, max_length=10000)
+    rating: int = Field(ge=1, le=100)
+
+
 # ---------- comments ----------
 
 
@@ -457,6 +515,18 @@ class CommentReportCreate(BaseModel):
 class RewatchCreate(BaseModel):
     season: int | None = Field(default=None, ge=0)
     episode: int | None = Field(default=None, ge=0)
+
+
+class WatchEventRatingUpdate(BaseModel):
+    """Payload for PATCH /media/{item_id}/rewatch-events/{event_id}.
+
+    Sets or clears the rating for one specific watch-through. When the
+    targeted event is the latest for its (season, episode) scope, the
+    cache column (LibraryEntry.rating / EpisodeWatch.rating) is updated
+    too so the community aggregate stays in sync.
+    """
+
+    rating: int | None = Field(default=None, ge=1, le=100)
 
 
 # ---------- ratings ----------

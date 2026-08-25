@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/08/02 18:29:49.075463
+Revised: 2026/08/24 12:39:03.671993
 """
 
 import asyncio
@@ -27,9 +27,11 @@ from .routers import (
     export,
     images,
     imports,
+    lists,
     media,
     notifications,
     premium,
+    reviews,
     social,
     stats,
     svc,
@@ -114,11 +116,16 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+# reviews.router uses literal /media/reviews paths and must be registered
+# before media.router's /media/{item_id} — Starlette matches route order, so
+# the wildcard path param would otherwise swallow "reviews" as an item_id.
+app.include_router(reviews.router)
 app.include_router(media.router)
 app.include_router(tmdb.router)
 app.include_router(stats.router)
 app.include_router(social.router)
 app.include_router(comments.router)
+app.include_router(lists.router)
 app.include_router(notifications.router)
 app.include_router(events.router)
 app.include_router(images.router)

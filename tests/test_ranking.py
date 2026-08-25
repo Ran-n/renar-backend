@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 09:55:31.503656
-Revised: 2026/07/21 09:51:05.863550
+Revised: 2026/08/24 12:39:05.574243
 
 Watch-time leaderboard (/stats/ranking): the users.total_watch_minutes
 column maintained by a Postgres trigger (migration a7c2e9f4b816, mirrored
@@ -13,6 +13,7 @@ for tests by models.py registering the same DDL against LibraryEntry's
 from datetime import timedelta
 
 from conftest import ADMIN_BASIC as BASIC
+from conftest import hard_delete
 from sqlalchemy.exc import IntegrityError
 
 from renar_backend import site_settings
@@ -458,8 +459,7 @@ def test_account_deletion_cascade_does_not_crash(client, alice, bob):
     )
     assert _watch_minutes(bob_user["id"]) == 100
 
-    resp = client.delete("/auth/me", headers=alice_headers)
-    assert resp.status_code == 204
+    hard_delete(alice_user["id"])
 
     db = SessionLocal()
     try:
@@ -566,8 +566,7 @@ def test_total_users_counter_matches_actual_count(client, make_user):
 def test_total_users_counter_decrements_on_account_deletion(client, alice):
     user, headers = alice
     before = _total_users_counter()
-    resp = client.delete("/auth/me", headers=headers)
-    assert resp.status_code == 204
+    hard_delete(user["id"])
     assert _total_users_counter() == before - 1
 
 

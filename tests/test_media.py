@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.395578
-Revised: 2026/08/18 17:10:43.917361
+Revised: 2026/08/24 11:07:30.556579
 
 Media library CRUD, filters, ownership, and community ratings.
 """
@@ -488,3 +488,48 @@ def test_ratings_none_left_after_all_deleted(client, alice):
     assert r.status_code == 204
     r = client.get("/media/ratings", params={"media_type": "film", "tmdb_id": 949}, headers=headers)
     assert r.json() == {"average": None, "count": 0}
+
+
+def test_status_revert_to_want_to_watch_clears_rating_and_watch_events(client, alice):
+    # Reverting a film's status all the way back to "want to watch" is "this
+    # was never watched" — matches the episode-level unmark rule. Without
+    # this, the rating cache and the whole-item WatchEvent(s) stuck around,
+    # so re-completing the film later showed a stale rating from a "watch"
+    # that, per the status field at the time, never happened.
+    _, headers = alice
+    item = _create(client, headers, tmdb_id=949, status="completed", rating=80)
+
+    r = client.patch(f"/media/{item['id']}", json={"status": "want_to_watch"}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["rating"] is None
+
+    db = SessionLocal()
+    try:
+        remaining = (
+            db.query(WatchEvent)
+            .filter(WatchEvent.media_item_id == item["id"], WatchEvent.season.is_(None), WatchEvent.episode.is_(None))
+            .count()
+        )
+        assert remaining == 0
+    finally:
+        db.close()
+
+    # Re-completing afterward starts fresh — no stale rating resurfaces.
+    r = client.patch(f"/media/{item['id']}", json={"status": "completed"}, headers=headers)
+    assert r.json()["rating"] is None
+
+
+def test_status_already_want_to_watch_does_not_clear_rating(client, alice):
+    # An item can be rated directly while still want_to_watch (_write_rating's
+    # defensive fallback creates a WatchEvent for it). Re-sending the same
+    # "want_to_watch" status in an unrelated PATCH must not wipe that rating —
+    # only an actual transition INTO want_to_watch from something else should.
+    _, headers = alice
+    item = _create(client, headers, tmdb_id=949, rating=80)
+    assert item["status"] == "want_to_watch"
+
+    r = client.patch(
+        f"/media/{item['id']}", json={"status": "want_to_watch", "notes": "still want to watch"}, headers=headers
+    )
+    assert r.status_code == 200
+    assert r.json()["rating"] == 80

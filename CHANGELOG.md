@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/21 18:20:58.949412 )
+[//]: # (+ Revised: 	2026/08/25 14:43:33.112551 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.18.0] - 2026-08-25
+
+### Added
+
+- TV Time import: map `lists-prod-lists.csv` into `List`/`ListItem` rows;
+  reconciles on re-import by `(user_id, name)`; dead-uuid and unresolvable
+  items are counted in `list_items_skipped`, not errors.
+- Per-rewatch rating history: `WatchEvent.rating`/`is_initial` (migration
+  `a8f3c2e1d9b5`) make each watch-through's own rating a real row instead of
+  only ever overwriting one value. `LibraryEntry.rating`/`EpisodeWatch.rating`
+  stay as the denormalized latest-rating cache the existing aggregate
+  triggers read — `_write_rating()` in `routers/media.py` is now the single
+  write path keeping both in sync. New `PATCH /media/{item_id}/rewatch-events/{event_id}`
+  edits or clears one specific watch-through's rating; `GET .../rewatch-events`
+  now also returns each event's `rating`/`is_initial`. `POST .../rewatch` now
+  rejects rewatching an episode/title that was never marked watched in the
+  first place (422), instead of silently creating the first watch. See
+  `docs/design-decisions.md`.
+- Self-service account deletion now starts a `deletion_grace_days`-day grace
+  period (default 30, admin-configurable) instead of purging immediately —
+  `DELETE /auth/me` sets `User.deletion_requested_at`; `POST
+  /auth/me/cancel-deletion` or simply logging back in during the window
+  cancels it. New `account_purge` periodic task
+  (`social/notifier.py`/`task_runs.py`) permanently removes accounts past
+  their grace period. Admin panel: a "pending deletion" pill on the user
+  detail page plus a cancel action.
+- Anti username-squatter cooldown: a deleted account's username is recorded
+  in the new `released_usernames` table and blocked from re-registration for
+  `username_cooldown_days` days (default 30, admin-configurable) — closes
+  the gap where a freed username could be immediately re-claimed.
+- Custom lists: new `List`/`ListItem` tables (migration `88137cd72bc2`) and
+  `routers/lists.py` — `GET/POST /lists`, `GET/PATCH/DELETE /lists/{id}`,
+  add/remove/reorder items via `/lists/{id}/items`. A title is resolved the
+  same way `POST /comments` does (tmdb_id-or-title, `find_or_create_title`).
+- Reviews: new `Review`/`ReviewWhitelist` tables (same migration) and
+  `routers/reviews.py` — longer write-ups distinct from Comments, gated to a
+  hand-picked whitelist (`ReviewWhitelist`, admin-managed via
+  `POST /admin/users/{id}/whitelist-review`/`unwhitelist-review`). One
+  review per (user, title), text + a 1-100 rating. `UserOut.can_review`
+  lets the frontend gate its composer without a separate round trip.
+- `users/accounts.py`'s `delete_account` now also cleans up a deleted user's
+  `List`/`Review`/`ReviewWhitelist` rows.
+- Reviewer badge: `premium.flair()` and `UserOut` now carry `is_reviewer`
+  (whitelist membership), alongside the existing premium/verified `badge` —
+  every payload that already carries flair (comments, reviews, profile,
+  activity feed) gets it too, batch-fetched per request
+  (`reviews.reviewer_ids()`, one `IN (...)` query) rather than per author.
+  See `docs/design-decisions.md`.
+- Dev server (`_devserver.py`): when `ensure_port_free` finds the port
+  already occupied and stdin is a real terminal, it now looks up the
+  occupant PID and offers to kill it and retry, instead of only printing the
+  manual `netstat`/`lsof` command to find it yourself — the occupant is
+  almost always yesterday's orphaned reload worker.
 
 ## [0.17.0] - 2026-08-21
 

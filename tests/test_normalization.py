@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/08/19 12:36:49.390206
+Revised: 2026/08/24 12:39:05.446651
 
 Schema normalization guard: fails CI the moment a denormalization sneaks
 back into the models.
@@ -105,6 +105,12 @@ ALLOWED_COPIED_COLUMNS: dict[tuple[str, str], str] = {
     ("episode_watches.rating", "media_items"): (
         "a per-episode rating, independent of media_items.rating (the show's "
         "overall rating) — same column name, unrelated fact"
+    ),
+    ("watch_events.rating", "media_items"): (
+        "a per-watch-through rating (source of truth for rating history), "
+        "independent of media_items.rating (the denormalized latest-rating "
+        "cache) — same column name, different fact; see docs/design-decisions.md "
+        "('Per-rewatch ratings: WatchEvent.rating as source of truth')"
     ),
     ("comment_likes.user_id", "comments"): (
         "the user who liked the comment, not comments.user_id (its author) — "

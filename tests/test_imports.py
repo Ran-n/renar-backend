@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/09 14:29:25.931212
-Revised: 2026/07/21 09:51:05.606594
+Revised: 2026/08/24 14:06:08.848940
 
 TV Time import reconciliation: merging into titles the user already tracks
 (manually or from a prior import), instead of skipping them outright.
@@ -14,7 +14,7 @@ import zipfile
 
 import renar_backend.users.tvtime_import as imports_mod
 from renar_backend.database import SessionLocal
-from renar_backend.models import Comment, Episode, EpisodeWatch, LibraryEntry, Title, WatchEvent
+from renar_backend.models import Comment, Episode, EpisodeWatch, LibraryEntry, List, ListItem, Title, WatchEvent
 
 
 def _csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:
@@ -37,6 +37,7 @@ def _build_zip(
     episode_comments: list[dict] | None = None,
     movie_comments: list[dict] | None = None,
     rewatches: list[dict] | None = None,
+    lists: list[dict] | None = None,
 ) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -62,7 +63,10 @@ def _build_zip(
         )
         zf.writestr(
             "gdpr-data/tracking-prod-records.csv",
-            _csv_bytes(movie_events or [], ["movie_name", "type", "runtime", "release_date", "created_at"]),
+            _csv_bytes(
+                movie_events or [],
+                ["movie_name", "type", "runtime", "release_date", "created_at", "uuid"],
+            ),
         )
         zf.writestr(
             "gdpr-data/show_comment.csv",
@@ -102,6 +106,24 @@ def _build_zip(
                     "tv_show_name",
                     "episode_season_number",
                     "episode_number",
+                ],
+            ),
+        )
+        zf.writestr(
+            "gdpr-data/lists-prod-lists.csv",
+            _csv_bytes(
+                lists or [],
+                [
+                    "ordering",
+                    "objects",
+                    "s_key",
+                    "is_public",
+                    "type",
+                    "name",
+                    "created_at",
+                    "user_id",
+                    "description",
+                    "lists",
                 ],
             ),
         )
@@ -1035,3 +1057,221 @@ def test_tvdb_fallback_entry_still_gets_comments_and_rewatches(client, alice, mo
     assert summary.get("error") is None
     assert summary["comments"] == 1
     assert summary["rewatches"] == 2  # cpt="2" -> two WatchEvent rows
+
+
+# ---------- custom lists ----------
+
+
+def _user_lists(user_id: int) -> list[List]:
+    db = SessionLocal()
+    try:
+        return db.query(List).filter(List.user_id == user_id).order_by(List.created_at).all()
+    finally:
+        db.close()
+
+
+def _list_items(list_id: int) -> list[ListItem]:
+    db = SessionLocal()
+    try:
+        return db.query(ListItem).filter(ListItem.list_id == list_id).order_by(ListItem.position).all()
+    finally:
+        db.close()
+
+
+def _list_count(user_id: int) -> int:
+    db = SessionLocal()
+    try:
+        return db.query(List).filter(List.user_id == user_id).count()
+    finally:
+        db.close()
+
+
+def _list_item_count(user_id: int) -> int:
+    db = SessionLocal()
+    try:
+        return db.query(ListItem).join(List).filter(List.user_id == user_id).count()
+    finally:
+        db.close()
+
+
+def _make_list_row(
+    s_key: str = "my-list-uuid",
+    name: str = "",
+    created_at: str = "2023-01-12 00:00:00",
+    objects: str = "",
+    row_type: str = "list",
+    description: str = "",
+) -> dict:
+    return {
+        "ordering": "0",
+        "objects": objects,
+        "s_key": s_key,
+        "is_public": "false",
+        "type": row_type,
+        "name": name,
+        "created_at": created_at,
+        "user_id": "42",
+        "description": description,
+        "lists": "",
+    }
+
+
+def _objects_str(*entries: dict) -> str:
+    """Build a Go fmt.Sprintf-style objects string from a list of dicts."""
+    parts = []
+    for entry in entries:
+        kv = " ".join(f"{k}:{v}" for k, v in entry.items())
+        parts.append(f"map[{kv}]")
+    return "[" + " ".join(parts) + "]"
+
+
+def test_import_lists_named_list_with_series_and_movie(client, alice, monkeypatch):
+    """A named list row with one series object (has TVDB id) and one movie object
+    (uuid resolved via tracking-prod-records) lands as List + two ListItems."""
+    user, headers = alice
+
+    # pre-track the show and movie so their titles already exist in the DB
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+    monkeypatch.setattr(imports_mod, "_search_movie", lambda name, year: ({"id": 777, "title": "Heat"}, False))
+
+    objects = _objects_str(
+        {"created_at": "1.673605669e+09", "type": "series", "id": "100", "uuid": "show-uuid-1"},
+        {"created_at": "1.673605689e+09", "type": "movie", "uuid": "heat-uuid-1"},
+    )
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        movie_events=[
+            {
+                "movie_name": "Heat",
+                "type": "watch",
+                "runtime": "0",
+                "release_date": "1995-12-15",
+                "created_at": "2023-01-01 00:00:00",
+                "uuid": "heat-uuid-1",
+            }
+        ],
+        lists=[_make_list_row(name="My Favorites", objects=objects)],
+    )
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["lists"] == 1
+    assert summary["lists_updated"] == 0
+    assert summary["list_items"] == 2
+    assert summary["list_items_skipped"] == 0
+
+    lst = _user_lists(user["id"])
+    assert len(lst) == 1
+    assert lst[0].name == "My Favorites"
+
+    items = _list_items(lst[0].id)
+    assert len(items) == 2
+    assert items[0].position == 0
+    assert items[1].position == 1
+
+    # Verify title_ids point to Title rows, not LibraryEntry rows
+    db = SessionLocal()
+    try:
+        t_series = db.get(Title, items[0].title_id)
+        t_movie = db.get(Title, items[1].title_id)
+        assert t_series is not None and t_series.tmdb_id == 555
+        assert t_movie is not None and t_movie.tmdb_id == 777
+    finally:
+        db.close()
+
+
+def test_import_lists_blank_name_gets_generic_fallback(client, alice, monkeypatch):
+    """A list row with blank name and a non-built-in s_key gets a date-based fallback name."""
+    user, _headers = alice
+    _patch_tmdb(monkeypatch)
+
+    zip_bytes = _build_zip(lists=[_make_list_row(s_key="some-random-uuid", name="", created_at="2023-01-12 00:00:00")])
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["lists"] == 1
+    lst = _user_lists(user["id"])
+    assert len(lst) == 1
+    assert lst[0].name == "Imported list (2023-01-12)"
+
+
+def test_import_lists_favorite_movies_builtin_name(client, alice, monkeypatch):
+    """s_key='favorite-movies' with blank name resolves to 'Favorite Movies'."""
+    user, _headers = alice
+    _patch_tmdb(monkeypatch)
+
+    zip_bytes = _build_zip(lists=[_make_list_row(s_key="favorite-movies", name="")])
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["lists"] == 1
+    lst = _user_lists(user["id"])
+    assert lst[0].name == "Favorite Movies"
+
+
+def test_import_lists_collection_junk_row_is_skipped(client, alice, monkeypatch):
+    """The 'collection' junk row (type blank, s_key='collection') must be silently
+    skipped — it produces no List row and no error."""
+    user, _headers = alice
+    _patch_tmdb(monkeypatch)
+
+    junk_row = _make_list_row(s_key="collection", name="", row_type="")
+    real_row = _make_list_row(s_key="my-list", name="My List")
+
+    zip_bytes = _build_zip(lists=[junk_row, real_row])
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    # only the real list row should have been created
+    assert _list_count(user["id"]) == 1
+    assert _user_lists(user["id"])[0].name == "My List"
+
+
+def test_import_lists_reimport_is_idempotent(client, alice, monkeypatch):
+    """Running the import twice with identical list data must not duplicate the
+    List row or the ListItem rows; list_items_skipped increments instead."""
+    user, _headers = alice
+
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+    monkeypatch.setattr(imports_mod, "_search_movie", lambda name, year: (None, False))
+
+    objects = _objects_str({"type": "series", "id": "100", "uuid": "s1"})
+    zip_bytes = _build_zip(
+        shows=[{"tv_show_id": "100", "tv_show_name": "Dark", "is_favorited": "0"}],
+        followed=[{"tv_show_id": "100", "archived": "0"}],
+        lists=[_make_list_row(name="Watchlist", objects=objects)],
+    )
+    _run(user["id"], zip_bytes)
+    assert _list_count(user["id"]) == 1
+    assert _list_item_count(user["id"]) == 1
+
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    # no new list or items; existing list merged
+    assert summary["lists"] == 0
+    assert summary["lists_updated"] == 1
+    assert summary["list_items"] == 0
+    assert summary["list_items_skipped"] == 1
+    assert _list_count(user["id"]) == 1
+    assert _list_item_count(user["id"]) == 1
+
+
+def test_import_lists_dead_uuid_is_skipped_not_error(client, alice, monkeypatch):
+    """A movie object whose uuid has no matching row in tracking-prod-records.csv
+    is skipped and counted, not treated as an error."""
+    user, _headers = alice
+    _patch_tmdb(monkeypatch)
+
+    objects = _objects_str({"type": "movie", "uuid": "dead-uuid-no-match"})
+    # tracking-prod-records.csv has NO row with uuid=dead-uuid-no-match
+    zip_bytes = _build_zip(lists=[_make_list_row(name="Dead Movie List", objects=objects)])
+    summary = _run(user["id"], zip_bytes)
+
+    assert summary.get("error") is None
+    assert summary["list_items_skipped"] == 1
+    assert summary["list_items"] == 0
+    # The List row itself is still created (we discovered dead uuid while processing items)
+    assert _list_count(user["id"]) == 1
+    assert _list_item_count(user["id"]) == 0

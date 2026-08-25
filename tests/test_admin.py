@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/08/21 16:27:43.463992
+Revised: 2026/08/24 12:39:05.068157
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -367,6 +367,8 @@ def test_admin_settings_post_updates_and_persists(client, admin_enabled):
         "confirmation_code_ttl_minutes": "15",
         "email_confirmation_grace_days": "7",
         "unconfirmed_account_cleanup_days": "14",
+        "username_cooldown_days": "30",
+        "deletion_grace_days": "30",
         # invite_only omitted → False (unchecked checkbox)
     }
     r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
@@ -405,6 +407,8 @@ def test_admin_settings_page_renders_exempt_ip_pills(client, admin_enabled):
         "confirmation_code_ttl_minutes": "15",
         "email_confirmation_grace_days": "7",
         "unconfirmed_account_cleanup_days": "14",
+        "username_cooldown_days": "30",
+        "deletion_grace_days": "30",
         "exempt_ips": "127.0.0.1, ::1",
     }
     client.post("/admin/settings", data=payload, auth=BASIC)
@@ -438,6 +442,8 @@ def test_admin_settings_invite_only_toggle(client, admin_enabled):
         "confirmation_code_ttl_minutes": "15",
         "email_confirmation_grace_days": "7",
         "unconfirmed_account_cleanup_days": "14",
+        "username_cooldown_days": "30",
+        "deletion_grace_days": "30",
     }
     r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
     assert r.status_code == 303
@@ -976,6 +982,8 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
         "confirmation_code_ttl_minutes": "15",
         "email_confirmation_grace_days": "7",
         "unconfirmed_account_cleanup_days": "14",
+        "username_cooldown_days": "30",
+        "deletion_grace_days": "30",
     }
     client.post("/admin/settings", data=payload_settings, auth=BASIC)
     site_settings.invalidate()

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 03:02:57.798569
-Revised: 2026/07/21 09:51:04.833943
+Revised: 2026/08/24 12:39:04.812933
 
 Account deletion: the one purge path, shared by self-service
 (DELETE /auth/me) and the admin panel's delete-user action.
@@ -15,6 +15,7 @@ those comments.
 """
 
 import logging
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -32,10 +33,16 @@ from ..models import (
     ImportJob,
     InviteCode,
     LibraryEntry,
+    List,
+    ListItem,
     LoginEvent,
     Notification,
+    ReleasedUsername,
     RequestDay,
+    Review,
+    ReviewWhitelist,
     User,
+    utcnow,
 )
 from .export import delete_export
 
@@ -67,6 +74,16 @@ def delete_account(user: User, db: Session) -> None:
     db.query(InviteCode).filter(InviteCode.created_by_user_id == user_id).update(
         {InviteCode.created_by_user_id: None}, synchronize_session=False
     )
+    # Bulk deletes (not ORM db.delete(list)) so these are real DELETE
+    # statements executed immediately — List has no relationship() back to
+    # User, so the unit-of-work flush planner has no dependency information
+    # to order an ORM-staged List delete correctly against the User delete
+    # below, unlike Comment (which does declare `author: Mapped[User]`).
+    own_list_ids = select(List.id).where(List.user_id == user_id)
+    db.query(ListItem).filter(ListItem.list_id.in_(own_list_ids)).delete(synchronize_session=False)
+    db.query(List).filter(List.user_id == user_id).delete(synchronize_session=False)
+    db.query(Review).filter(Review.user_id == user_id).delete(synchronize_session=False)
+    db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user_id).delete(synchronize_session=False)
     delete_export(user_id)  # the zip lives on disk, not in a row this delete() touches
     old_avatar_id = user.avatar_id
     # custom poster/backdrop references die with the cascading library entries
@@ -96,6 +113,10 @@ def delete_account(user: User, db: Session) -> None:
     db.query(EpisodeCustomStill).filter(EpisodeCustomStill.media_item_id.in_(item_id_sel)).delete(
         synchronize_session=False
     )
+    # Start this username's cooldown before it's gone (see
+    # ReleasedUsername's docstring) — checked at registration in
+    # routers/auth.py against SiteSettings.username_cooldown_days.
+    db.add(ReleasedUsername(username=username, released_at=utcnow()))
     db.delete(user)  # cascades media_items -> episode_watches + watch_events + notifications
     db.flush()
     gc_image(old_avatar_id, db)
@@ -103,3 +124,37 @@ def delete_account(user: User, db: Session) -> None:
         gc_image(pid, db)
     db.commit()
     _log.info("deleted account id=%s username=%s", user_id, username)
+
+
+def request_deletion(user: User, db: Session) -> None:
+    """Start the grace period (DELETE /auth/me) instead of purging
+    immediately — see SiteSettings.deletion_grace_days and the account_purge
+    periodic task (task_runs.py / social/notifier.py), which calls
+    delete_account above once the window elapses. Logging back in during the
+    window cancels it (routers/auth.py's login)."""
+    user.deletion_requested_at = utcnow()
+    db.commit()
+    _log.info("account deletion requested: id=%s username=%s", user.id, user.username)
+
+
+def cancel_deletion(user: User, db: Session) -> None:
+    """Cancel a pending deletion — called both from the explicit
+    POST /auth/me/cancel-deletion endpoint and automatically on a successful
+    login during the grace period."""
+    user.deletion_requested_at = None
+    db.commit()
+    _log.info("account deletion cancelled: id=%s username=%s", user.id, user.username)
+
+
+def purge_expired_deletions(db: Session) -> int:
+    """Permanently delete every account whose grace period has elapsed — see
+    task_runs.py / social/notifier.py's account_purge periodic task. Returns
+    the number of accounts purged."""
+    from ..site_settings import current as site_settings_current
+
+    cutoff = utcnow() - timedelta(days=site_settings_current().deletion_grace_days)
+    stale = db.query(User).filter(User.deletion_requested_at.isnot(None), User.deletion_requested_at < cutoff).all()
+    count = len(stale)
+    for user in stale:
+        delete_account(user, db)
+    return count

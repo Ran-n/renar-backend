@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/08/21 16:27:43.276805
+Revised: 2026/08/24 12:39:04.942885
 
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
@@ -144,6 +144,22 @@ def login(client: TestClient, username: str = "alice", password: str = PASSWORD)
     r = client.post("/auth/login", data={"username": username, "password": password})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+def hard_delete(user_id: int) -> None:
+    """Immediately purge a user via accounts.delete_account, bypassing the
+    self-service DELETE /auth/me grace period (see request_deletion) — for
+    tests exercising delete_account's own FK-safe purge cascade, not the
+    soft-delete request/cancel/auto-purge flow itself (see
+    test_account_deletion.py for that)."""
+    from renar_backend.users import accounts
+
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        accounts.delete_account(user, db)
+    finally:
+        db.close()
 
 
 @pytest.fixture

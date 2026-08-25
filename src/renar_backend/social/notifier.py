@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/08/19 19:11:30.683774
+Revised: 2026/08/24 12:39:04.555924
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -424,6 +424,33 @@ async def _email_confirmation_cleanup_loop() -> None:
         await asyncio.sleep(task_runs.get_interval_minutes("email_confirmation_cleanup") * 60)
 
 
+def purge_expired_deletions_once() -> int:
+    from ..users import accounts  # local import: avoids a cycle at module load
+
+    db = SessionLocal()
+    try:
+        return accounts.purge_expired_deletions(db)
+    finally:
+        db.close()
+
+
+async def _account_purge_loop() -> None:
+    await asyncio.sleep(15)
+    while True:
+        if not task_runs.is_enabled("account_purge"):
+            _log.info("account purge skipped: disabled")
+        else:
+            started = utcnow()
+            try:
+                n = await asyncio.to_thread(purge_expired_deletions_once)
+                _log.info("account purge done: %d accounts removed", n)
+                task_runs.record_run("account_purge", started, "ok", f"{n} accounts removed")
+            except Exception:
+                _log.exception("account purge failed")
+                task_runs.record_run("account_purge", started, "error", "purge failed, see server logs")
+        await asyncio.sleep(task_runs.get_interval_minutes("account_purge") * 60)
+
+
 def purge_expired_exports_once() -> int:
     from ..users.export import purge_expired_exports  # local import: avoids a cycle at module load
 
@@ -486,7 +513,7 @@ async def _unmatched_title_retry_loop() -> None:
 
 
 def start_periodic_tasks() -> list[asyncio.Task]:
-    """Launch the seven independent per-task loops; each is paused/rescheduled
+    """Launch the eight independent per-task loops; each is paused/rescheduled
     without affecting the others (see task_runs.py / admin Periodic Tasks page)."""
     return [
         asyncio.create_task(_episode_check_loop()),
@@ -496,4 +523,5 @@ def start_periodic_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_unmatched_title_retry_loop()),
         asyncio.create_task(_email_confirmation_cleanup_loop()),
         asyncio.create_task(_export_cleanup_loop()),
+        asyncio.create_task(_account_purge_loop()),
     ]

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/08/20 10:36:39.730866
+Revised: 2026/08/24 11:07:30.379579
 """
 
 import logging
@@ -40,6 +40,7 @@ from ..schemas import (
     LibraryEntryUpdate,
     RatingsBatchRequest,
     RewatchCreate,
+    WatchEventRatingUpdate,
 )
 from ..tmdb.tmdb_http import TMDB_KIND
 from ..tmdb.tmdb_store import (
@@ -319,7 +320,8 @@ def create_media(
         title_id=title.id,
         url=data.url,
         status=data.status,
-        rating=data.rating,
+        # rating is NOT set here: _write_rating() below is the single write
+        # path so the WatchEvent.rating history column stays in sync.
         notes=data.notes,
         current_season=data.current_season,
         current_episode=data.current_episode,
@@ -332,6 +334,20 @@ def create_media(
     db.add(item)
     db.commit()
     db.refresh(item)
+    # Record the initial watch event so this viewing has a WatchEvent to
+    # attach a rating to. Only for statuses that imply an actual watch
+    # happened right now. Items created as want_to_watch don't get one yet
+    # (they'll get one when the user later transitions the status or rates via
+    # _write_rating's fallback — see docs/design-decisions.md).
+    needs_commit = False
+    if data.status in (WatchStatus.watching, WatchStatus.completed):
+        db.add(WatchEvent(media_item_id=item.id, season=None, episode=None, is_initial=True))
+        needs_commit = True
+    if data.rating is not None:
+        _write_rating(db, item, None, None, data.rating)
+        needs_commit = True
+    if needs_commit:
+        db.commit()
     return item
 
 
@@ -466,6 +482,12 @@ def _mark_all_aired_watched(item: LibraryEntry, db: Session) -> None:
     for ep in aired:
         if (ep.season, ep.episode_number) not in existing:
             db.add(EpisodeWatch(media_item_id=item.id, season=ep.season, episode=ep.episode_number))
+            # Same rule as set_episode's single-toggle path: a newly-watched
+            # episode gets an initial WatchEvent so its rating history isn't
+            # silently empty — without this, every episode backfilled by
+            # "mark whole show completed" had a watched checkmark but zero
+            # history to show in the rewatch/rating history dialog.
+            db.add(WatchEvent(media_item_id=item.id, season=ep.season, episode=ep.episode_number, is_initial=True))
     # sessions here are autoflush=False (see database.py) — _sync_progress
     # re-queries EpisodeWatch, so the inserts above must be committed first
     # or it won't see them, same as every other call site of _sync_progress.
@@ -534,11 +556,19 @@ def update_media(
     user: User = Depends(get_current_user),
 ):
     item = _get_owned_item(item_id, user, db)
+    old_status = item.status
     changed = data.model_dump(exclude_unset=True)
     if "tmdb_id" in changed:
         tmdb_id = changed.pop("tmdb_id")
         if tmdb_id is not None:
             _relink_tmdb(item, tmdb_id, db)
+    # Pop rating BEFORE the setattr loop so it goes through _write_rating
+    # (the single write path that keeps WatchEvent.rating in sync with the
+    # LibraryEntry.rating cache column — see docs/design-decisions.md).
+    # LibraryEntryUpdate.rating is not TV-only, so this applies to both films
+    # and shows (both use season=None for the item-level rating scope).
+    _MISSING = object()
+    rating_change = changed.pop("rating", _MISSING)
     if item.media_type == MediaType.film:
         tv_only = {"episodes_watched", "current_season", "current_episode"} & changed.keys()
         if tv_only:
@@ -562,6 +592,33 @@ def update_media(
         and "episodes_watched" not in changed
     ):
         _mark_all_aired_watched(item, db)
+    # For a film, a status transition into watching/completed is "this is
+    # their first watch" — create an initial WatchEvent so there's a row to
+    # attach a rating to. Guard: only when no film-scope WatchEvent exists yet
+    # (idempotent: a repeated status set doesn't double-count watches).
+    if (
+        item.media_type == MediaType.film
+        and changed.get("status") in (WatchStatus.watching, WatchStatus.completed)
+        and not db.query(WatchEvent)
+        .filter(WatchEvent.media_item_id == item.id, WatchEvent.season.is_(None), WatchEvent.episode.is_(None))
+        .first()
+    ):
+        db.add(WatchEvent(media_item_id=item.id, season=None, episode=None, is_initial=True))
+    # Reverting all the way back to "want to watch" is "this was never
+    # watched" for the whole-item scope — matches the episode-level unmark
+    # rule (set_episode/bulk_episodes): without this, switching status back
+    # to want_to_watch left every whole-item WatchEvent and the rating cache
+    # behind, so re-completing it later showed a stale rating from a "watch"
+    # that, per the status field, never happened. Only the season=None/
+    # episode=None scope is touched — a show's per-episode EpisodeWatch/
+    # WatchEvent data is untouched by status changes today and stays that way.
+    if changed.get("status") == WatchStatus.want_to_watch and old_status != WatchStatus.want_to_watch:
+        db.query(WatchEvent).filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season.is_(None),
+            WatchEvent.episode.is_(None),
+        ).delete()
+        item.rating = None
     # Coarse progress (no per-episode rows) is still the user asserting a
     # watch happened, so it has to move last_watched_at the same as the
     # per-episode path does — everything else this endpoint can touch
@@ -578,6 +635,11 @@ def update_media(
         WatchStatus.completed,
     ):
         item.last_watched_at = utcnow()
+    # Apply rating change through the write-through helper AFTER any
+    # WatchEvent-creation above so the helper can find the new event as the
+    # "latest" for this scope.
+    if rating_change is not _MISSING:
+        _write_rating(db, item, None, None, rating_change)
     db.commit()
     db.refresh(item)
     return item
@@ -825,8 +887,16 @@ def _ratings_summary(item: LibraryEntry, db: Session) -> dict:
     episode_avg = round(sum(ep_ratings) / len(ep_ratings)) if ep_ratings else None
     all_episodes_rated = bool(item.total_episodes) and len(ep_ratings) >= item.total_episodes
     combined = round((item.rating + episode_avg) / 2) if item.rating and episode_avg and all_episodes_rated else None
+    # is_initial=True events are first-watch events, not rewatches; NULL (old
+    # rows) and False count as rewatches for backward compat.
     rewatch_count = (
-        db.query(WatchEvent).filter(WatchEvent.media_item_id == item.id, WatchEvent.season.is_(None)).count()
+        db.query(WatchEvent)
+        .filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season.is_(None),
+            WatchEvent.is_initial.is_not(True),
+        )
+        .count()
     )
     return {
         "overall_rating": item.rating,
@@ -858,10 +928,16 @@ def list_episodes(
         .order_by(EpisodeWatch.season, EpisodeWatch.episode)
         .all()
     )
+    # is_initial=True events are first-watch events; only non-initial events
+    # count as rewatches (NULL for old rows = rewatch, for backward compat).
     rewatch_counts = {
         (s, e): c
         for s, e, c in db.query(WatchEvent.season, WatchEvent.episode, func.count(WatchEvent.id))
-        .filter(WatchEvent.media_item_id == item.id, WatchEvent.season.isnot(None))
+        .filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season.isnot(None),
+            WatchEvent.is_initial.is_not(True),
+        )
         .group_by(WatchEvent.season, WatchEvent.episode)
         .all()
     }
@@ -910,6 +986,10 @@ def rewatch(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="season and episode must be given together",
         )
+    # A rewatch is by definition a *repeat* watch — it must never be the
+    # mechanism that first marks something watched, or "rewatch" logs a
+    # watch-through that never happened (rewatching an episode you've never
+    # seen, or a whole title you haven't finished yet).
     if data.season is not None:
         watch = (
             db.query(EpisodeWatch)
@@ -921,7 +1001,15 @@ def rewatch(
             .first()
         )
         if watch is None:
-            db.add(EpisodeWatch(media_item_id=item.id, season=data.season, episode=data.episode))
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Mark this episode watched before rewatching it",
+            )
+    elif item.status != WatchStatus.completed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Mark this title as finished before rewatching it",
+        )
     db.add(WatchEvent(media_item_id=item.id, season=data.season, episode=data.episode))
     # _sync_progress only stamps last_watched_at off episode_watches rows, so
     # a rewatch of an episode already in that table (or a whole-film rewatch,
@@ -940,17 +1028,15 @@ def undo_rewatch(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Remove the single most recent rewatch for this item/episode — the
+    """Remove the single most recent watch event for this item/episode — the
     inverse of POST .../rewatch, one event at a time. Lets the frontend step
     an already-rewatched episode down by one instead of jumping straight to
     fully unwatched when the user "unmarks" it. The underlying watched
-    status (EpisodeWatch row) is left in place, but its rating IS cleared:
-    this endpoint's only caller is that same "unmark" tap on the checkmark
-    (never a standalone "undo my last rewatch" action elsewhere — see
-    rewatch_widget.py, which uses the separate per-event delete-rewatch-
-    event endpoint instead), so from the user's perspective tapping unmark
-    should always drop the rating too, not just leave it stranded on a row
-    that no longer looks freshly watched."""
+    status (EpisodeWatch row) is left in place. The cache rating column
+    (EpisodeWatch.rating / LibraryEntry.rating) is updated to match the
+    now-latest remaining WatchEvent's rating — which may be a previous
+    watch-through's rating (fallback), or None if no events remain or the
+    previous event was unrated."""
     item = _get_owned_item(item_id, user, db)
     if (data.season is None) != (data.episode is None):
         raise HTTPException(
@@ -969,9 +1055,11 @@ def undo_rewatch(
     )
     if latest is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rewatch to undo")
-    db.delete(latest)
-    rating_cleared = False
-    if data.season is not None:
+    # Capture old cache rating before the delete so we can detect a real change.
+    if data.season is None:
+        old_cache_rating = item.rating
+        watch = None
+    else:
         watch = (
             db.query(EpisodeWatch)
             .filter(
@@ -981,9 +1069,29 @@ def undo_rewatch(
             )
             .first()
         )
-        if watch is not None and watch.rating is not None:
-            watch.rating = None
-            rating_cleared = True
+        old_cache_rating = watch.rating if watch is not None else None
+    db.delete(latest)
+    db.flush()  # make the delete visible so the next query excludes `latest`
+    # Find the now-latest remaining WatchEvent for this scope and fall back to
+    # its rating — may be a previous watch-through's rating, or None if no
+    # events remain or the previous event was unrated.
+    remaining_latest = (
+        db.query(WatchEvent)
+        .filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season == data.season,
+            WatchEvent.episode == data.episode,
+        )
+        .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        .first()
+    )
+    new_rating = remaining_latest.rating if remaining_latest is not None else None
+    # Mirror the fallback rating onto the cache column.
+    if data.season is None:
+        item.rating = new_rating
+    elif watch is not None:
+        watch.rating = new_rating
+    rating_cleared = old_cache_rating != new_rating
     db.commit()
     _sync_progress(item, db)
     return {**_ratings_summary(item, db), "rating_cleared": rating_cleared}
@@ -1012,7 +1120,9 @@ def list_rewatch_events(
         .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
         .all()
     )
-    return [{"id": e.id, "watched_at": e.watched_at} for e in events]
+    return [
+        {"id": e.id, "watched_at": e.watched_at, "rating": e.rating, "is_initial": bool(e.is_initial)} for e in events
+    ]
 
 
 @router.delete("/{item_id}/rewatch-events/{event_id}")
@@ -1028,9 +1138,103 @@ def delete_rewatch_event(
     event = db.query(WatchEvent).filter(WatchEvent.id == event_id, WatchEvent.media_item_id == item.id).first()
     if event is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rewatch event not found")
+    season, episode = event.season, event.episode
+    # Was this event the current latest for its scope? Only the latest
+    # event's rating ever drives the cache column (same rule
+    # update_rewatch_event_rating already follows) — a bare rewatch with no
+    # rating of its own never syncs the cache in the first place, so deleting
+    # some OTHER, non-latest event must not retroactively touch a cache value
+    # it was never the source of.
+    scope_latest = (
+        db.query(WatchEvent)
+        .filter(WatchEvent.media_item_id == item.id, WatchEvent.season == season, WatchEvent.episode == episode)
+        .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        .first()
+    )
+    was_latest = scope_latest is not None and scope_latest.id == event.id
     db.delete(event)
+    if was_latest:
+        db.flush()
+        # The deleted event WAS what the cache reflected — fall back to
+        # whatever remains latest now, same rule as undo_rewatch.
+        remaining_latest = (
+            db.query(WatchEvent)
+            .filter(WatchEvent.media_item_id == item.id, WatchEvent.season == season, WatchEvent.episode == episode)
+            .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+            .first()
+        )
+        new_rating = remaining_latest.rating if remaining_latest is not None else None
+        if season is None:
+            item.rating = new_rating
+        else:
+            cache_watch = (
+                db.query(EpisodeWatch)
+                .filter(
+                    EpisodeWatch.media_item_id == item.id,
+                    EpisodeWatch.season == season,
+                    EpisodeWatch.episode == episode,
+                )
+                .first()
+            )
+            if cache_watch is not None:
+                cache_watch.rating = new_rating
     db.commit()
     _sync_progress(item, db)
+    return _ratings_summary(item, db)
+
+
+@router.patch("/{item_id}/rewatch-events/{event_id}")
+def update_rewatch_event_rating(
+    item_id: int,
+    event_id: int,
+    data: WatchEventRatingUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Set or clear the rating for one specific watch-through.
+
+    When the targeted event is the latest for its (season, episode) scope,
+    the denormalized cache column (LibraryEntry.rating for a film-scope event,
+    EpisodeWatch.rating for an episode-scope event) is updated too so the
+    trigger-maintained community aggregate stays correct. Editing a non-latest
+    (historical) event's rating does NOT touch the cache column or the
+    aggregate — only the latest watch-through's rating drives the headline."""
+    item = _get_owned_item(item_id, user, db)
+    event = db.query(WatchEvent).filter(WatchEvent.id == event_id, WatchEvent.media_item_id == item.id).first()
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rewatch event not found")
+    event.rating = data.rating
+    # Check whether this event is currently the latest for its scope so we
+    # know whether to propagate the new rating onto the cache column.
+    scope_latest = (
+        db.query(WatchEvent)
+        .filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season == event.season,
+            WatchEvent.episode == event.episode,
+        )
+        .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        .first()
+    )
+    if scope_latest is not None and scope_latest.id == event.id:
+        # This event IS the latest — mirror the new rating onto the cache column
+        # so the trigger-maintained aggregate picks up the change.
+        if event.season is None:
+            item.rating = data.rating
+        else:
+            cache_watch = (
+                db.query(EpisodeWatch)
+                .filter(
+                    EpisodeWatch.media_item_id == item.id,
+                    EpisodeWatch.season == event.season,
+                    EpisodeWatch.episode == event.episode,
+                )
+                .first()
+            )
+            if cache_watch is not None:
+                cache_watch.rating = data.rating
+    db.commit()
+    # Rating doesn't affect progress counters, so _sync_progress is not called.
     return _ratings_summary(item, db)
 
 
@@ -1081,6 +1285,76 @@ def _assert_no_future_episodes(item: LibraryEntry, season: int, episode_numbers:
         )
 
 
+def _write_rating(
+    db: Session,
+    item: LibraryEntry,
+    season: int | None,
+    episode: int | None,
+    rating: int | None,
+) -> None:
+    """Write `rating` to the latest WatchEvent for (item, season, episode) and
+    keep the denormalized cache column in sync.
+
+    Source of truth: WatchEvent.rating for per-watch-through history.
+    Cache columns: LibraryEntry.rating (when season is None) and
+    EpisodeWatch.rating (when season is set) — the existing triggers
+    trg_media_items_rating and trg_episode_watches_rating read ONLY these cache
+    columns, so this is the single write path that keeps both in sync.
+
+    Callers must flush/commit after this returns; this function itself only
+    flushes so pending inserts (e.g. a first-watch WatchEvent added just
+    before the call) are visible to the query.
+    """
+    # Flush so any WatchEvent added in the same request (e.g. the initial-watch
+    # event from set_episode) is visible to the query below without a commit
+    # (autoflush=False, see database.py).
+    db.flush()
+    event = (
+        db.query(WatchEvent)
+        .filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season == season,
+            WatchEvent.episode == episode,
+        )
+        .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        .first()
+    )
+    if event is None:
+        # Defensive fallback: no WatchEvent exists yet (e.g. an item created as
+        # want_to_watch being rated directly, or a TV show's item-level rating
+        # set before any episode watch). Create one so rating history has a row.
+        # Skip when rating is None — there's nothing meaningful to record.
+        if rating is None:
+            return
+        event = WatchEvent(
+            media_item_id=item.id,
+            season=season,
+            episode=episode,
+            watched_at=utcnow(),
+            rating=rating,
+            is_initial=True,
+        )
+        db.add(event)
+    else:
+        event.rating = rating
+    # Mirror onto the denormalized cache column so the trigger-maintained
+    # aggregate stays correct.
+    if season is None:
+        item.rating = rating
+    else:
+        cache_watch = (
+            db.query(EpisodeWatch)
+            .filter(
+                EpisodeWatch.media_item_id == item.id,
+                EpisodeWatch.season == season,
+                EpisodeWatch.episode == episode,
+            )
+            .first()
+        )
+        if cache_watch is not None:
+            cache_watch.rating = rating
+
+
 @router.put("/{item_id}/episodes/{season}/{episode}")
 def set_episode(
     item_id: int,
@@ -1105,9 +1379,25 @@ def set_episode(
         if watch is None:
             watch = EpisodeWatch(media_item_id=item.id, season=season, episode=episode)
             db.add(watch)
-        watch.rating = data.rating
+            # First time this episode is marked watched: create the initial
+            # WatchEvent so per-watch-through rating history has a row.
+            db.add(WatchEvent(media_item_id=item.id, season=season, episode=episode, is_initial=True))
+        # Route rating through _write_rating so WatchEvent.rating (the source
+        # of truth for history) stays in sync with EpisodeWatch.rating (cache).
+        # Called AFTER the WatchEvent insert so the helper finds it as latest.
+        _write_rating(db, item, season, episode, data.rating)
     elif watch is not None:
         db.delete(watch)
+        # Unmarking is "this never happened" for the whole watch-through
+        # history, not just the cache row — without this, every unmark still
+        # left its WatchEvent(s) behind, so remarking watched added another
+        # initial WatchEvent on top instead of really starting fresh, and the
+        # rewatch/rating history dialog accumulated duplicate stale entries.
+        db.query(WatchEvent).filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season == season,
+            WatchEvent.episode == episode,
+        ).delete()
     db.commit()
     _sync_progress(item, db)
     return _ratings_summary(item, db)
@@ -1129,11 +1419,26 @@ def bulk_episodes(
             EpisodeWatch.media_item_id == item.id, EpisodeWatch.season == data.season
         )
     }
+    unmarked_episodes = []
     for ep in data.episodes:
         if data.watched and ep not in existing:
             db.add(EpisodeWatch(media_item_id=item.id, season=data.season, episode=ep))
+            # Same rule as set_episode's single-toggle path: a newly-watched
+            # episode gets an initial WatchEvent so its rating history isn't
+            # silently empty — without this, every episode marked watched via
+            # "mark whole season watched" had no history to show at all.
+            db.add(WatchEvent(media_item_id=item.id, season=data.season, episode=ep, is_initial=True))
         elif not data.watched and ep in existing:
             db.delete(existing[ep])
+            unmarked_episodes.append(ep)
+    if unmarked_episodes:
+        # Same "unmarking clears watch-through history" rule as set_episode —
+        # otherwise a bulk unmark leaves orphaned WatchEvent rows behind.
+        db.query(WatchEvent).filter(
+            WatchEvent.media_item_id == item.id,
+            WatchEvent.season == data.season,
+            WatchEvent.episode.in_(unmarked_episodes),
+        ).delete(synchronize_session=False)
     db.commit()
     _sync_progress(item, db)
     return _ratings_summary(item, db)

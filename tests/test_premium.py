@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.607537
-Revised: 2026/08/18 17:10:44.109913
+Revised: 2026/08/25 14:05:14.372218
 
 Premium accounts: badge derivation, style colors, verification requests,
 custom posters (upload + GC) and the admin grant/revoke/verify actions.
@@ -335,6 +335,63 @@ def test_feed_includes_flair(client, alice, bob):
     (row,) = client.get("/feed", headers=b_headers).json()
     assert row["badge"] == "premium"
     assert row["name_color"] == COLOR2
+
+
+# ---------- is_reviewer flair, orthogonal to premium/verified ----------
+
+
+def _whitelist_reviewer(user_id: int) -> None:
+    from renar_backend.models import ReviewWhitelist
+
+    db = SessionLocal()
+    try:
+        db.add(ReviewWhitelist(user_id=user_id))
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_comment_carries_reviewer_badge(client, alice, bob):
+    a_user, a_headers = alice
+    _, b_headers = bob
+    _whitelist_reviewer(a_user["id"])
+    client.post(
+        "/comments",
+        json={"media_type": "film", "tmdb_id": 949, "title": "Heat", "text": "great"},
+        headers=a_headers,
+    )
+    (comment,) = client.get("/comments", params={"media_type": "film", "tmdb_id": 949}, headers=b_headers).json()
+    assert comment["is_reviewer"] is True
+
+
+def test_comment_reviewer_badge_false_for_non_reviewer(client, alice, bob):
+    _, a_headers = alice
+    _, b_headers = bob
+    client.post(
+        "/comments",
+        json={"media_type": "film", "tmdb_id": 949, "title": "Heat", "text": "great"},
+        headers=a_headers,
+    )
+    (comment,) = client.get("/comments", params={"media_type": "film", "tmdb_id": 949}, headers=b_headers).json()
+    assert comment["is_reviewer"] is False
+
+
+def test_public_profile_includes_reviewer_badge(client, alice, bob):
+    user, _ = alice
+    _, b_headers = bob
+    _whitelist_reviewer(user["id"])
+    profile = client.get(f"/users/{user['id']}", headers=b_headers).json()
+    assert profile["is_reviewer"] is True
+
+
+def test_feed_includes_reviewer_badge(client, alice, bob):
+    a_user, a_headers = alice
+    _, b_headers = bob
+    _whitelist_reviewer(a_user["id"])
+    client.post(f"/users/{a_user['id']}/follow", headers=b_headers)
+    _add_film(client, a_headers)
+    (row,) = client.get("/feed", headers=b_headers).json()
+    assert row["is_reviewer"] is True
 
 
 # ---------- verification requests ----------

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 13:10:00.000000
-Revised: 2026/08/18 11:05:47.525437
+Revised: 2026/08/24 12:39:05.320719
 
 Registration/email-change confirmation codes (users/email_confirmation.py,
 routers/auth.py's /auth/confirm-email + /auth/resend-confirmation) and the
@@ -16,7 +16,7 @@ from datetime import timedelta
 
 import pytest
 from conftest import ADMIN_BASIC as BASIC
-from conftest import PASSWORD
+from conftest import PASSWORD, hard_delete
 
 from renar_backend import site_settings
 from renar_backend.database import SessionLocal
@@ -46,6 +46,8 @@ _BASE_SETTINGS_PAYLOAD = {
     "confirmation_code_ttl_minutes": "15",
     "email_confirmation_grace_days": "7",
     "unconfirmed_account_cleanup_days": "14",
+    "username_cooldown_days": "30",
+    "deletion_grace_days": "30",
 }
 
 
@@ -628,9 +630,7 @@ def test_self_delete_with_pending_confirmation_code_does_not_fkey_violate(client
     registration always has one pending row, so this is the common case, not
     an edge case."""
     user = _raw_register(client)
-    headers = _login_headers(client, "alice")
-    r = client.delete("/auth/me", headers=headers)
-    assert r.status_code == 204
+    hard_delete(user["id"])
     assert _get_user(user["id"]) is None
 
 

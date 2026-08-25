@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.875365
-Revised: 2026/08/17 13:38:10.873280
+Revised: 2026/08/25 14:05:14.067080
 
 Comments on titles (global across users), with likes, nested replies and
 user reports.
@@ -20,6 +20,7 @@ from ..schemas import CommentCreate, CommentReportCreate
 from ..social.comment_threads import ancestor_depth, load_thread, resolve_root_scope
 from ..users.auth import get_current_user
 from ..users.premium import flair
+from .reviews import reviewer_ids
 
 router = APIRouter(prefix="/comments", tags=["comments"])
 _log = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ def _comment_out(
     me: User,
     children_by_parent: dict[int | None, list[Comment]],
     watch_info: dict[int, tuple[bool, int | None]] | None = None,
+    reviewer_id_set: set[int] | None = None,
     depth: int = 0,
 ) -> dict:
     replies = children_by_parent.get(c.id, [])
@@ -83,7 +85,7 @@ def _comment_out(
         "parent_id": c.parent_id,
         "username": c.author.username,
         "avatar": c.author.avatar,
-        **flair(c.author),
+        **flair(c.author, is_reviewer=c.user_id in (reviewer_id_set or ())),
         "text": c.text,
         "created_at": c.created_at,
         "likes": sum(1 for like in c.likes if like.value > 0),
@@ -94,7 +96,7 @@ def _comment_out(
         "reported_by_me": any(r.user_id == me.id for r in c.reports),
         "seen_by_author": seen,
         "author_rating": author_rating,
-        "replies": [_comment_out(r, me, children_by_parent, watch_info, depth + 1) for r in replies]
+        "replies": [_comment_out(r, me, children_by_parent, watch_info, reviewer_id_set, depth + 1) for r in replies]
         if depth < MAX_REPLY_DEPTH
         else [],
     }
@@ -140,7 +142,8 @@ def list_comments(
     by_id, children_by_parent = load_thread(db, root_ids)
     all_comments = list(by_id.values())
     watch_info = _build_watch_info(db, {c.user_id for c in all_comments}, target.id, season, episode)
-    return [_comment_out(by_id[cid], me, children_by_parent, watch_info) for cid in root_ids]
+    rev_ids = reviewer_ids(db, {c.user_id for c in all_comments})
+    return [_comment_out(by_id[cid], me, children_by_parent, watch_info, rev_ids) for cid in root_ids]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -194,7 +197,8 @@ def create_comment(
     # request payload is validated against the parent's own root scope just
     # above, so it's already the right pair to look up watch/rating info by).
     watch_info = _build_watch_info(db, {comment.user_id}, target.id, data.season, data.episode)
-    return _comment_out(comment, me, {}, watch_info)
+    rev_ids = reviewer_ids(db, {comment.user_id})
+    return _comment_out(comment, me, {}, watch_info, rev_ids)
 
 
 @router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)

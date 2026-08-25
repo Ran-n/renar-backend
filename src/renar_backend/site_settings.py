@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 13:30:00.000000
-Revised: 2026/08/21 16:27:42.788269
+Revised: 2026/08/24 12:39:04.430511
 
 Runtime-tunable site settings backed by the `site_settings` singleton row.
 
@@ -72,6 +72,8 @@ def _make_defaults() -> SiteSettings:
         confirmation_code_ttl_minutes=settings.confirmation_code_ttl_minutes,
         email_confirmation_grace_days=settings.email_confirmation_grace_days,
         unconfirmed_account_cleanup_days=settings.unconfirmed_account_cleanup_days,
+        username_cooldown_days=30,
+        deletion_grace_days=30,
     )
 
 
