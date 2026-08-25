@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:14.175174
-Revised: 2026/08/02 18:29:48.783439
+Revised: 2026/08/25 14:05:14.268575
 
 Premium feature rules: the color palette users may pick from and the
 derivation of the "flair" (badge + colors) every user payload carries.
@@ -99,10 +99,18 @@ def premium_active(user: User, feature: PremiumFeature) -> bool:
     return user.is_premium and feature_enabled(feature)
 
 
-def flair(user: User) -> dict:
+def flair(user: User, *, is_reviewer: bool = False) -> dict:
     """Badge + effective colors for public payloads (comments, profiles,
-    feed). Colors are served only while premium is active — the stored
-    choice survives a lapse but stops rendering everywhere.
+    feed), plus is_reviewer — an orthogonal reviewer-whitelist indicator
+    shown alongside (never instead of) the premium/verified badge. Colors
+    are served only while premium is active — the stored choice survives a
+    lapse but stops rendering everywhere.
+
+    is_reviewer defaults False and must be passed in by the caller: unlike
+    the other fields here it isn't derivable from `user` alone without a
+    ReviewWhitelist query, and this function stays db-free so callers doing
+    it for a whole list batch that query once (see routers/reviews.py's
+    reviewer_ids) instead of once per user.
     """
     active = premium_active(user, "style")
     return {
@@ -110,4 +118,5 @@ def flair(user: User) -> dict:
         "ring_color": user.ring_color if active else None,
         "name_color": user.name_color if active else None,
         "background": user.background if active else None,
+        "is_reviewer": is_reviewer,
     }

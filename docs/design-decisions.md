@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/21 16:27:43.649251 )
+[//]: # (+ Revised: 	2026/08/24 14:06:08.688743 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -158,6 +158,66 @@ See `docs/backlog.md`'s note on this. It also skips a movie that now
 resolves as a TV show (or vice versa) rather than rewriting `media_type` in
 place — a real media-type correction, left for manual relink.
 
+### TV Time lists import: name fallback, identity reconciliation, and item resolution
+
+`users/tvtime_import.py`'s lists pass reads `lists-prod-lists.csv` and maps
+each `type="list"` row into `List`/`ListItem` rows. Several non-obvious choices:
+
+**Name fallback chain.** TV Time's per-row `name` field is frequently blank —
+observed on a real GDPR export where only 2 of 6 list rows had `name` populated
+despite all 6 having human-chosen names visible elsewhere in the export. The
+full `name` for each list is also present in the file's "collection" metadata row
+(`s_key="collection"`, `type` blank), but that row's `lists` column is a
+Go-`%v`-formatted array of free-text map entries whose value fields can contain
+spaces — making safe tokenisation ambiguous without a proper parser for Go's
+reflect-value format, which varies between versions. Parsing it would risk
+silently misfiling items under the wrong list name (harder to notice than a
+generic name). The chosen fallback chain is: (a) row's own `name` if non-blank;
+(b) `"Favorite Movies"` / `"Favorite Shows"` for TV Time's two built-in
+favorites lists (`s_key` = `"favorite-movies"` / `"favorite-series"`); (c)
+`"Imported list (YYYY-MM-DD)"` using the row's `created_at` date otherwise.
+This means some imported lists get a generic name instead of their real TV Time
+name — a user can trivially rename an imported list by hand afterward, which is
+far less risky than a subtly wrong parse that silently puts items in the wrong
+bucket.
+
+**List identity / reconciliation on re-import.** `List` has no external-key
+column (only `id`, `user_id`, `name`). Adding one would require a new migration
+and a BCNF review for a one-time-import case. Instead, lists are reconciled by
+`(user_id, name)`: if a list with that exact name already exists for the user, new
+items are merged into it; item-level deduplication checks `title_id` membership
+before inserting (mirroring `routers/lists.py`'s own `already` check) to respect
+the `uq_list_item` constraint without relying on `IntegrityError` for flow
+control.
+
+**`objects` column parsing.** The Go `fmt.Sprintf("%v", ...)` array format uses
+`[map[k:v k:v] map[...]]` with no quoting or escaping — safe to split on
+whitespace and on the first `:` per token because this specific column's values
+never contain spaces, colons, or brackets (confirmed on a real export). The
+separate "collection" junk row uses the same outer format but its map values
+*do* contain spaces (list names and descriptions), which is why that row is
+skipped entirely rather than parsed.
+
+**Series item resolution.** Series items in `objects` carry an `id` key that is a
+TheTVDB series id — the same numbering space as `tv_show_id` in
+`user_tv_show_data.csv`. If that TVDB id was already processed in the show pass
+(i.e. the user also tracked/followed it), the existing `LibraryEntry` is looked
+up to get its `Title.id`. If the show was only listed (never followed), a fresh
+TMDB crosswalk lookup (`_find_tv_by_tvdb`) is attempted, followed by a TVDB
+fallback — in both cases only a `Title` row is created, no `LibraryEntry`,
+because being in a list is not the same as tracking. `ListItem` only references
+`Title`, so no code path accidentally also creates a `LibraryEntry` for a
+list-only show.
+
+**Movie item resolution.** Movie items carry only a `uuid`, not a name or TMDB id.
+The uuid is cross-referenced against `tracking-prod-records.csv` (already loaded
+as `movie_events`) where the same uuid appears on follow/watch rows and carries
+`movie_name` + `release_date`. If the uuid has no matching row (the item was in a
+list but was never followed or watched), it is skipped and counted in
+`list_items_skipped` — we have no title identity at all. Otherwise the name is
+normalized and looked up in `items_by_movie` (from the movie pass) first; on a
+miss a fresh `_search_movie` call creates a `Title`-only row as above.
+
 ### Manual relink for an unmatched title: `PATCH /media/{id}` with `tmdb_id`
 
 An entry can end up with `tmdb_id = None` (no poster, no episode tracking)
@@ -241,6 +301,16 @@ are not a normalization concern at all: they depend on the whole of
 requires. Staleness of an external cache and redundant storage of *our
 own* data are different properties — the guard test only polices the
 latter.
+
+### Per-rewatch ratings: `WatchEvent.rating` as the source of truth
+
+`WatchEvent.rating` (migration `a8f3c2e1d9b5`) is the authoritative per-watch-through rating — one row per watch, so "first watch: 70, rewatch: 90" is two rows with two ratings rather than one overwritten value. `LibraryEntry.rating` and `EpisodeWatch.rating` remain as denormalized **latest-rating caches** that the pre-existing `trg_media_items_rating`/`trg_episode_watches_rating` triggers read to maintain the community-aggregate running totals in `titles.rating_sum`/`rating_count` and `episode_rating_aggregates`.
+
+**Why application code, not a trigger, keeps the cache in sync:** the triggers are delta-based — they compute `NEW.rating - OLD.rating` and apply that delta atomically. That model assumes one row per (user, title/episode): writing to `EpisodeWatch.rating` is one delta, the trigger applies it, done. A history table (`WatchEvent`) produces a *different* logical event — "latest value changed" — that doesn't fit a delta trigger without rewriting the trigger to do a subquery, which would turn every WatchEvent insert into an additional lookup. `_write_rating()` in `routers/media.py` is the single application-layer write path that determines which WatchEvent is "latest" and mirrors its rating onto the cache column exactly as the old code wrote the rating directly; from the trigger's perspective, nothing changed.
+
+**`WatchEvent.is_initial`:** set to `True` for the first-watch event created by `set_episode`/`create_media`/`update_media`; `NULL` for rewatch events (including all pre-migration rows — treated as rewatches for backward compat). The rewatch_count display excludes events where `is_initial IS TRUE` so adding a first-watch WatchEvent doesn't inflate the count the user sees.
+
+**Backfill (migration `a8f3c2e1d9b5`):** for every rated `media_items`/`episode_watches` row that had no prior WatchEvent, one initial-watch WatchEvent is inserted so the rating isn't orphaned from history. Items that already had rewatch WatchEvents (had been rewatched before the migration) are left as-is; their WatchEvent rows now have `rating = NULL` (unavailable) since ratings were never tracked per-event before this migration.
 
 ### `users.total_watch_minutes`: a stored aggregate, maintained by a database trigger, not application code
 
@@ -665,6 +735,38 @@ implicit "the app just fixes it up on startup" behavior to reason about.
 The project ran on SQLite early on and migrated to Postgres once multiple
 concurrent writers (the parallelized TV Time import) needed real
 transactional isolation; SQLite support has since been removed.
+
+### Account deletion is a grace period, not an immediate purge; `ReleasedUsername` has no FK to `User`
+
+`DELETE /auth/me` (`routers/auth.py`) no longer calls `accounts.delete_account`
+directly — it calls `accounts.request_deletion`, which only stamps
+`User.deletion_requested_at`. The account, its data, and its session token
+all stay fully usable during the `SiteSettings.deletion_grace_days`-day
+window (default 30). A periodic task (`account_purge`,
+`social/notifier.py`/`task_runs.py`) calls the real `delete_account` once
+the window elapses; an admin's hard-delete action in the admin panel still
+calls `delete_account` directly, bypassing the grace period entirely — an
+admin removing an account has already made the final call.
+
+**Why a grace period:** an accidental or impulsive self-delete is otherwise
+unrecoverable the instant the request lands. Logging back in during the
+window is itself treated as "I want to keep this" — `routers/auth.py`'s
+`login()` calls `accounts.cancel_deletion` automatically, no separate
+confirm step, same "no obligation" spirit as the email-confirmation grace
+period.
+
+**`ReleasedUsername` has no FK to `User`:** it's written by
+`accounts.delete_account` *right before* the `User` row itself is deleted,
+so by the time it would matter, there's nothing left to point to — the same
+"orphan by design" shape `InviteCode.created_by_user_id` already has once
+nulled, except here nothing was ever there to null. Registration
+(`routers/auth.py`'s `register`) checks this table for a still-cooling-down
+username before allowing the same name to be reused — closes the gap where
+a squatted-then-abandoned or just-deleted username could be re-claimed by
+someone else the instant it freed up. Because `delete_account` is the single
+function every deletion path (self-service purge, admin hard-delete, the
+unconfirmed-account cleanup loop) funnels through, the cooldown record is
+written no matter which path triggered the deletion.
 
 ## Anti-abuse
 
@@ -1992,11 +2094,80 @@ permission every account has.
 lower-signal duplicate of Comments rather than the more considered,
 editorial content Reviews is meant to be.
 
-**How to apply:** the new `reviews` table/endpoints need an authorization
-check on the write path (e.g. a `can_review` flag on `User`, or a separate
-whitelist table — not yet decided) gating who may `POST` a review; read
-endpoints stay open to everyone. See `docs/backlog.md`'s Reviews entry for
-the concrete schema/endpoint touch points, and renar-frontend's
-`docs/backlog.md`/`docs/design-decisions.md` for the matching client-side
-gating (composer hidden/disabled for non-whitelisted users, not just a
-403 after the fact).
+**How to apply:** the `reviews` table/endpoints (`routers/reviews.py`) gate
+the write path via a separate `review_whitelist` table, not a boolean flag
+on `User` — chosen over the flag so it can later carry metadata (who
+granted it, when) without widening `User` itself; read endpoints stay open
+to everyone. `UserOut.can_review` (computed in `routers/auth.py`'s `me()`
+from a `ReviewWhitelist` row's presence) lets the frontend gate its
+composer without a separate round trip. Admin manages the whitelist via
+`POST /admin/users/{id}/whitelist-review`/`unwhitelist-review`, same
+toggle-and-redirect shape as `verify_user`/`unverify_user`. See
+renar-frontend's `docs/design-decisions.md` for the matching client-side
+gating (composer hidden for non-whitelisted users, not just a 403 after
+the fact — no explicit "you're not allowed" message either, matching how
+other gated features in this app behave).
+
+### `List`/`Review` deletion in `delete_account` must be bulk queries, not `db.delete()` loops
+
+`users/accounts.py::delete_account` purges a user's `List`/`ListItem`/
+`Review`/`ReviewWhitelist` rows via `.filter(...).delete(synchronize_session=False)`
+— the same bulk-delete pattern as `Follow`/`Notification`/etc. in that
+function — rather than loading each row and calling `db.delete(obj)` the
+way `Comment` rows are purged just above them.
+
+**Why:** `Comment` declares `author: Mapped[User] = relationship()`, which
+is what lets SQLAlchemy's unit-of-work flush planner order an ORM-staged
+`db.delete(comment)` correctly before the later `db.delete(user)` in the
+same flush. `List`/`Review` only have a raw `user_id: Mapped[int] =
+mapped_column(ForeignKey("users.id"))` column — no `relationship()` back to
+`User` — so the flush planner has no dependency information between the two
+deletes and can (did, in testing) execute them in an order that trips the
+`lists_user_id_fkey`/`reviews_user_id_fkey` constraint. A bulk `.delete()`
+executes as a real `DELETE` statement immediately, sidestepping the
+ordering question entirely — same reasoning as every other FK'd table in
+this function that doesn't need `Comment`'s reply-subtree cascade.
+
+**How to apply:** if a future table references `users.id` and needs
+purging here, use a bulk `.delete(synchronize_session=False)` unless it
+declares a `relationship()` back to `User` (or needs ORM-level cascade
+behavior the way `Comment`'s reply subtree does) — don't assume a
+`db.delete()` loop is safe by analogy to `Comment` without checking which
+case applies.
+
+### `reviews.router` must be registered before `media.router` in `main.py`
+
+`GET /media/reviews` collided with `media.router`'s `GET /media/{item_id}`
+— FastAPI/Starlette matches routes in registration order, and a wildcard
+path param (`{item_id}`) matches any single path segment including the
+literal string `reviews`, so with `media.router` registered first every
+`/media/reviews*` request 422'd trying to parse `"reviews"` as an int
+`item_id`. Fixed by registering `reviews.router` before `media.router` in
+`main.py`, with a comment at the call site — any future router that adds a
+literal path under an existing wildcard-parameterized prefix needs the same
+check.
+
+### Reviewer badge (`is_reviewer`) is a separate flag from `badge`, batch-fetched per request
+
+Whitelisted reviewers get a badge next to their username in comments,
+reviews and profiles (see renar-frontend's `branding.reviewer_badge_icon`),
+same idea as the premium/verified badge but not folded into `User.badge`.
+
+**Why:** `badge` is deliberately single-valued ("verified replaces premium,
+never both" — see `User.badge`'s docstring). Reviewer-whitelist membership
+is orthogonal to premium/verified status (a free account can be a
+reviewer), so it needed its own field (`is_reviewer`) rendered alongside,
+not folded into, the existing badge.
+
+**How to apply:** `premium.flair()` takes `is_reviewer` as an explicit
+keyword rather than querying `ReviewWhitelist` itself, so it stays a pure
+per-user derivation with no db access. Every caller that renders a list of
+authors (`comments.py`, `social.py`'s `_public_users_batch`/`activity_feed`)
+batch-fetches whitelist membership once via `reviews.reviewer_ids()` — one
+`IN (...)` query for the whole list — instead of querying per author, same
+N+1-avoidance shape as `comments.py`'s own `_build_watch_info`. Single-user
+call sites (`reviews.py`'s own create/update, `auth.py`'s `me()`) just call
+`is_whitelisted_reviewer()` directly. `UserOut.is_reviewer` mirrors
+`can_review` for the owner's own profile view, so the frontend's badge
+rendering reads one key (`is_reviewer`) regardless of whose profile it's
+looking at.

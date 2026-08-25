@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/08/19 19:11:30.880427
+Revised: 2026/08/24 14:05:47.177046
 
 Import a TV Time GDPR export zip: shows, episode history, movies, favorites.
 One of several importers registered in routers/imports.py's dispatch table
@@ -21,6 +21,9 @@ The zip contains gdpr-data/*.csv. Relevant files:
   episode_comment.csv          this user's own episode-level comments
   comments-prod-comments.csv   this user's own movie comments (type=comment/reply rows only)
   rewatched_episode.csv        per-episode rewatch counts ("cpt")
+  lists-prod-lists.csv         user-created custom list definitions and items (type="list" rows
+                               only; a separate junk row with s_key="collection"/blank type is
+                               skipped — see _parse_list_objects for the objects column format)
 
 Shows are matched to TMDB via TVDB id (/find), movies via name+year search.
 If the TVDB-id lookup misses (TMDB has no crosswalk entry for that id — common
@@ -58,6 +61,8 @@ from ..models import (
     EpisodeWatch,
     ImportJob,
     LibraryEntry,
+    List,
+    ListItem,
     MediaType,
     Title,
     WatchEvent,
@@ -782,6 +787,91 @@ def _process_movie(
     return item_id, unmatched, is_new, changed, error, duplicate_in_run
 
 
+# -------- list-object parsing and title resolution --------
+
+# Every map[...] block in the objects column of lists-prod-lists.csv.
+# Values inside a map never contain spaces, brackets, or colons (confirmed on
+# a real GDPR export) — safe to split on whitespace then on the first colon.
+_MAP_BLOCK_RE = re.compile(r"map\[([^\]]*)\]")
+
+
+def _parse_list_objects(raw: str) -> list[dict]:
+    """Parse the Go fmt.Sprintf('%v', ...) objects column from lists-prod-lists.csv.
+
+    Format: [map[key:value key:value ...] map[...] ...]
+    Confirmed keys: created_at (unix epoch float), type (movie|series), uuid,
+    id (series only — TheTVDB series id, same numbering space as tv_show_id).
+    Order within the array is insertion order (created_at ascending in the
+    observed sample) and is used directly for ListItem.position.
+    """
+    raw = raw.strip()
+    if not raw:
+        return []
+    if not raw.startswith("[") or not raw.endswith("]"):
+        return []
+    result = []
+    for m in _MAP_BLOCK_RE.finditer(raw):
+        inner = m.group(1).strip()
+        if not inner:
+            continue
+        obj: dict = {}
+        for token in inner.split():
+            key, sep, val = token.partition(":")
+            if sep:
+                obj[key] = val
+        if obj:
+            result.append(obj)
+    return result
+
+
+def _resolve_list_series(tvdb_id: str, db) -> int | None:
+    """Resolve a TVDB series id to a Title.id, creating the Title if needed.
+
+    Called only for shows that appear in a custom list but were never
+    tracked/followed in this import's show pass (so not yet in items_by_tvdb).
+    Does NOT create a LibraryEntry — being in a list is not the same as
+    tracking. Returns None when neither TMDB nor TVDB has any data for this id.
+    """
+    tmdb_found = _find_tv_by_tvdb(tvdb_id)
+    if tmdb_found:
+        tmdb_id = tmdb_found["id"]
+        name = (tmdb_found.get("name") or "").strip() or f"Show {tvdb_id}"
+        title_row = find_or_create_title(db, MediaType.tv_show, tmdb_id, name)
+        return title_row.id
+    extended = fetch_series_extended(tvdb_id)
+    if extended:
+        smry = series_summary(tvdb_id, extended)
+        fallback_name = (smry.get("name") or "").strip()
+        if fallback_name:
+            resolved_tvdb_id = int(tvdb_id) if tvdb_id.isdigit() else None
+            title_row = find_or_create_title(db, MediaType.tv_show, None, fallback_name, tvdb_id=resolved_tvdb_id)
+            return title_row.id
+    return None
+
+
+def _resolve_list_movie(name: str, year: str | None, db) -> int | None:
+    """Resolve a movie name/year to a Title.id, creating the Title if needed.
+
+    Called only for movies that appear in a list but weren't processed in the
+    movie pass. Does NOT create a LibraryEntry. Returns None only when name is
+    blank (can't create a nameless title — the caller already checked the uuid
+    against movie_events before calling this, so blank name should be rare).
+    """
+    if not name:
+        return None
+    found, is_tv = _search_movie(name, year)
+    if found:
+        tmdb_id = found["id"]
+        final_name = (found.get("title" if not is_tv else "name") or name).strip()
+        media_type = MediaType.tv_show if is_tv else MediaType.film
+    else:
+        tmdb_id = None
+        final_name = name
+        media_type = MediaType.film
+    title_row = find_or_create_title(db, media_type, tmdb_id, final_name)
+    return title_row.id
+
+
 def run(user_id: int, zip_bytes: bytes) -> None:
     db: Session = SessionLocal()
     summary = {
@@ -789,6 +879,10 @@ def run(user_id: int, zip_bytes: bytes) -> None:
         "updated": 0,
         "episodes": 0,
         "movies": 0,
+        "lists": 0,
+        "lists_updated": 0,
+        "list_items": 0,
+        "list_items_skipped": 0,
         "comments": 0,
         "comments_skipped": 0,
         "rewatches": 0,
@@ -1072,6 +1166,170 @@ def run(user_id: int, zip_bytes: bytes) -> None:
                 item.status = WatchStatus.completed
         db.commit()
 
+        # ---------- custom lists ----------
+        # lists-prod-lists.csv has one meaningful row per user-created list
+        # (type="list") plus a "collection" junk row (type blank, s_key=
+        # "collection") that is a redundant summary with free-text fields that
+        # are ambiguous to parse safely — it is skipped via the type check below.
+        #
+        # Each list row's `objects` column is a Go fmt.Sprintf("%v", ...) array
+        # of maps — one entry per item in the list — parsed by _parse_list_objects.
+        # Series items carry a TVDB id ("id" key); movie items carry only a uuid
+        # that must be cross-referenced against tracking-prod-records.csv (which
+        # is already loaded as movie_events) to recover the movie name.
+        #
+        # List identity: reconciled by (user_id, name) so re-running the import
+        # merges new items into an existing list rather than creating a duplicate.
+        # Item-level deduplication checks title_id membership before inserting,
+        # mirroring routers/lists.py's own existence check (the uq_list_item
+        # unique constraint is the final authority, but we avoid an unnecessary
+        # IntegrityError by checking first).
+        #
+        # Resolving an untracked show/movie (listed but never followed/watched)
+        # creates a Title row via find_or_create_title but NO LibraryEntry —
+        # being in a list is not the same as tracking. ListItem only references
+        # Title, not LibraryEntry, so this falls out naturally.
+
+        # Build uuid -> (movie_name, year) from the already-loaded movie events.
+        # The join works because tracking-prod-records.csv carries a uuid column
+        # on every row, and list movie objects reference items by that uuid.
+        uuid_to_movie: dict[str, tuple[str, str | None]] = {}
+        for ev in movie_events:
+            ev_uuid = (ev.get("uuid") or "").strip()
+            ev_name = (ev.get("movie_name") or "").strip()
+            if ev_uuid and ev_name:
+                release = ev.get("release_date") or ""
+                ev_year = release[:4] if len(release) >= 4 and release[:4].isdigit() else None
+                uuid_to_movie.setdefault(ev_uuid, (ev_name, ev_year))
+
+        # Per-pass caches: tvdb_id -> title_id and normalized-movie-name -> title_id.
+        # These are used (a) to look up title_id for shows/movies that were already
+        # processed by the earlier show/movie passes (items_by_tvdb/items_by_movie
+        # store LibraryEntry.id, not Title.id — hence a separate lookup), and (b)
+        # to avoid re-resolving the same show/movie for every list it appears in.
+        tvdb_list_title: dict[str, int | None] = {}
+        movie_list_title: dict[str, int | None] = {}
+
+        list_rows = _read_csv(zf, "lists-prod-lists.csv")
+        _set(user_id, stage="Importing lists", done=0, total=len(list_rows))
+        done = 0
+
+        for row in list_rows:
+            done += 1
+            _set(user_id, done=done)
+
+            # Skip the junk/collection metadata row (type is blank or not "list")
+            if (row.get("type") or "").strip() != "list":
+                continue
+
+            s_key = (row.get("s_key") or "").strip()
+            raw_name = (row.get("name") or "").strip()
+            created_at_str = (row.get("created_at") or "").strip()
+            raw_objects = (row.get("objects") or "").strip()
+
+            # Name fallback chain:
+            # (a) row's own name field (often blank even for named lists);
+            # (b) canonical English label for TV Time's two built-in favorites lists;
+            # (c) generic date-stamped fallback (user can rename after import).
+            if raw_name:
+                list_name = raw_name
+            elif s_key == "favorite-movies":
+                list_name = "Favorite Movies"
+            elif s_key == "favorite-series":
+                list_name = "Favorite Shows"
+            else:
+                created_at_dt = _parse_dt(created_at_str)
+                date_str = (
+                    created_at_dt.strftime("%Y-%m-%d")
+                    if created_at_dt
+                    else (created_at_str[:10] if len(created_at_str) >= 10 else "unknown")
+                )
+                list_name = f"Imported list ({date_str})"
+
+            # Reconcile by (user_id, name): re-import merges items into the
+            # existing list rather than creating a second one with the same name.
+            lst = db.query(List).filter_by(user_id=user_id, name=list_name).first()
+            if lst is not None:
+                summary["lists_updated"] += 1
+                existing_items = db.query(ListItem).filter_by(list_id=lst.id).all()
+            else:
+                lst = List(user_id=user_id, name=list_name)
+                db.add(lst)
+                db.flush()  # populate lst.id before creating ListItem rows below
+                summary["lists"] += 1
+                existing_items = []
+
+            existing_title_ids: set[int] = {item.title_id for item in existing_items}
+            next_pos = max((item.position for item in existing_items), default=-1) + 1
+
+            for obj in _parse_list_objects(raw_objects):
+                obj_type = (obj.get("type") or "").strip()
+                title_id: int | None = None
+
+                if obj_type == "series":
+                    tvdb_id_str = (obj.get("id") or "").strip()
+                    if not tvdb_id_str:
+                        summary["list_items_skipped"] += 1
+                        continue
+
+                    if tvdb_id_str in tvdb_list_title:
+                        title_id = tvdb_list_title[tvdb_id_str]
+                    elif tvdb_id_str in items_by_tvdb:
+                        # Show was processed in the show pass; get its title_id
+                        # from the LibraryEntry (items_by_tvdb stores entry id).
+                        entry = db.get(LibraryEntry, items_by_tvdb[tvdb_id_str])
+                        t_id = entry.title_id if entry else None
+                        tvdb_list_title[tvdb_id_str] = t_id
+                        title_id = t_id
+                    else:
+                        # Untracked show — create Title only, no LibraryEntry
+                        t_id = _resolve_list_series(tvdb_id_str, db)
+                        tvdb_list_title[tvdb_id_str] = t_id
+                        title_id = t_id
+
+                elif obj_type == "movie":
+                    obj_uuid = (obj.get("uuid") or "").strip()
+                    movie_info = uuid_to_movie.get(obj_uuid)
+                    if not movie_info:
+                        # Dead uuid: no matching row in tracking-prod-records.csv
+                        summary["list_items_skipped"] += 1
+                        continue
+
+                    m_name, m_year = movie_info
+                    m_key = normalize_title_key(m_name)
+
+                    if m_key in movie_list_title:
+                        title_id = movie_list_title[m_key]
+                    elif m_key in items_by_movie:
+                        # Movie was processed in the movie pass; get title_id
+                        # from its LibraryEntry.
+                        entry = db.get(LibraryEntry, items_by_movie[m_key])
+                        t_id = entry.title_id if entry else None
+                        movie_list_title[m_key] = t_id
+                        title_id = t_id
+                    else:
+                        # Untracked movie — create Title only, no LibraryEntry
+                        t_id = _resolve_list_movie(m_name, m_year, db)
+                        movie_list_title[m_key] = t_id
+                        title_id = t_id
+
+                if title_id is None:
+                    summary["list_items_skipped"] += 1
+                    continue
+
+                if title_id in existing_title_ids:
+                    # Item already present in this list (from a prior import
+                    # run or an earlier object in the same pass); skip silently.
+                    summary["list_items_skipped"] += 1
+                    continue
+
+                existing_title_ids.add(title_id)
+                db.add(ListItem(list_id=lst.id, title_id=title_id, position=next_pos))
+                next_pos += 1
+                summary["list_items"] += 1
+
+            db.commit()
+
         # ---------- comments ----------
         # The export's user_id column is constant across every row (verified
         # empirically against a real export) — this is only ever the
@@ -1329,12 +1587,17 @@ def run(user_id: int, zip_bytes: bytes) -> None:
         _set(user_id, stage="Done", finished=True, summary=summary, error=None)
         _mark_job(user_id, finished=True, error=None, summary=summary)
         _log.info(
-            "TV Time import finished for user_id=%s: %s shows, %s episodes, %s movies, %s comments, %s rewatches, "
-            "%s updated, %s skipped, %s errors, %s unmatched",
+            "TV Time import finished for user_id=%s: %s shows, %s episodes, %s movies, "
+            "%s lists (+%s updated, %s items, %s items_skipped), "
+            "%s comments, %s rewatches, %s updated, %s skipped, %s errors, %s unmatched",
             user_id,
             summary["shows"],
             summary["episodes"],
             summary["movies"],
+            summary["lists"],
+            summary["lists_updated"],
+            summary["list_items"],
+            summary["list_items_skipped"],
             summary["comments"],
             summary["rewatches"],
             summary["updated"],

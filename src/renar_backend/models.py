@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/08/21 16:27:42.694055
+Revised: 2026/08/24 12:39:03.794967
 """
 
 import enum
@@ -186,6 +186,14 @@ class User(Base):
     background_id: Mapped[int | None] = mapped_column(ForeignKey("images.id"), nullable=True, index=True)
     banned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     ban_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Set by a self-service DELETE /auth/me (or the admin's soft-delete
+    # action) to start the grace period instead of purging immediately; NULL
+    # means no deletion is pending. Logging back in auto-cancels it (see
+    # routers/auth.py's login). The account_purge periodic task
+    # (task_runs.py) permanently deletes rows older than
+    # SiteSettings.deletion_grace_days via users/accounts.py's delete_account
+    # — the same final-purge path an admin hard-delete uses directly.
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     # Premium is a timestamp, not a bool: active while utcnow() < premium_until,
     # so lapsing, renewals and admin-granted trial time are all one field.
     premium_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -375,6 +383,16 @@ class SiteSettings(Base):
     confirmation_code_ttl_minutes: Mapped[int] = mapped_column(Integer, default=15)
     email_confirmation_grace_days: Mapped[int] = mapped_column(Integer, default=7)
     unconfirmed_account_cleanup_days: Mapped[int] = mapped_column(Integer, default=14)
+    # How long a released username (see ReleasedUsername below) stays blocked
+    # from re-registration after its account is deleted — stops an abandoned
+    # or abusive account's username from being immediately re-squatted by
+    # someone else the moment it frees up.
+    username_cooldown_days: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+    # Days before a self-requested account deletion is actually purged (see
+    # users/accounts.py's request_deletion/cancel_deletion and the
+    # account_purge periodic task) — logging back in during the window
+    # auto-cancels the pending deletion.
+    deletion_grace_days: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
 
 
 class PeriodicTaskRun(Base):
@@ -474,6 +492,30 @@ class LoginEvent(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ReleasedUsername(Base):
+    """Cooldown record: a username that used to belong to a deleted account.
+    Checked at registration (routers/auth.py's register) against
+    SiteSettings.username_cooldown_days — stops a squatted-then-abandoned or
+    just-deleted username from being immediately re-claimed by someone else.
+
+    Written by users/accounts.py::delete_account right before the User row
+    itself is removed (so it fires on self-service deletion, admin hard
+    delete, and the unconfirmed-account/account-purge cleanup loops alike,
+    since all three funnel through that one function). Intentionally has no
+    FK to User — the user row is gone by the time this is written, the same
+    "orphan by design" shape as InviteCode.created_by_user_id once nulled,
+    except here there's nothing to null because nothing ever pointed here.
+    Not unique on username: the same name can be released more than once
+    over time as accounts come and go.
+    """
+
+    __tablename__ = "released_usernames"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(50), index=True)
+    released_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class EndpointStat(Base):
@@ -1022,6 +1064,16 @@ class WatchEvent(Base):
     this is an append-only log: rewatching an episode or a whole film just
     adds another row here. season/episode are both null for a whole-item
     (film) watch event.
+
+    rating is the per-watch-through rating (1-100), the source of truth for
+    rating history. LibraryEntry.rating / EpisodeWatch.rating are a denormalized
+    cache of the latest WatchEvent.rating for their scope, kept in sync by
+    _write_rating() in routers/media.py — see docs/design-decisions.md.
+
+    is_initial distinguishes the first-watch event (True) from rewatches (NULL).
+    Older rows created before this column was added are NULL and treated as
+    rewatches for backward compat. This flag drives the rewatch_count display:
+    only events where is_initial IS NOT TRUE are counted.
     """
 
     __tablename__ = "watch_events"
@@ -1031,6 +1083,8 @@ class WatchEvent(Base):
     season: Mapped[int | None] = mapped_column(Integer, nullable=True)
     episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
     watched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1-100; see class docstring
+    is_initial: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # True = first watch; NULL = rewatch
 
 
 class Follow(Base):
@@ -1040,6 +1094,83 @@ class Follow(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     follower_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     followed_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class List(Base):
+    """A user-made collection of titles (routers/lists.py), independent of
+    LibraryEntry's own tracking status — a title can sit in any number of a
+    user's lists regardless of whether/how they're tracking it. Items are
+    ordered (see ListItem.position, mutated by the reorder endpoint).
+    """
+
+    __tablename__ = "lists"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    items: Mapped[list[ListItem]] = relationship(back_populates="list", cascade="all, delete-orphan")
+
+
+class ListItem(Base):
+    """One title within a List, in manually-chosen order (position — an
+    integer sequence rewritten wholesale by the reorder endpoint, not an
+    ordering derived from created_at). Unique on (list_id, title_id): a title
+    can't appear twice in the same list.
+    """
+
+    __tablename__ = "list_items"
+    __table_args__ = (UniqueConstraint("list_id", "title_id", name="uq_list_item"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    list_id: Mapped[int] = mapped_column(ForeignKey("lists.id"), index=True)
+    title_id: Mapped[int] = mapped_column(ForeignKey("titles.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    list: Mapped[List] = relationship(back_populates="items")
+    title_ref: Mapped[Title] = relationship()
+
+
+class Review(Base):
+    """A longer, considered write-up on a title — distinct from the casual
+    Comment thread. Restricted: only posted by users with a ReviewWhitelist
+    row (routers/reviews.py checks this at create time). One review per
+    (user, title) — edited/deleted in place rather than allowing repeats.
+    Carries its own 1-100 rating, same scale as LibraryEntry.rating, but a
+    separate fact (a review's own graded opinion, not a copy of the user's
+    tracking-entry rating).
+    """
+
+    __tablename__ = "reviews"
+    __table_args__ = (UniqueConstraint("user_id", "title_id", name="uq_review_user_title"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title_id: Mapped[int] = mapped_column(ForeignKey("titles.id"), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    rating: Mapped[int] = mapped_column(Integer)  # 1-100
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    author: Mapped[User] = relationship()
+    title_ref: Mapped[Title] = relationship()
+
+
+class ReviewWhitelist(Base):
+    """One row per user allowed to post a Review — a hand-picked allow-list
+    (admin-managed, routers/admin/users.py), not a self-service perk. Kept as
+    its own table rather than a boolean flag on User so it can later carry
+    metadata (who granted it, when) without widening User itself.
+    """
+
+    __tablename__ = "review_whitelist"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

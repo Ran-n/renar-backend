@@ -2,10 +2,11 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/08/21 16:27:42.883659
+Revised: 2026/08/24 12:39:04.182223
 """
 
 import logging
+from datetime import timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, PlainTextResponse
@@ -18,7 +19,7 @@ from ..database import get_db
 from ..events import publish as publish_event
 from ..media.image_service import gc_image, image_row_for
 from ..media.image_utils import decode_b64_image, normalize_jpeg
-from ..models import EmailConfirmationCode, InviteCode, LoginEvent, User, utcnow
+from ..models import EmailConfirmationCode, InviteCode, LoginEvent, ReleasedUsername, User, utcnow
 from ..schemas import (
     ChangeUnconfirmedEmailRequest,
     ChangeUnconfirmedEmailResult,
@@ -229,6 +230,23 @@ def register(data: UserCreate, request: Request, background_tasks: BackgroundTas
             status_code=status.HTTP_409_CONFLICT,
             detail="Username or email already taken",
         )
+    cooldown_cutoff = utcnow() - timedelta(days=ss.username_cooldown_days)
+    on_cooldown = (
+        db.query(ReleasedUsername)
+        .filter(ReleasedUsername.username == data.username, ReleasedUsername.released_at >= cooldown_cutoff)
+        .first()
+    )
+    if on_cooldown is not None:
+        _log.info(
+            "registration rejected: username=%r released %s, still on %s-day cooldown",
+            data.username,
+            on_cooldown.released_at,
+            ss.username_cooldown_days,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username or email already taken",
+        )
     user = User(
         username=data.username,
         email=email,
@@ -293,6 +311,12 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
         # see users/email_confirmation.py's module docstring for why this
         # exists (closing the ranking-exploit gap a captcha alone doesn't).
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="email_not_confirmed")
+    if user.deletion_requested_at is not None:
+        # "no obligation" default, same spirit as the email-confirmation
+        # bypass: logging back in during the grace period is itself the
+        # signal the user wants to keep the account, no separate confirm
+        # step required — see accounts.cancel_deletion.
+        accounts.cancel_deletion(user, db)
     now = utcnow()
     user.last_active_at = now
     # the single record of this login; counts/last-login are derived from it
@@ -514,6 +538,14 @@ def me(current_user: User = Depends(get_current_user), db: Session = Depends(get
         grace_days = get_site_settings(db).email_confirmation_grace_days
         elapsed_days = (utcnow() - current_user.created_at).days
         out.grace_days_remaining = max(0, grace_days - elapsed_days)
+    if current_user.deletion_requested_at is not None:
+        deletion_grace_days = get_site_settings(db).deletion_grace_days
+        elapsed_days = (utcnow() - current_user.deletion_requested_at).days
+        out.deletion_grace_days_remaining = max(0, deletion_grace_days - elapsed_days)
+    from .reviews import is_whitelisted_reviewer
+
+    out.can_review = is_whitelisted_reviewer(current_user.id, db)
+    out.is_reviewer = out.can_review
     return out
 
 
@@ -643,4 +675,18 @@ def delete_account(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    accounts.delete_account(user, db)
+    """Starts the deletion grace period (see accounts.request_deletion) —
+    does NOT purge immediately. The account, its token, and its data all
+    stay fully usable until the account_purge periodic task removes it past
+    SiteSettings.deletion_grace_days, or the user cancels (below) or simply
+    logs back in (login() auto-cancels)."""
+    accounts.request_deletion(user, db)
+
+
+@router.post("/me/cancel-deletion", response_model=UserOut)
+def cancel_account_deletion(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    accounts.cancel_deletion(user, db)
+    return UserOut.model_validate(user)

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/07/21 14:01:18.418063
+Revised: 2026/08/25 14:05:14.166722
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -20,6 +20,7 @@ from ..models import Follow, LibraryEntry, MediaType, Title, User, WatchStatus
 from ..schemas import LibraryEntryOut
 from ..users.auth import get_current_user
 from ..users.premium import flair
+from .reviews import reviewer_ids
 
 router = APIRouter(tags=["social"])
 _log = logging.getLogger(__name__)
@@ -127,13 +128,14 @@ def _public_users_batch(targets: list[User], me: User, db: Session) -> list[dict
             select(Follow.followed_id).where(Follow.follower_id == me.id, Follow.followed_id.in_(target_ids))
         ).all()
     }
+    rev_ids = reviewer_ids(db, target_ids)
 
     return [
         {
             "id": target.id,
             "username": target.username,
             "avatar": target.avatar,
-            **flair(target),
+            **flair(target, is_reviewer=target.id in rev_ids),
             "created_at": target.created_at,
             "followers": followers_by_id.get(target.id, 0),
             "following": following_by_id.get(target.id, 0),
@@ -263,11 +265,12 @@ def activity_feed(
         .limit(50)
         .all()
     )
+    rev_ids = reviewer_ids(db, {owner.id for _, owner in entries})
     return [
         {
             "user_id": item.user_id,
             "username": owner.username,
-            **flair(owner),
+            **flair(owner, is_reviewer=owner.id in rev_ids),
             "item_id": item.id,
             "media_type": item.media_type.value,
             "title": item.title,

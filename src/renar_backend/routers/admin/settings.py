@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/08/21 16:27:42.977622
+Revised: 2026/08/24 12:39:03.922521
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
@@ -488,6 +488,28 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
       </div>
 
       <div class="settings-section">
+        <div class="settings-title"><span class="icon">&#x1F464;</span>Accounts</div>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <label for="username_cooldown_days">Username cooldown (days)</label>
+            <input type="number" id="username_cooldown_days" name="username_cooldown_days"
+                   value="{nv(ss.username_cooldown_days)}" min="0" max="365" required>
+          </div>
+          <div class="settings-field">
+            <label for="deletion_grace_days">Deletion grace period (days)</label>
+            <input type="number" id="deletion_grace_days" name="deletion_grace_days"
+                   value="{nv(ss.deletion_grace_days)}" min="1" max="365" required>
+          </div>
+        </div>
+        <p class="settings-hint">
+          Cooldown: how long a released username stays blocked from re-registration after its
+          account is deleted. Grace period: how long a self-requested account deletion stays
+          pending &mdash; logging back in during the window cancels it &mdash; before the
+          account is permanently purged.
+        </p>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-title"><span class="icon">&#x23F1;</span>Periodic background tasks</div>
         <p class="settings-hint">
           Episode check, episode history sync, film release check, and strike
@@ -625,6 +647,8 @@ def save_settings(
     confirmation_code_ttl_minutes: int = Form(...),
     email_confirmation_grace_days: int = Form(...),
     unconfirmed_account_cleanup_days: int = Form(...),
+    username_cooldown_days: int = Form(...),
+    deletion_grace_days: int = Form(...),
     admin_user: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
@@ -671,6 +695,8 @@ def save_settings(
     ss.confirmation_code_ttl_minutes = confirmation_code_ttl_minutes
     ss.email_confirmation_grace_days = email_confirmation_grace_days
     ss.unconfirmed_account_cleanup_days = unconfirmed_account_cleanup_days
+    ss.username_cooldown_days = username_cooldown_days
+    ss.deletion_grace_days = deletion_grace_days
     db.commit()
     _site_settings_mod.invalidate()
     _log.info(

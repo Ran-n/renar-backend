@@ -1,6 +1,6 @@
 [project]
 name = "renar-backend"
-version = "0.17.0"
+version = "0.18.0"
 description = "FastAPI backend for Renar — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]
@@ -101,6 +101,13 @@ preview = true
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# The project's required file-header docstring (Authors/Created/Revised)
+# has to precede Alembic's own revision docstring, which pushes every
+# migration's imports below two docstrings — inherent to the convention,
+# not fixable by reordering.
+"alembic/versions/*.py" = ["E402"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency-injection idiom: these calls in argument defaults are intended

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/27 15:58:17.574219
+Revised: 2026/08/24 12:39:04.684218
 
 Periodic-task tracking: each background task (see TASKS) is independently
 enabled, independently scheduled, and reports its own run status — one
@@ -97,6 +97,13 @@ TASKS: list[TaskSpec] = [
         "film_check, this covers completed/dropped/ended titles too.",
         "General",
         2880,
+    ),
+    TaskSpec(
+        "account_purge",
+        "Account purge",
+        "Permanently delete accounts past their self-requested deletion grace period.",
+        "Security",
+        360,
     ),
     TaskSpec(
         "unmatched_title_retry",

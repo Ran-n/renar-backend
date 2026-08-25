@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.984505
-Revised: 2026/08/18 17:42:31.646461
+Revised: 2026/08/24 12:39:05.195240
 
 Auth endpoints: register, login, me, profile, password change, account delete.
 """
@@ -11,7 +11,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import PASSWORD, login, register
+from conftest import PASSWORD, hard_delete, login, register
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import (
@@ -438,16 +438,16 @@ def test_change_password_over_72_bytes_rejected(client, alice):
 
 
 def test_delete_account_removes_user_and_library(client, alice):
-    _, headers = alice
+    user, headers = alice
     item = client.post(
         "/media",
         json={"media_type": "tv_show", "title": "Dark", "total_episodes": 26},
         headers=headers,
     ).json()
     client.put(f"/media/{item['id']}/episodes/1/1", json={"watched": True}, headers=headers)
-    client.post(f"/media/{item['id']}/rewatch", json={}, headers=headers)
+    client.post(f"/media/{item['id']}/rewatch", json={"season": 1, "episode": 1}, headers=headers)
 
-    assert client.delete("/auth/me", headers=headers).status_code == 204
+    hard_delete(user["id"])
     r = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
     assert r.status_code == 401
 
@@ -461,9 +461,26 @@ def test_delete_account_removes_user_and_library(client, alice):
 
 
 def test_deleted_account_token_is_invalid(client, alice):
-    _, headers = alice
-    client.delete("/auth/me", headers=headers)
+    user, headers = alice
+    hard_delete(user["id"])
     assert client.get("/auth/me", headers=headers).status_code == 401
+
+
+def test_self_delete_is_soft_and_does_not_remove_library(client, alice):
+    """DELETE /auth/me now starts a grace period (see
+    test_account_deletion.py) rather than purging immediately — the account,
+    its token, and its library must all remain fully intact right after."""
+    _, headers = alice
+    item = client.post(
+        "/media",
+        json={"media_type": "tv_show", "title": "Dark", "total_episodes": 26},
+        headers=headers,
+    ).json()
+
+    assert client.delete("/auth/me", headers=headers).status_code == 204
+    assert client.get(f"/media/{item['id']}", headers=headers).status_code == 200
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["deletion_requested_at"] is not None
 
 
 def _comment(client, headers, text="hi", parent_id=None) -> dict:
@@ -479,12 +496,12 @@ def _comment(client, headers, text="hi", parent_id=None) -> dict:
 def test_delete_account_with_replies_from_others(client, alice, bob):
     """Another user's reply hangs off my comment: deleting my account must
     delete the whole thread (reply subtree), not crash on the parent_id FK."""
-    _, a_headers = alice
+    alice_user, a_headers = alice
     bob_user, b_headers = bob
     mine = _comment(client, a_headers)
     _comment(client, b_headers, text="reply from bob", parent_id=mine["id"])
 
-    assert client.delete("/auth/me", headers=a_headers).status_code == 204
+    hard_delete(alice_user["id"])
 
     db = SessionLocal()
     try:
@@ -497,12 +514,12 @@ def test_delete_account_with_replies_from_others(client, alice, bob):
 def test_delete_account_with_reports_on_my_comments(client, alice, bob):
     """Someone reported my comment: deleting my account must drop the report
     with the comment, not crash on the comment_id FK."""
-    _, a_headers = alice
+    alice_user, a_headers = alice
     _, b_headers = bob
     mine = _comment(client, a_headers)
     assert client.post(f"/comments/{mine['id']}/report", json={"reason": "spam"}, headers=b_headers).status_code == 204
 
-    assert client.delete("/auth/me", headers=a_headers).status_code == 204
+    hard_delete(alice_user["id"])
 
     db = SessionLocal()
     try:
@@ -514,12 +531,12 @@ def test_delete_account_with_reports_on_my_comments(client, alice, bob):
 def test_delete_account_after_reporting_others(client, alice, bob):
     """I reported someone else's comment: deleting my account must drop my
     report but leave their comment alone."""
-    _, a_headers = alice
+    alice_user, a_headers = alice
     bob_user, b_headers = bob
     bobs = _comment(client, b_headers)
     assert client.post(f"/comments/{bobs['id']}/report", json={"reason": "spam"}, headers=a_headers).status_code == 204
 
-    assert client.delete("/auth/me", headers=a_headers).status_code == 204
+    hard_delete(alice_user["id"])
 
     db = SessionLocal()
     try:
@@ -603,7 +620,7 @@ def test_failed_login_records_no_event(client):
 
 def test_delete_account_removes_login_events(client, alice):
     user, headers = alice  # fixture logged in once -> one event
-    assert client.delete("/auth/me", headers=headers).status_code == 204
+    hard_delete(user["id"])
 
     db = SessionLocal()
     try:
@@ -626,7 +643,7 @@ def test_delete_account_with_import_job_row_does_not_fkey_violate(client, alice)
     finally:
         db.close()
 
-    assert client.delete("/auth/me", headers=headers).status_code == 204
+    hard_delete(user["id"])
 
     db = SessionLocal()
     try:
@@ -647,7 +664,7 @@ def test_delete_account_nulls_out_created_invite_codes(client, alice):
     finally:
         db.close()
 
-    assert client.delete("/auth/me", headers=headers).status_code == 204
+    hard_delete(user["id"])
 
     db = SessionLocal()
     try:

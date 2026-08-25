@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/08/15 17:44:49.434588
+Revised: 2026/08/24 12:39:04.050309
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -26,6 +26,7 @@ from ...models import (
     LoginEvent,
     MediaType,
     RequestDay,
+    ReviewWhitelist,
     Title,
     User,
     WatchEvent,
@@ -200,10 +201,20 @@ def _render_premium_actions(user: User) -> str:
     </div>"""
 
 
-def _render_account_actions(user: User) -> str:
+def _render_account_actions(user: User, is_reviewer: bool = False) -> str:
     """Inline admin controls: edit username/email, set a new password, ban/delete."""
     uid = user.id
     name_esc = html.escape(user.username)
+    if is_reviewer:
+        review_whitelist_action = (
+            f'<form method="post" action="{_P}/users/{uid}/unwhitelist-review" style="display:contents">'
+            f'<button class="btn-sm" type="submit">Remove from reviewer whitelist</button></form>'
+        )
+    else:
+        review_whitelist_action = (
+            f'<form method="post" action="{_P}/users/{uid}/whitelist-review" style="display:contents">'
+            f'<button class="btn-sm btn-good" type="submit">Add to reviewer whitelist</button></form>'
+        )
     if user.banned:
         ban_action = (
             f'<form method="post" action="{_P}/users/{uid}/unban" style="display:contents">'
@@ -215,6 +226,12 @@ def _render_account_actions(user: User) -> str:
             f" onsubmit=\"return confirm('Ban [{name_esc}]? They will be signed out and unable to log back in.')\">"
             f'<button class="btn-sm" type="submit">Ban</button></form>'
         )
+    cancel_deletion_action = (
+        f'<form method="post" action="{_P}/users/{uid}/cancel-deletion" style="display:contents">'
+        f'<button class="btn-sm" type="submit">Cancel pending deletion</button></form>'
+        if user.deletion_requested_at
+        else ""
+    )
     return f"""
     <div class="actions-card">
       <div class="actions-title">Account actions</div>
@@ -246,6 +263,8 @@ def _render_account_actions(user: User) -> str:
           <button class="btn-sm" type="submit">Reset onboarding</button>
         </form>
         {ban_action}
+        {cancel_deletion_action}
+        {review_whitelist_action}
         <form method="post" action="{_P}/users/{uid}/delete" style="display:contents"
               onsubmit="return confirm('Permanently delete [{name_esc}] and all their data?')">
           <button class="btn-sm btn-purge" type="submit">Delete account</button>
@@ -267,6 +286,7 @@ def _render_user_detail(
     request_total: int,
     request_series: list,
     endpoints_href: str,
+    is_reviewer: bool = False,
 ) -> str:
     name_esc = html.escape(user.username)
     if user.avatar:
@@ -274,6 +294,12 @@ def _render_user_detail(
     else:
         avatar = f'<span class="detail-avatar-fallback">{name_esc[:1].upper()}</span>'
     banned_badge = '<span class="pill">banned</span>' if user.banned else ""
+    if user.deletion_requested_at:
+        banned_badge += (
+            f'<span class="pill" title="requested {user.deletion_requested_at:%Y-%m-%d %H:%M}">pending deletion</span>'
+        )
+    if is_reviewer:
+        banned_badge += '<span class="pill">reviewer</span>'
     banned_badge += _premium_pills(user)
     email_title = _email_title(user)
 
@@ -296,7 +322,9 @@ def _render_user_detail(
         _render_hbars("Library by type", by_type, "items", cap=True),
         _render_hbars("Library by status", by_status, "items", cap=True),
     ])
-    actions = f'<div class="actions-grid">{_render_account_actions(user)}{_render_premium_actions(user)}</div>'
+    actions = (
+        f'<div class="actions-grid">{_render_account_actions(user, is_reviewer)}{_render_premium_actions(user)}</div>'
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -798,6 +826,7 @@ def user_detail(
     request_series = _daily_from_map(request_map)
     request_total = int(db.query(func.sum(RequestDay.count)).filter(RequestDay.user_id == user_id).scalar() or 0)
 
+    is_reviewer = db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user_id).first() is not None
     return _render_user_detail(
         user,
         login_ts,
@@ -811,6 +840,7 @@ def user_detail(
         request_total,
         request_series,
         f"{_P}/users/{user_id}/endpoints",
+        is_reviewer,
     )
 
 
@@ -951,6 +981,53 @@ def revoke_premium(
     user.premium_until = None
     db.commit()
     _log.info("admin=%s revoked premium for user id=%s username=%s", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
+@router.post("/users/{user_id}/cancel-deletion", include_in_schema=False)
+def admin_cancel_deletion(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    from ...users import accounts
+
+    accounts.cancel_deletion(user, db)
+    _log.info("admin=%s cancelled pending deletion for user id=%s username=%s", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
+@router.post("/users/{user_id}/whitelist-review", include_in_schema=False)
+def whitelist_review(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user_id).first():
+        db.add(ReviewWhitelist(user_id=user_id))
+        db.commit()
+    _log.info("admin=%s added user id=%s username=%s to reviewer whitelist", admin_user, user_id, user.username)
+    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
+
+
+@router.post("/users/{user_id}/unwhitelist-review", include_in_schema=False)
+def unwhitelist_review(
+    user_id: int,
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user_id).delete(synchronize_session=False)
+    db.commit()
+    _log.info("admin=%s removed user id=%s username=%s from reviewer whitelist", admin_user, user_id, user.username)
     return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
 
 

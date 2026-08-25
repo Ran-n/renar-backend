@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 02:43:36.784037
-Revised: 2026/07/12 02:43:59.688465
+Revised: 2026/08/24 08:05:14.847992
 
 Dev-server guards (_devserver.py): the port-in-use probe and the
 orphaned-reload-worker watchdog, plus the repo-root anchoring of
@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from renar_backend import _devserver
 from renar_backend._devserver import ensure_port_free, exit_when_orphaned
 from renar_backend.config import _ROOT, Settings
 
@@ -46,6 +47,56 @@ def test_port_guard_rejects_zombie_style_listener():
         blocker.bind(("127.0.0.1", 0))
         blocker.listen(1)
         port = blocker.getsockname()[1]
+        with pytest.raises(SystemExit, match="already in use"):
+            ensure_port_free("127.0.0.1", port)
+
+
+def test_port_guard_declines_without_a_tty():
+    """Non-interactive runs (CI, this test suite) must never block on input()."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        port = blocker.getsockname()[1]
+        with pytest.raises(SystemExit, match="already in use"):
+            ensure_port_free("127.0.0.1", port)
+
+
+def test_port_guard_kills_occupant_when_offered_and_accepted(monkeypatch):
+    """User accepts the kill offer -> occupant is killed and the retry succeeds."""
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+
+    killed = []
+
+    def _fake_kill(pid):
+        killed.append(pid)
+        blocker.close()  # stand in for the real process releasing the socket
+        return True
+
+    monkeypatch.setattr(_devserver.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(_devserver, "_find_listening_pid", lambda port: 12345)
+    monkeypatch.setattr(_devserver, "_kill_pid", _fake_kill)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+
+    ensure_port_free("127.0.0.1", port)
+    assert killed == [12345]
+
+
+def test_port_guard_leaves_occupant_when_declined(monkeypatch):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        port = blocker.getsockname()[1]
+
+        monkeypatch.setattr(_devserver.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(_devserver, "_find_listening_pid", lambda port: 12345)
+        monkeypatch.setattr("builtins.input", lambda prompt: "n")
+
         with pytest.raises(SystemExit, match="already in use"):
             ensure_port_free("127.0.0.1", port)
 

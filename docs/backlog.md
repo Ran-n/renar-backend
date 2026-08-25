@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/21 08:33:49.228436 )
+[//]: # (+ Revised: 	2026/08/24 14:06:08.610171 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -122,10 +122,6 @@ fallback identity, not just a name source".
 - **[Future] Minor: `_progress` entries are never pruned.** Negligible memory; clears
   on process restart. Not worth fixing unless it becomes visible.
 
-- **[Blocking for 1.0] Planned: custom-lists import mapping.** Once the
-  "Custom lists" feature (Features below) exists, this importer needs
-  read-and-map logic for `lists-prod-lists.csv`.
-
 - **[Future] Planned: "watched on" (streaming source) import mapping.**
   Once the "Watched-on / streaming source tracking" feature (Features
   below) exists, this importer needs matching read-and-map logic:
@@ -163,15 +159,6 @@ fallback identity, not just a name source".
   directly instead of a fuzzy name search.
 
 ## Features
-
-- **[Blocking for 1.0] Custom lists.** User-made collections of shows/movies (TV Time has these
-  as user-made lists — `lists-prod-lists.csv` in a GDPR export). No
-  equivalent model exists yet: needs a `List`/`ListItem` table (or similar),
-  ownership, ordering, CRUD endpoints, and UI (create/rename/delete a list,
-  add/remove/reorder items, a way to browse a list). Not scoped in detail
-  yet — open questions: one list per item allowed or many; public/shareable
-  or private-only; does the TV Time importer target this once it exists (see
-  the TV Time import section above).
 
 - **[Future] Additional external rating sources (IMDb, Rotten Tomatoes, Metacritic)
   alongside TMDB's `vote_average`.** OMDb (omdbapi.com) is the candidate
@@ -306,97 +293,6 @@ fallback identity, not just a name source".
     how that squares with "no obligation" being the whole point of the
     tile.
 
-- **[Blocking for 1.0] Soft delete with a 30-day grace period for account deletion.**
-  `DELETE /auth/me` (`routers/auth.py:520-525`) currently calls
-  `users/accounts.py`'s `delete_account` directly, which purges the user row
-  and every referencing row (comments, likes, follows, notifications, login
-  events, media items, exports on disk, etc.) synchronously and irreversibly
-  in the same request — no recovery window. Wanted instead: mark the account
-  for deletion rather than purging immediately; if the user logs back in
-  before 30 days elapse, cancel the pending deletion and restore normal
-  access; after 30 days with no login, a background job runs the existing
-  purge. `delete_account` itself is already the right final-purge
-  implementation and needs no changes — it becomes the thing the grace-period
-  job calls, not the thing `DELETE /auth/me` calls directly.
-
-  Needs scoping: whether a pending-deletion account can be used normally
-  during the grace period or is read-only/logged-out until the user
-  explicitly cancels; whether to email a "deletion scheduled" / "deletion
-  cancelled" notice; and how this interacts with the admin panel's own
-  delete-user action (same soft-delete grace period, or an immediate hard
-  delete for admins, kept as an explicit override).
-
-  **Concrete touch points, from a 2026-07-22 research pass** (file/line refs
-  may drift, re-check before implementing):
-  1. `models.py`: add `deletion_requested_at: Mapped[datetime | None]` to
-     `User` (nullable, no backfill needed — NULL means "not scheduled"),
-     near the existing `banned`/`ban_reason` columns (~line 147-148), which
-     are the closest existing precedent for an account-state flag. No
-     generic `status` enum exists on `User` today — `banned` is the only
-     other account-state boolean.
-  2. New Alembic migration, nullable-column-add, modeled on the most recent
-     migration (`ffffe2b24717_add_email_confirmation_grandfathering.py`,
-     the current head) — same `batch_alter_table("users")` /
-     `add_column`/`drop_column` shape, `down_revision = "ffffe2b24717"`.
-  3. `users/accounts.py`: add `request_deletion(user, db)` /
-     `cancel_deletion(user, db)` (set/clear the new column, commit, maybe
-     send an email); leave `delete_account` itself untouched — it's called
-     by the new purge job and can still be called directly for an admin
-     hard-delete override.
-  4. `routers/auth.py`: change `DELETE /auth/me` (520-525) to call
-     `request_deletion` instead of `delete_account`; add a
-     `POST /auth/cancel-deletion` endpoint (or fold into `PATCH /profile`).
-     Decide login-time behavior: `login` (246-280) checks `user.banned` at
-     259-260 right after password verification and before the
-     email-confirmation grace-period gate (261-274, itself a close analog
-     of the grace-period logic this feature needs, including its
-     machine-readable 403 `detail` string for the frontend) — a
-     `deletion_requested_at` check would slot in the same place, either
-     blocking login like `banned` or auto-cancelling the pending deletion
-     and letting login proceed (product decision).
-  5. `users/auth.py`'s `get_current_user` (80-98, the dependency behind
-     every authenticated route including `DELETE /auth/me` itself) has the
-     same `user.banned` check at 95-96 — mirror there too if pending-deletion
-     accounts should be blocked from using the API during the grace period
-     rather than just flagged.
-  6. `task_runs.py`: add a new `TaskSpec` to the `TASKS` registry (48-93),
-     e.g. `TaskSpec("account_purge", "Account purge", "Permanently delete
-     accounts past their 30-day deletion grace period.", "Security", 360)`
-     — this alone gets it a toggle/interval card in the admin Periodic
-     Tasks panel (`routers/admin/periodic_tasks.py`), no admin-UI code
-     needed beyond the registry entry.
-  7. `social/notifier.py`: there's no general-purpose scheduler in this
-     codebase (no APScheduler/Celery) — periodic work is hand-rolled
-     `asyncio` loops, one per task, each sleeping on
-     `task_runs.get_interval_minutes(key)` and checking
-     `task_runs.is_enabled(key)`. The closest existing analog to copy is
-     `_email_confirmation_cleanup_loop` (318-332), which purges accounts
-     unconfirmed for 14 days by calling `accounts.delete_account` per stale
-     row — same shape needed here, filtered on `deletion_requested_at`
-     older than 30 days instead. New loop gets registered in the list
-     `start_periodic_tasks()` returns (352-361); `main.py`'s `lifespan()`
-     (67-84) already starts/cancels every task in that list, no changes
-     needed there.
-  8. Email notice: no generic mailer module exists — `send_confirmation_email`
-     in `users/email_confirmation.py` (76-103) is the only sender, coupled
-     to the confirmation-code flow (Brevo, pooled `httpx.Client`, logs
-     instead of sending when `BREVO_API_KEY` is unset). A "deletion
-     scheduled"/"deletion cancelled" notice needs either a new parallel
-     function in that file following the same pattern, or breaking the
-     Brevo-send logic out into a generic `send_email(to, subject, text)`
-     helper first.
-  9. `schemas.py`'s `UserOut` (116-146): expose `deletion_requested_at` so
-     the frontend can show grace-period UI (banner, days remaining, cancel
-     button).
-  10. `routers/admin/users.py`: `delete_user` (1036-1048) calls
-      `accounts.delete_account` directly today — decide whether admin
-      delete stays an immediate hard delete (likely, as an override) or
-      also goes through the soft-delete path. If a pending-deletion state
-      should be visible in the admin panel, `_render_user_detail`'s
-      `banned_badge` pattern (~236-237) is the existing precedent for a
-      status pill, and `_render_account_actions` (163-214) is where a
-      "cancel pending deletion" admin action would live.
-
 - **[Future] Real phone number confirmation on registration.** Same shape as the
   email-confirmation item above, but there's currently no phone number
   field on `User` at all (`models.py:111-151`) — this needs the field
@@ -407,16 +303,6 @@ fallback identity, not just a name source".
   registration or optional/add-later; does it replace or supplement email
   confirmation; which SMS provider (cost, coverage — matters if
   international numbers are expected).
-
-- **[Blocking for 1.0] Anti username-squatter protection.** Prevent usernames from being
-  permanently locked up by abandoned/unconfirmed or inactive accounts.
-  Overlaps with the "Squatting via never-confirmed accounts" note under the
-  email-confirmation item above (periodic cleanup of unconfirmed signups),
-  but scope this as its own feature: also consider reserving/releasing
-  usernames on account deletion, a cooldown before a freed username becomes
-  available again (to stop swap-and-grab abuse), and whether inactive (not
-  just unconfirmed) accounts should eventually free their username too.
-  Not scoped in detail yet.
 
 ## Performance
 
@@ -449,25 +335,25 @@ fallback identity, not just a name source".
   completions via `last_watched_at`). Prefer one unified endpoint over two
   separate ones if the schema allows it cleanly.
 
+- **[Future] Like/dislike (and share) support for Reviews.** `Review`
+  (`models.py:1138`) has no engagement columns, unlike comments' `CommentLike`
+  (`models.py:1251`, `comment_likes` table — one row per `(comment_id,
+  user_id)`, `value` +1/-1, reacting the other way flips the row instead of
+  adding a second one). Add the same shape for reviews: a `ReviewLike`
+  model/`review_likes` table keyed by `(review_id, user_id)`, plus like/
+  dislike endpoints on `routers/reviews.py` matching the comments router's
+  shape. Share doesn't need backend work —
+  renar-frontend's share cards are client-side image generation, no API
+  involved (see its `docs/backlog.md`'s matching entry). See renar-frontend's
+  `docs/backlog.md` for the frontend half (like/dislike row + share button
+  on each review tile).
+
 - **[Future] Chronological sort on comments.**
   `GET /media/{id}/comments` currently returns comments in a fixed order.
   Add a `?sort=asc|desc` query parameter so clients can request oldest-first
   (chronological). Default remains the current behaviour; `asc` is the new
   opt-in. Change goes in the comments query in `routers/comments.py` (or
   wherever comments are fetched).
-
-- **[Blocking for 1.0] Reviews (alongside the existing Comments).**
-  Reviews are longer, more considered write-ups — distinct from the casual
-  comment thread already in place. **Restricted feature (2026-08-11
-  reassessment): not open to all users** — only a whitelisted set of
-  reviewers can post one, so the schema/endpoints need an authorization
-  check (e.g. a `can_review` flag or a whitelist table) rather than any
-  authenticated user being allowed to create a row. Backend work: new
-  `reviews` table + Alembic migration, new CRUD endpoints in `routers/`
-  (write endpoint gated to whitelisted users, read endpoints open), and a
-  whitelist mechanism (table or user flag — not yet decided), normalization
-  check in `test_normalization.py`. Schema must stay BCNF (a review's rating
-  is a fact about the user+title pair, not a copy of anything else).
 
 - **[Future] Share — add a deep link once the frontend's share cards are
   ready for one.** renar-frontend's share buttons (title cards, title page,
@@ -482,17 +368,6 @@ fallback identity, not just a name source".
   Decide on a URL scheme once `renar.app` is actually hosting
   something to redirect to.
 
-- **[Blocking for 1.0] Per-rewatch ratings, not a single overwritten rating.**
-  Ratings are currently one value per user+title, overwritten on every
-  re-rate. A rewatch can change a user's opinion (first watch "ok", second
-  watch "wow"), so allow a new rating per watch-through instead of only
-  replacing the existing one. Needs a rating tied to a rewatch/watch-through
-  identity rather than just the title, plus an endpoint to list a user's
-  rating history for a title. The title's headline/aggregate score should
-  keep using the latest rating per user. Schema must stay BCNF — a rating is
-  a fact about the (user, title, watch-through) tuple; check
-  `test_normalization.py`. Frontend counterpart in renar-frontend's
-  `docs/backlog.md` (rate dialog needs a history view + per-entry editing).
 
 - **[Future] Per-season grading, once a season is fully watched.** No
   season-level rating exists today — only `media_items.rating` (per

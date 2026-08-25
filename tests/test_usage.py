@@ -2,14 +2,14 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/09 09:40:00.000000
-Revised: 2026/07/18 19:33:27.761806
+Revised: 2026/08/24 12:39:05.704520
 
 Per-endpoint usage tracking middleware and the admin usage dashboard, its
 per-endpoint drill-down, and the per-user library drill-down.
 """
 
 from conftest import ADMIN_BASIC as BASIC
-from conftest import register
+from conftest import hard_delete, register
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import EndpointStat, RequestDay
@@ -244,7 +244,7 @@ def test_admin_delete_user_removes_endpoint_stats(client, admin_enabled, alice):
 def test_self_delete_removes_usage_rows(client, alice):
     user, headers = alice
     client.get("/auth/me", headers=headers)
-    assert client.delete("/auth/me", headers=headers).status_code == 204
+    hard_delete(user["id"])
 
     db = SessionLocal()
     try:
