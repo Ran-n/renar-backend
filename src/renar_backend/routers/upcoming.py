@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.990684
-Revised: 2026/08/03 11:14:16.677974
+Revised: 2026/08/26 20:43:27.619479
 
 Upcoming releases for tracked titles: next episodes and film premieres.
 """
@@ -11,8 +11,8 @@ import logging
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, or_
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_
+from sqlalchemy.orm import Session, aliased
 
 from ..catalog.titles import WITH_TITLE_GENRES
 from ..database import get_db
@@ -151,25 +151,36 @@ def get_upcoming_history(
         if status_filter is not None:
             tv_query = tv_query.filter(LibraryEntry.status == status_filter)
 
-        for entry, title in tv_query.all():
+        tv_rows = tv_query.all()
+        entry_by_title_id = {title.id: (entry, title) for entry, title in tv_rows}
+        for _, title in tv_rows:
             # Backfilled lazily here (through the same persistent TMDB cache
             # season_tmdb() uses) so a show's history shows up on the first
             # request rather than waiting for the periodic background job;
             # sync_show_episodes skips seasons already fully captured, so a
             # synced show costs only indexed DB reads.
             sync_show_episodes(db, title)
-            episodes = (
-                db.query(Episode)
+
+        if entry_by_title_id:
+            # One query for every tracked show instead of a per-title
+            # round trip: a window function caps each title's contribution
+            # at `limit` rows (matching the old per-title .limit(limit)),
+            # since the global top-`limit` by date can never draw more than
+            # `limit` rows from a single title anyway.
+            rank = func.row_number().over(partition_by=Episode.title_id, order_by=Episode.air_date.desc()).label("rank")
+            ranked = (
+                db.query(Episode, rank)
                 .filter(
-                    Episode.title_id == title.id,
+                    Episode.title_id.in_(entry_by_title_id.keys()),
                     Episode.air_date.isnot(None),
                     Episode.air_date < cutoff,
                 )
-                .order_by(Episode.air_date.desc())
-                .limit(limit)
-                .all()
+                .subquery()
             )
+            RankedEpisode = aliased(Episode, ranked)
+            episodes = db.query(RankedEpisode).filter(ranked.c.rank <= limit).all()
             for ep in episodes:
+                entry, title = entry_by_title_id[ep.title_id]
                 out.append({
                     "item_id": entry.id,
                     "media_type": "tv_show",

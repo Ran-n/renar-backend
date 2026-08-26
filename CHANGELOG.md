@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/26 09:24:34.799190 )
+[//]: # (+ Revised: 	2026/08/26 21:53:35.170396 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -9,6 +9,15 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [0.18.3] - 2026-08-26
+
+### Fixed
+
+- `GET /upcoming/history`: replaced the per-tracked-show `Episode` query loop
+  with a single bulk query (`ROW_NUMBER() OVER (PARTITION BY title_id ...)`),
+  closing the N+1 flagged in the backlog — a user tracking 50 shows no longer
+  costs 50 separate episode round trips.
 
 ## [0.18.2] - 2026-08-26
 
