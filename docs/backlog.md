@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/26 08:54:51.501656 )
+[//]: # (+ Revised: 	2026/08/26 20:43:42.899638 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -278,24 +278,6 @@ fallback identity, not just a name source".
   registration or optional/add-later; does it replace or supplement email
   confirmation; which SMS provider (cost, coverage — matters if
   international numbers are expected).
-
-## Performance
-
-- **[Future] `GET /upcoming/history` issues N+1 DB queries and N×M potential TMDB
-  calls.** `routers/upcoming.py`'s `get_upcoming_history` loops over every
-  tracked TV show and, for each one, calls `sync_show_episodes(db, title)`
-  (possibly triggering per-season TMDB fetches if the episode table is cold)
-  then runs a separate `db.query(Episode)` filtered to that title — one SQL
-  round-trip per tracked show. For a user tracking 50 shows that's 50
-  episode queries plus up to N×seasons TMDB calls on a cold cache. The
-  background `sync_episode_history` task pre-warms the cache so
-  `sync_show_episodes` short-circuits to DB reads in practice, but the
-  per-title episode query loop is still N+1. Fix: bulk-load all relevant
-  `Episode` rows in one query keyed on `Episode.title_id.in_(title_ids)`,
-  group in Python. The `sync_show_episodes` call can stay as-is (it
-  short-circuits cheaply when the cache is warm) or be moved to a
-  pre-fill step before the loop if the lazy-sync guarantee matters to users
-  more than the one-request penalty cost.
 
 ## Features
 
