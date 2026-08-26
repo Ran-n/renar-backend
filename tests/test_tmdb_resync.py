@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/18 22:40:40.143841
-Revised: 2026/07/18 22:40:40.143841
+Revised: 2026/08/26 08:54:18.227430
 
 resync_tmdb_metadata is the only background job that revisits a tracked
 title regardless of watch status — check_new_episodes/check_upcoming_films
@@ -10,7 +10,10 @@ both permanently stop polling once a show is dropped/ended or a film is
 released, so a title's poster/backdrop could otherwise go stale forever.
 """
 
+from fastapi import HTTPException
+
 from renar_backend.database import SessionLocal
+from renar_backend.models import Title
 from renar_backend.social.notifier import resync_tmdb_metadata
 
 
@@ -73,6 +76,23 @@ def test_resync_survives_fetch_failure(client, alice):
     try:
         n = resync_tmdb_metadata(db, fetch_show=broken_fetch, fetch_film=broken_fetch, pace_seconds=0)
         assert n == 0
+    finally:
+        db.close()
+
+
+def test_resync_delinks_dead_tmdb_id_on_404(client, alice):
+    _, headers = alice
+    _add(client, headers, media_type="tv_show", title="Dark", tmdb_id=70523, status="watching")
+
+    def not_found_fetch(tmdb_id: int) -> dict:
+        raise HTTPException(status_code=404, detail="Not found on TMDB")
+
+    db = SessionLocal()
+    try:
+        n = resync_tmdb_metadata(db, fetch_show=not_found_fetch, fetch_film=not_found_fetch, pace_seconds=0)
+        assert n == 0
+        title = db.query(Title).filter_by(title="Dark").one()
+        assert title.tmdb_id is None
     finally:
         db.close()
 

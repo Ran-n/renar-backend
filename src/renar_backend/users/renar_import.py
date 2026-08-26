@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/08/11 09:36:15.490976
+Revised: 2026/08/25 15:17:03.884503
 
 Import a Renar-native export (users/export.py's .7z of profile/library/
 comments/social JSON) back into an account — the write side of GDPR Art.
@@ -215,6 +215,18 @@ def _sync_progress(item: LibraryEntry, db: Session) -> None:
 
 
 def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) -> None:
+    """Each existing row is locked (`with_for_update`) and committed
+    individually rather than batched into one transaction spanning the whole
+    file. Every row already carries a full field snapshot read from this
+    same `entry` object just before mutating it, so without a row lock, two
+    concurrent reconciles of the same entry (e.g. this import racing the TV
+    Time importer, or a second run of this same import) would each read the
+    pre-change row, compute their own merge, and whichever commits last
+    would silently discard the other's already-committed fields — a lost
+    update, not just a "which one wins" tie. Locking serializes the two
+    reconciles so the second one reads the first's committed result before
+    merging on top of it. Mirrors `tvtime_import.py`'s `_upsert_library_entry`.
+    """
     existing_rows = (
         db.query(LibraryEntry.id, Title)
         .join(Title, LibraryEntry.title_id == Title.id)
@@ -263,7 +275,7 @@ def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) 
             existing_map[tmdb_key or title_key] = item_id
             summary["library_entries"] += 1
         else:
-            entry = db.get(LibraryEntry, item_id)
+            entry = db.get(LibraryEntry, item_id, with_for_update=True)
             if _reconcile_library_entry(entry, row):
                 summary["library_updated"] += 1
                 touched_items.add(item_id)
@@ -289,13 +301,13 @@ def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) 
             )
             touched_items.add(item_id)
             summary["episodes"] += 1
-    db.commit()
+        db.commit()
 
     for item_id in touched_items:
-        item = db.get(LibraryEntry, item_id)
+        item = db.get(LibraryEntry, item_id, with_for_update=True)
         if item is not None:
             _sync_progress(item, db)
-    db.commit()
+        db.commit()
 
 
 def _import_comments(db: Session, user_id: int, rows: list[dict], summary: dict) -> None:
