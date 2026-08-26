@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/24 14:06:08.610171 )
+[//]: # (+ Revised: 	2026/08/26 08:54:51.501656 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -132,25 +132,6 @@ fallback identity, not just a name source".
   existing 1-100 rating for questionable value, and TV Time's emotion enum
   isn't fully documented from the sample export (only 4 of what's
   presumably ~8 values were observed, no confirmed label mapping).
-
-## Catalog sync
-
-- **[Future] A `Title` whose `tmdb_id` goes permanently dead (TMDB removed/
-  merged that id) never recovers on its own.** Distinct from the unmatched-
-  title case (`tmdb_id IS NULL`, healed by `retry_unmatched_titles`): this is
-  a `Title` that *has* a `tmdb_id`, but TMDB now 404s on it — observed live
-  (tmdb_id 328829/328830, `TMDB fetch failed for show <id>: 404`,
-  `tmdb_store.py`'s `sync_show_episodes`/`sync_title_details` fall back to
-  serving the last stored copy so the app stays functional, but nothing ever
-  re-resolves the id). `retry_unmatched_titles` only ever looks at `Title.
-  tmdb_id.is_(None)`, so a title stuck on a dead id is invisible to it — the
-  cached data is frozen forever unless a user manually relinks
-  (`routers/media.py`'s `_relink_tmdb`). Would need: a way to detect "this
-  tmdb_id 404s" during the existing periodic detail-resync
-  (`tmdb_store.py`), and then either the same relink-search flow unmatched
-  titles use (search by title/year for a likely successor id) or, if TMDB
-  publishes a redirect/merge crosswalk for retired ids, following that
-  directly instead of a fuzzy name search.
 
 ## Features
 

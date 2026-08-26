@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/25 14:55:49.040799 )
+[//]: # (+ Revised: 	2026/08/26 09:24:34.799190 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -10,7 +10,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.18.2] - 2026-08-26
+
+### Fixed
+
+- Background TMDB sync (episode check, film check, metadata resync): a
+  `Title.tmdb_id` that 404s on TMDB (removed/merged upstream) is now cleared
+  instead of logging the same dead-id warning on every run forever — clearing
+  it lets `retry_unmatched_titles` pick the title back up and re-resolve it.
+- Renar-export import: lock the target `LibraryEntry` row (`with_for_update`)
+  and commit per row instead of once at the end, closing the same lost-update
+  race as 0.18.1's TV Time import fix, now for the Renar-native import path.
 
 ## [0.18.1] - 2026-08-25
 

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/24 14:06:08.688743 )
+[//]: # (+ Revised: 	2026/08/25 15:17:59.161103 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -68,6 +68,28 @@ row's title is only ever the raw source text, and a newly resolved
 `tmdb_id` means the caller's resolved title is strictly better information,
 not just a fallback. Without this, a reconciled row kept displaying its
 original raw/untranslated name forever even after gaining a `tmdb_id`.
+
+### Renar-export reconcile locks the row and commits per entry, not once at the end
+
+`users/renar_import.py`'s `_import_library` fetches each already-tracked
+`LibraryEntry` with `with_for_update` and commits right after reconciling
+it, instead of batching every row into one transaction committed at the
+very end of the file.
+
+**Why:** without the lock, two writers touching the same entry concurrently
+— most plausibly a live `PATCH /media/{id}` edit landing while a large
+import is still running in the background, since `POST /import` only
+blocks a *second import* for the same account (`routers/imports.py`'s
+`is_running` check), not an ordinary API edit — would each read the row's
+pre-change state and write back their own version; whichever session
+committed last silently discarded the other's already-applied change, a
+classic lost update. Locking serializes the two: the later writer's
+`SELECT ... FOR UPDATE` (or, for a plain `UPDATE`, Postgres's own implicit
+row lock) blocks until the earlier one commits, so it always merges on top
+of the fresh row instead of a stale snapshot. Committing per row (rather
+than once at the end) keeps each lock's hold time to a single entry instead
+of the whole file. Mirrors the same pattern `tvtime_import.py`'s
+`_upsert_library_entry` already used for exactly this reason.
 
 ### TheTVDB as a genuine fallback identity, not just a name source
 

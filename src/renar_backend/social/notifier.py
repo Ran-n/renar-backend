@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/08/24 12:39:04.555924
+Revised: 2026/08/26 08:54:13.455550
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -14,6 +14,7 @@ import logging
 import time
 from datetime import date, timedelta
 
+from fastapi import HTTPException
 from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session
 
@@ -35,6 +36,26 @@ def fetch_show(tmdb_id: int) -> dict:
 
 def fetch_film(tmdb_id: int) -> dict:
     return tmdb_get(f"/movie/{tmdb_id}")
+
+
+def _delink_if_dead(db: Session, title: Title, tmdb_id: int, exc: Exception) -> bool:
+    """A 404 means TMDB permanently removed/merged this id — clear it so
+    `retry_unmatched_titles` (which only looks at `tmdb_id IS NULL`) picks
+    the title back up and re-resolves it, instead of the sync loops logging
+    the same dead id forever (see docs/backlog.md's "A Title whose tmdb_id
+    goes permanently dead"). Any other failure (network blip, rate limit) is
+    left alone — `tmdb_get` already retries those internally."""
+    if isinstance(exc, HTTPException) and exc.status_code == 404:
+        title.tmdb_id = None
+        db.commit()
+        _log.warning(
+            "tmdb id %s for title %s (%r) is dead on TMDB (404) — cleared for re-matching",
+            tmdb_id,
+            title.id,
+            title.title,
+        )
+        return True
+    return False
 
 
 def check_new_episodes(db: Session, fetch=fetch_show) -> int:
@@ -62,7 +83,8 @@ def check_new_episodes(db: Session, fetch=fetch_show) -> int:
         try:
             data = fetch(tmdb_id)
         except Exception as exc:
-            _log.warning("TMDB fetch failed for show %s: %s", tmdb_id, exc)
+            if not _delink_if_dead(db, group[0].title_ref, tmdb_id, exc):
+                _log.warning("TMDB fetch failed for show %s: %s", tmdb_id, exc)
             continue
         # the payload is already in hand — persist it (tmdb_cache + typed
         # Title columns: show_status, next_episode_air_date, ...) for free
@@ -152,7 +174,8 @@ def check_upcoming_films(db: Session, fetch=fetch_film) -> int:
         try:
             data = fetch(title.tmdb_id)
         except Exception as exc:
-            _log.warning("TMDB fetch failed for film %s: %s", title.tmdb_id, exc)
+            if not _delink_if_dead(db, title, title.tmdb_id, exc):
+                _log.warning("TMDB fetch failed for film %s: %s", title.tmdb_id, exc)
             continue
         store_details(db, title, data)
         refreshed += 1
@@ -207,7 +230,8 @@ def resync_tmdb_metadata(db: Session, fetch_show=fetch_show, fetch_film=fetch_fi
         try:
             data = fetch(title.tmdb_id)
         except Exception as exc:
-            _log.warning("TMDB resync fetch failed for title %s (tmdb %s): %s", title.id, title.tmdb_id, exc)
+            if not _delink_if_dead(db, title, title.tmdb_id, exc):
+                _log.warning("TMDB resync fetch failed for title %s (tmdb %s): %s", title.id, title.tmdb_id, exc)
             continue
         store_details(db, title, data)
         refreshed += 1
