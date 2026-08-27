@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/27 10:39:16.622733 )
+[//]: # (+ Revised: 	2026/08/27 11:39:31.052770 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.19.1] - 2026-08-27
+
+### Testing
+
+- `tvdb_http.py`: 35% → 100% branch coverage (login cache, force-bypass,
+  missing API key, request failures; `tvdb_get` not-configured, login-fails,
+  401-relogin retry/failure, request exceptions).
+- `social/notifier.py`: 53% → 86% branch coverage — all 8 periodic-task
+  loops' enabled/disabled/success/failure branches, via a shared
+  parametrized harness that deterministically stops each loop after one
+  iteration.
+
+### Removed
+
+- Backlog: dropped the Cloudflare Turnstile entry — confirmed shipped, with
+  nothing left to do.
 
 ## [0.19.0] - 2026-08-27
 
