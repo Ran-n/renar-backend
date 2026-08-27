@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/25 15:17:59.161103 )
+[//]: # (+ Revised: 	2026/08/27 09:56:07.812300 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -2193,3 +2193,117 @@ call sites (`reviews.py`'s own create/update, `auth.py`'s `me()`) just call
 `can_review` for the owner's own profile view, so the frontend's badge
 rendering reads one key (`is_reviewer`) regardless of whose profile it's
 looking at.
+
+### Multi-session sync reuses `events.publish` — no new push channel
+
+`docs/backlog.md`'s "general data sync" gap (library/comment/notification
+changes not reaching a user's other open sessions) is closed by adding new
+`event_type` strings (`library_changed`, `comment_changed`,
+`notification_changed`) to the existing `events.publish(user_id,
+event_type)` fan-out, not a second mechanism alongside it.
+
+**Why:** `events.py`'s pub/sub and `routers/events.py`'s SSE stream are
+already `event_type`-agnostic — the only reason `settings_changed` was the
+sole event before this was that no other call site published anything, not
+a limitation in the plumbing. Building a second channel would duplicate the
+subscribe/heartbeat/auth logic for no benefit.
+
+**How to apply:** `library_changed` fires from every library-mutating
+endpoint in `routers/media.py` (create/update/delete, `set_episode`,
+`bulk_episodes`, rewatch/rewatch-event endpoints) right after `db.commit()`.
+`comment_changed` fires from `routers/comments.py`'s create/delete/like/
+dislike endpoints, scoped to the acting user only (like `settings_changed`,
+this syncs *your own* other sessions — it does not broadcast to other users
+who can see the same comment). `notification_changed` fires from
+`social/notifier.py`'s `check_new_episodes`, once per show group after its
+per-show commit, batched over the set of newly-notified user ids rather
+than once per `Notification` row. renar-frontend's `main.py` dispatches each
+new type to `page.reload_views()` (the same full-current-view rebuild
+`settings_changed`'s `check_remote_settings` already uses), gated to the
+route where that data is actually shown (`/library`+`/home`, `/notifications`,
+`/title`) so an unrelated screen doesn't get an unnecessary refetch. Any
+future mutating endpoint that should sync across sessions just needs its
+own `events.publish(user_id, "...")` call — no new plumbing.
+
+### psycopg3 stale prepared plans: self-heal via a `DBAPIError` handler, not a restart runbook
+
+psycopg3 auto-prepares statements reused ~5+ times per connection. An
+Alembic migration's DDL (run out-of-process via `alembic upgrade head` —
+`main.py` has no in-app migration hook) invalidates plans already cached on
+the *already-running app process's* pooled connections from before the
+migration ran, so the next query on one of those connections raised `cached
+plan must not change result type`. The backlog previously documented this
+as "restart/recycle the app after running Alembic migrations" — an
+operational requirement easy to forget.
+
+**Why:** a one-line manual-restart runbook is exactly the kind of step that
+gets missed under deploy pressure, and the failure mode when it is missed
+(every request on the stale connection 500s until someone notices and
+restarts) is worse than the fix.
+
+**How to apply:** `main.py`'s `_handle_stale_prepared_plan` is a global
+`@app.exception_handler(DBAPIError)` that checks `str(exc.orig)` for the
+`cached plan must not change result type` marker. On a match it calls
+`engine.dispose()` (closing every pooled connection so the next checkout
+opens fresh) and returns a 503 for that one in-flight request — which was
+going to fail either way — instead of retrying it (a mutating request may
+have already partially applied earlier statements in the same transaction,
+so blind retry isn't safe). Every request after the disposed one gets a
+fresh connection with no stale plan, so the app self-heals without a manual
+restart. Any *unrelated* `DBAPIError` re-raises unchanged from the handler,
+falling through to the normal unhandled-exception path — this handler must
+never swallow a real database error.
+
+### Email-confirmation toggle-flip race: accepted, not engineered around
+
+`docs/backlog.md`'s email-confirmation design pass flagged a possible race
+between `routers/auth.py`'s `register()` (reads
+`SiteSettings.email_confirmation_enabled` once) and
+`routers/admin/settings.py`'s bulk-confirm-on-disable (a separate, later
+`UPDATE ... WHERE email_confirmed IS false`) — a registration committing in
+the gap between those two reads could theoretically land unconfirmed just
+as the toggle flips off, and be skipped by the bulk-confirm's `WHERE`
+clause.
+
+**Why not fixed:** this is a single-operator admin action (the toggle is
+flipped rarely, manually, from the admin settings page) racing against
+ordinary user registration traffic — the window is one commit wide and the
+worst case is a single account left in the same "genuinely unconfirmed"
+state it would have been in had the toggle flipped a moment earlier or
+later. Closing it for real needs either an advisory lock spanning both
+paths or a serializable transaction boundary, which is real complexity for
+a risk that's already bounded and low-probability. Answering the backlog's
+other open question instead: admin visibility into how many accounts are
+bypassed vs. really confirmed now exists (`routers/admin/users.py`'s
+"Bypassed Confirmation" stat tile, `User.email_confirmation_bypassed`
+count) — so if this race is ever suspected of having actually fired, it's
+now visible in aggregate rather than only discoverable by reading every
+row's tooltip.
+
+**How to apply:** treat this as an accepted, documented risk, not an open
+bug. Re-evaluate only if the toggle starts being flipped frequently (e.g.
+scripted bulk onboarding) rather than as a rare manual admin action, since
+that would meaningfully widen the exposure.
+
+### Web-reachable account deletion reuses `request_deletion` and `/confirm-email`'s credential check, not a new deletion path
+
+Google Play requires a deletion request to be reachable without installing
+the app. `routers/auth.py`'s `GET/POST /account-deletion` is a plain HTML
+form (no JS dependency, so it works from any browser) served from the
+backend's existing HTTPS endpoint — no separate web hosting decision needed
+to satisfy just this requirement.
+
+**Why:** a second deletion implementation would risk drifting from the
+in-app one (`DELETE /auth/me` → `accounts.request_deletion`) as either
+evolves. Credential checking reuses `_authenticate_for_confirmation` (the
+same throttled username-or-email + password check `/confirm-email` and
+`/resend-confirmation` already share) rather than a bespoke check, so this
+new public surface doesn't introduce a second brute-force vector alongside
+`/auth/login`.
+
+**How to apply:** the POST handler returns the same generic "Incorrect
+username or password" page for both a wrong password and an unknown
+account — no user enumeration, matching `/auth/login`'s own error shape.
+Success starts the same grace-period deletion the in-app path does (not an
+immediate purge), so logging back in during the grace period still cancels
+it either way.

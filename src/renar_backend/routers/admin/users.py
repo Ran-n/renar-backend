@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/08/24 12:39:04.050309
+Revised: 2026/08/27 09:52:22.083918
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -496,6 +496,10 @@ def _render_users(
         <div class="stat-label">Opens on Home</div>
         <div class="stat-value" id="stat-home-launch">{totals["home_on_launch_on"]}</div>
       </div>
+      <div class="stat">
+        <div class="stat-label">Bypassed Confirmation</div>
+        <div class="stat-value" id="stat-bypassed-confirmation">{totals["bypassed_confirmation"]}</div>
+      </div>
     </div>
 
     <div class="card">
@@ -743,6 +747,14 @@ def list_users(
         "active_7d": db.query(func.count(User.id)).filter(User.last_active_at >= now - timedelta(days=7)).scalar() or 0,
         "home_hero_on": db.query(func.count(User.id)).filter(User.home_hero_enabled.is_(True)).scalar() or 0,
         "home_on_launch_on": db.query(func.count(User.id)).filter(User.home_on_launch.is_(True)).scalar() or 0,
+        # Answers docs/backlog.md's open question: no aggregate visibility
+        # existed into how many accounts never proved email ownership
+        # (bypassed via the email_confirmation_enabled toggle being off at
+        # registration time) vs. genuinely confirmed via a real OTP round trip.
+        "bypassed_confirmation": db.query(func.count(User.id))
+        .filter(User.email_confirmation_bypassed.is_(True))
+        .scalar()
+        or 0,
     }
     total_pages = max(1, -(-total_users // _USERS_PAGE_SIZE))  # ceiling division
     return _render_users(

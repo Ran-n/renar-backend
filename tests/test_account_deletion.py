@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:37:49.855061
-Revised: 2026/08/24 12:37:49.855061
+Revised: 2026/08/27 09:56:07.596509
 
 Soft-delete account deletion: DELETE /auth/me starts a grace period instead
 of purging immediately (see users/accounts.py's request_deletion/
@@ -61,6 +61,42 @@ def test_logging_back_in_auto_cancels_pending_deletion(client, alice):
     r = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
     assert r.status_code == 200
     assert _user_row(user["id"]).deletion_requested_at is None
+
+
+# ---------- web-reachable deletion page (no app install required) ----------
+
+
+def test_account_deletion_page_renders(client):
+    r = client.get("/auth/account-deletion")
+    assert r.status_code == 200
+    assert "Delete your Renar account" in r.text
+    assert 'action="/auth/account-deletion"' in r.text
+
+
+def test_account_deletion_form_starts_grace_period(client, alice):
+    user, _ = alice
+    r = client.post("/auth/account-deletion", data={"username": "alice", "password": PASSWORD})
+    assert r.status_code == 200
+    assert "Deletion requested" in r.text
+    assert _user_row(user["id"]).deletion_requested_at is not None
+
+
+def test_account_deletion_form_wrong_password_rejected(client, alice):
+    user, _ = alice
+    r = client.post("/auth/account-deletion", data={"username": "alice", "password": "wrong-password"})
+    assert r.status_code == 200
+    assert "Deletion requested" not in r.text
+    assert _user_row(user["id"]).deletion_requested_at is None
+
+
+def test_account_deletion_form_unknown_account_same_generic_error(client, alice):
+    """No user enumeration: an unknown account and a wrong password for a
+    real account must produce the same page."""
+    known_wrong = client.post("/auth/account-deletion", data={"username": "alice", "password": "wrong-password"})
+    unknown = client.post("/auth/account-deletion", data={"username": "no-such-user", "password": "wrong-password"})
+    assert known_wrong.status_code == unknown.status_code == 200
+    assert "Incorrect username or password" in known_wrong.text
+    assert "Incorrect username or password" in unknown.text
 
 
 def test_purge_removes_accounts_past_grace_period(client, alice):

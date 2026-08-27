@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/26 21:53:35.170396 )
+[//]: # (+ Revised: 	2026/08/27 10:39:16.622733 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -9,6 +9,47 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+## [0.19.0] - 2026-08-27
+
+### Added
+
+- Multi-session data sync: `library_changed`/`comment_changed`/
+  `notification_changed` events now fan out over the existing `/events` SSE
+  stream (`events.publish`) from every library-mutating endpoint
+  (`routers/media.py`), comment create/delete/like/dislike
+  (`routers/comments.py`), and new-episode notifications
+  (`social/notifier.py`) — a second open session now picks up watch-status,
+  library, comment, and notification changes without waiting on its own
+  next navigation. See renar-frontend's matching `main.py` dispatch.
+- Web-reachable account deletion: `GET`/`POST /auth/account-deletion`, a
+  plain HTML form reusing the existing grace-period deletion
+  (`accounts.request_deletion`) and the same throttled credential check
+  `/confirm-email` already shares — satisfies Google Play's requirement that
+  deletion be reachable without installing the app.
+- `routers/admin/users.py`'s user-list page gained a "Bypassed Confirmation"
+  stat tile (aggregate count of `User.email_confirmation_bypassed`).
+- `docs/data-safety-audit.md`: field-by-field audit of every user-linked
+  data table, reusable for both Google Play's Data Safety form and Apple's
+  Privacy Nutrition Label.
+
+### Fixed
+
+- psycopg3's "cached plan must not change result type" error (stale
+  prepared statements on pooled connections after an Alembic migration)
+  now self-heals via a `DBAPIError` exception handler that disposes the
+  connection pool and returns 503 for the one affected request, instead of
+  requiring a manual app restart after every migration.
+
+### Testing
+
+- `pytest-cov` wired in for the first time (`[tool.coverage]` in
+  `pyproject.toml`) — first real branch-coverage baseline: 82%.
+- New fuzz coverage for `POST /comments`, `DELETE /comments/{id}`,
+  `POST /notifications/{id}/read`, `DELETE /notifications/{id}`
+  (`tests/test_fuzz.py`).
 
 ## [0.18.3] - 2026-08-26
 

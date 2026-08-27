@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/08/24 12:39:03.671993
+Revised: 2026/08/27 09:52:21.696368
 """
 
 import asyncio
@@ -14,11 +14,14 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import anyio
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 
 from ._devserver import exit_when_orphaned
 from .config import settings
+from .database import engine
 from .routers import (
     admin,
     auth,
@@ -147,6 +150,27 @@ def home():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# psycopg3 auto-prepares statements reused ~5+ times per connection. DDL that
+# alters/recreates a table (an Alembic migration, run out-of-process via
+# `alembic upgrade head`) invalidates plans already cached on this app's own
+# pooled connections from before the migration ran — the next query on one of
+# those connections raises "cached plan must not change result type" (see
+# docs/backlog.md). Rather than requiring a manual app restart after every
+# migration, disposing the pool here self-heals it: only this one in-flight
+# request (which was going to fail either way) gets a 503, and every request
+# after it gets a fresh connection with no stale plan.
+_STALE_PLAN_MARKER = "cached plan must not change result type"
+
+
+@app.exception_handler(DBAPIError)
+async def _handle_stale_prepared_plan(request: Request, exc: DBAPIError) -> JSONResponse:
+    if _STALE_PLAN_MARKER not in str(exc.orig):
+        raise exc
+    _log.warning("stale prepared plan detected (likely post-migration) — disposing connection pool")
+    engine.dispose()
+    return JSONResponse(status_code=503, content={"detail": "Temporary server error, please retry"})
 
 
 class _ShutdownCancellationSilencer:

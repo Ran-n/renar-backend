@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/26 20:43:42.899638 )
+[//]: # (+ Revised: 	2026/08/27 10:31:24.768627 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -29,18 +29,21 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
     response field, a changed enum value, or a backend route the frontend
     never calls at all all sail through untouched. Not 100%; closer to a
     routing smoke check.
-  - **Property/fuzz**: only cover `schemas.py`'s validators, `models.py`'s
-    `normalize_title_key`, and a handful of endpoints
-    (`/auth/register`, `/auth/login`, `POST /media`,
-    `/auth/confirm-email-session`). Every other router (`comments.py`,
-    `premium.py`, `notifications.py`, `upcoming.py`, `stats.py`,
-    `imports.py`, `export.py`, `social.py`, `admin.py`, ...) has no
-    property or fuzz coverage at all.
-  - **Unit/integration**: coverage exists per-router (`tests/test_*.py`)
-    but has never been measured — no `coverage.py`/branch-coverage number
-    exists to point at. "Every letter of code must be tested" needs that
-    measurement first (`pytest --cov`) to know what's actually missing,
-    not an assumption from file-per-router existence.
+  - **Property/fuzz**: covers `schemas.py`'s validators, `models.py`'s
+    `normalize_title_key`, and a handful of endpoints (`/auth/register`,
+    `/auth/login`, `POST /media`, `/auth/confirm-email-session`,
+    `POST /comments`, `DELETE /comments/{id}`, `POST /notifications/{id}/read`,
+    `DELETE /notifications/{id}`). Every other router (`premium.py`,
+    `upcoming.py`, `stats.py`, `imports.py`, `export.py`, `social.py`,
+    `admin.py`, ...) still has no property or fuzz coverage at all.
+  - **Unit/integration**: coverage exists per-router (`tests/test_*.py`).
+    First real baseline now measured (`pytest --cov`, default marker set):
+    **82% branch coverage** — much healthier than assumed-from-file-
+    existence, but real gaps remain: `tvdb/tvdb_http.py` (35%),
+    `social/notifier.py` (53%, mostly the periodic-task loop bodies rather
+    than the testable `*_once()` functions the suite already exercises),
+    `users/tvtime_import.py` (68%, the largest single file in the codebase),
+    `tmdb/tmdb_store.py` (69%).
   - **Mutation**: config exists (`pyproject.toml`'s `[tool.mutmut]`) but
     has never actually run (no WSL on the dev machine) and is scoped to
     just `models.py` + `schemas.py`.
@@ -49,9 +52,8 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
     write-heavy paths (comments, ratings, imports) under concurrent load.
 
   Getting to "full coverage, all test types, 100%" means, in rough order:
-  run `pytest --cov` to get a real branch-coverage baseline; write the
-  missing unit/integration tests router-by-router until that number is
-  actually high (not just "a test file exists"); extend property/fuzz to
+  write the missing unit/integration tests for the lowest-coverage modules
+  named above (82% → meaningfully higher); extend property/fuzz to
   every router with a pydantic-validated request body; turn the contract
   test into real schema validation (response body against the OpenAPI
   response model, not just route existence — `schemathesis` or hand-rolled
@@ -78,17 +80,6 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
   Once that's done, the `[tool.mutmut]` config in `pyproject.toml` can be
   verified for real instead of carrying the "unverified" caveat repeated
   in the Testing item above and in `docs/design-decisions.md`.
-
-## Multi-session sync
-
-- **[Blocking for 1.0] Not covered: general data sync (watch status, library, comments,
-  notifications).** The `/events` push above is account-settings only.
-  Marking an episode watched, adding to the library, posting a comment, or
-  a new notification on one session still isn't reflected on another open
-  session until it re-fetches on its own (view re-entry, poll, etc.) — no
-  push for any of that yet. Extending the same `/events` channel with more
-  event types (e.g. `library_changed`) is the likely shape of a fix, but
-  scope/priority not decided.
 
 ## Import system (`routers/imports.py`)
 
@@ -182,8 +173,8 @@ fallback identity, not just a name source".
   which per-category rankings to add first, and what the badge set /
   unlock conditions look like.
 
-- **[Blocking for 1.0] Design the registration flow around the email-confirmation toggle
-  flipping on/off — user priority (2026-07-29).** The toggle
+- **[Future] Registration-flow-around-the-toggle: two open product-policy
+  questions remain, neither blocking.** The toggle
   (`SiteSettings.email_confirmation_enabled`) and its two bulk-confirm/
   bypass mechanics above were each added reactively, one migration at a
   time (`ffffe2b24717` grandfathering → `1b63409d9417` dropping it for a
@@ -231,16 +222,17 @@ fallback identity, not just a name source".
     `docs/backlog.md` and both repos' `docs/design-decisions.md` — see
     those for the reasoning behind each piece, not repeated here.
 
-  Open questions for the actual design pass:
-  - **Toggle-flip races.** `register()` reads
-    `ss.email_confirmation_enabled` once to decide `email_confirmed`/
-    `email_confirmation_bypassed` at insert time; the admin's bulk-confirm
-    on disable is a separate, later `UPDATE ... WHERE email_confirmed IS
-    false`. A registration committing between those two isn't provably
-    impossible — worth confirming there's no window where a row is
-    inserted unconfirmed (feature still reads as "on" to `register()`)
-    just as the bulk-confirm's `WHERE` clause is evaluated, and it's
-    skipped by one commit's worth of timing.
+  The toggle-flip race between `register()`'s single read of
+  `ss.email_confirmation_enabled` and the admin's bulk-confirm-on-disable
+  `UPDATE` was investigated and accepted as a low-probability, bounded risk
+  rather than engineered around — see `docs/design-decisions.md`'s
+  "Email-confirmation toggle-flip race: accepted, not engineered around."
+  Admin visibility into bypassed-vs-confirmed counts (previously an open
+  question here) now exists: `routers/admin/users.py`'s "Bypassed
+  Confirmation" stat tile.
+
+  Two open product-policy questions remain, neither blocking further
+  engineering work:
   - **Re-enabling never re-locks anyone, on purpose
     (`test_reenabling_feature_does_not_unconfirm_bulk_confirmed_users`)**
     — is that the right permanent policy, or should there be a way to
@@ -257,10 +249,6 @@ fallback identity, not just a name source".
     product decision on whether that's acceptable long-term, especially
     if the toggle gets flipped off temporarily just to onboard a batch of
     users quickly.
-  - **No visibility into how many accounts are bypassed vs. really
-    confirmed**, other than reading each row's tooltip one at a time in
-    the admin user list — no aggregate count/filter, unlike `total_users`
-    or the ranking-eligible count.
   - **The voluntary "Verify email" tile (renar-frontend's
     `profile_view.py`) is entirely passive** — shown, never surfaced via
     notification/reminder/badge. Decide whether that's sufficient or
@@ -577,15 +565,6 @@ fallback identity, not just a name source".
   make console output easier to skim at a glance. Not urgent — purely a
   developer-experience/readability issue, no functional impact.
 
-- **[Blocking for 1.0] psycopg3 stale prepared plans after live schema changes.** psycopg3
-  auto-prepares statements reused ~5+ times per connection. DDL that alters
-  or recreates tables against a pool with existing prepared plans triggers
-  `cached plan must not change result type` on the next query using that
-  connection. Tests are fixed via `engine.dispose()` in conftest's
-  `_fresh_db` fixture. **Production implication: restart/recycle the app
-  after running Alembic migrations**, so no pooled connection holds a plan
-  against pre-migration table shapes.
-
 ## Publishing (app stores, web, going public)
 
 Not yet scheduled. Nothing here is started; capturing the shape of the work
@@ -608,26 +587,6 @@ are tracked in renar-frontend's `docs/backlog.md`.
   has accounts and comments). Blocked on the app's subdomain being picked
   to host the published pages on (`breren.com` itself is registered
   already).
-
-- **[Blocking for 1.0] No DMCA/takedown process for user-submitted content.**
-  Comments and custom poster/backdrop uploads (`comments.py`, the
-  custom-image fields on `LibraryEntry`) are user-generated content with no
-  documented copyright-complaint path. `routers/admin/moderation.py`
-  handles reports/removal internally, but there's no public-facing
-  takedown contact or process referenced from the ToS — needed once the
-  app is live with real users, not just for store submission.
-
-- **[Blocking for 1.0] No data-safety audit done for store submission.** Google Play's Data
-  Safety form and Apple's Privacy Nutrition Label both require enumerating
-  exactly what user data is collected (email, username, avatar, watch
-  history, IP address for rate-limiting) and why. One audit, reused for
-  both store listings.
-
-- **[Blocking for 1.0] Account-deletion page needs a web-reachable path, not just in-app.**
-  `DELETE /auth/me` already covers in-app deletion, but Google Play policy
-  requires a deletion request to also be reachable *without* installing the
-  app (a simple hosted web form/page). Blocked on the app's subdomain
-  being picked (`breren.com` itself is registered already).
 
 - **[Future] No payment integration wired to the app stores — and mobile can't just
   reuse a web payment flow.** `premium_until` is admin-granted only today

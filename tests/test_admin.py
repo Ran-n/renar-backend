@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/08/24 12:39:05.068157
+Revised: 2026/08/27 09:52:22.465115
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -87,6 +87,24 @@ def test_admin_user_list_links_to_detail(client, admin_enabled, alice):
     user, _ = alice
     r = client.get("/admin/users", auth=BASIC)
     assert f'href="/admin/users/{user["id"]}"' in r.text
+
+
+def test_admin_user_list_shows_bypassed_confirmation_count(client, admin_enabled, alice):
+    """Answers docs/backlog.md's open question: aggregate visibility into how
+    many accounts never proved email ownership (bypassed) vs. really
+    confirmed, without reading each row's tooltip one at a time."""
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.query(User).filter(User.id == user["id"]).update({"email_confirmation_bypassed": True})
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.get("/admin/users", auth=BASIC)
+    assert r.status_code == 200
+    assert "Bypassed Confirmation" in r.text
+    assert '<div class="stat-value" id="stat-bypassed-confirmation">1</div>' in r.text
 
 
 # ---------- admin account actions ----------

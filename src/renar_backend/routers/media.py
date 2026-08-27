@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/08/24 11:07:30.379579
+Revised: 2026/08/27 09:52:21.793868
 """
 
 import logging
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, find_or_create_title, find_title
 from ..database import get_db
+from ..events import publish as publish_event
 from ..media.image_service import gc_image, image_row_for
 from ..media.image_utils import decode_b64_image, normalize_jpeg
 from ..models import (
@@ -348,6 +349,7 @@ def create_media(
         needs_commit = True
     if needs_commit:
         db.commit()
+    publish_event(user.id, "library_changed")
     return item
 
 
@@ -642,6 +644,7 @@ def update_media(
         _write_rating(db, item, None, None, rating_change)
     db.commit()
     db.refresh(item)
+    publish_event(user.id, "library_changed")
     return item
 
 
@@ -659,6 +662,7 @@ def delete_media(
     gc_image(old_poster_image_id, db)
     gc_image(old_backdrop_image_id, db)
     db.commit()
+    publish_event(user.id, "library_changed")
 
 
 # ---------- custom posters and backdrops (premium) ----------
@@ -1018,6 +1022,7 @@ def rewatch(
     item.last_watched_at = utcnow()
     db.commit()
     _sync_progress(item, db)
+    publish_event(user.id, "library_changed")
     return _ratings_summary(item, db)
 
 
@@ -1180,6 +1185,7 @@ def delete_rewatch_event(
                 cache_watch.rating = new_rating
     db.commit()
     _sync_progress(item, db)
+    publish_event(user.id, "library_changed")
     return _ratings_summary(item, db)
 
 
@@ -1400,6 +1406,7 @@ def set_episode(
         ).delete()
     db.commit()
     _sync_progress(item, db)
+    publish_event(user.id, "library_changed")
     return _ratings_summary(item, db)
 
 
@@ -1441,4 +1448,5 @@ def bulk_episodes(
         ).delete(synchronize_session=False)
     db.commit()
     _sync_progress(item, db)
+    publish_event(user.id, "library_changed")
     return _ratings_summary(item, db)

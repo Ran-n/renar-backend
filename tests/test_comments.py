@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.125706
-Revised: 2026/07/11 15:37:11.723254
+Revised: 2026/08/27 09:52:22.273324
 
 Comments on titles: create, list, like/unlike, delete, replies, reports.
 """
@@ -171,6 +171,33 @@ def test_delete_other_users_comment_not_found(client, alice, bob):
     _, bob_headers = bob
     comment = _post_comment(client, alice_headers)
     assert client.delete(f"/comments/{comment['id']}", headers=bob_headers).status_code == 404
+
+
+# ---------- multi-session sync (events.publish fanout) ----------
+
+
+def test_create_like_dislike_delete_publish_comment_changed(client, alice):
+    from renar_backend import events
+
+    user, headers = alice
+    queue = events.subscribe(user["id"])
+    try:
+        comment = _post_comment(client, headers)
+        assert queue.get_nowait() == "comment_changed"
+
+        client.post(f"/comments/{comment['id']}/like", headers=headers)
+        assert queue.get_nowait() == "comment_changed"
+
+        client.delete(f"/comments/{comment['id']}/like", headers=headers)
+        assert queue.get_nowait() == "comment_changed"
+
+        client.post(f"/comments/{comment['id']}/dislike", headers=headers)
+        assert queue.get_nowait() == "comment_changed"
+
+        client.delete(f"/comments/{comment['id']}", headers=headers)
+        assert queue.get_nowait() == "comment_changed"
+    finally:
+        events.unsubscribe(user["id"], queue)
 
 
 # ---------- replies ----------
