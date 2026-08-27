@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.529415
-Revised: 2026/07/07 13:25:17.529415
+Revised: 2026/08/27 09:52:22.369669
 
 Notification center + the new-episode checker (with an injected TMDB fetch).
 """
@@ -138,22 +138,33 @@ def _fake_fetch(air_date: str):
 
 
 def test_checker_notifies_about_recent_episode(client, alice):
-    _, headers = alice
+    from renar_backend import events
+
+    user, headers = alice
     _tracked_show(client, headers)
     aired = (date.today() - timedelta(days=1)).isoformat()
-
-    db = SessionLocal()
+    queue = events.subscribe(user["id"])
     try:
-        assert check_new_episodes(db, fetch=_fake_fetch(aired)) == 1
-        # a second run must not create a duplicate
-        assert check_new_episodes(db, fetch=_fake_fetch(aired)) == 0
-    finally:
-        db.close()
+        db = SessionLocal()
+        try:
+            assert check_new_episodes(db, fetch=_fake_fetch(aired)) == 1
+            # a second run must not create a duplicate
+            assert check_new_episodes(db, fetch=_fake_fetch(aired)) == 0
+        finally:
+            db.close()
 
-    listed = client.get("/notifications", headers=headers).json()
-    assert len(listed) == 1
-    assert listed[0]["kind"] == "new_episode"
-    assert (listed[0]["season"], listed[0]["episode"]) == (2, 3)
+        listed = client.get("/notifications", headers=headers).json()
+        assert len(listed) == 1
+        assert listed[0]["kind"] == "new_episode"
+        assert (listed[0]["season"], listed[0]["episode"]) == (2, 3)
+
+        # a real new-episode notification must fan out to the user's other open
+        # sessions (see events.py) so a second tab's bell updates immediately —
+        # the no-duplicate second run must not fire a second event.
+        assert queue.get_nowait() == "notification_changed"
+        assert queue.empty()
+    finally:
+        events.unsubscribe(user["id"], queue)
 
 
 def test_checker_skips_old_future_and_malformed_air_dates(client, alice):

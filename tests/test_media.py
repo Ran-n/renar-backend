@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.395578
-Revised: 2026/08/24 11:07:30.556579
+Revised: 2026/08/27 09:52:22.178234
 
 Media library CRUD, filters, ownership, and community ratings.
 """
@@ -392,6 +392,33 @@ def test_delete_other_users_item_not_found(client, alice, bob):
     item = _create(client, alice_headers)
     assert client.delete(f"/media/{item['id']}", headers=bob_headers).status_code == 404
     assert client.get(f"/media/{item['id']}", headers=alice_headers).status_code == 200
+
+
+# ---------- multi-session sync (events.publish fanout) ----------
+
+
+def test_create_update_delete_episode_publish_library_changed(client, alice):
+    """Every library-mutating endpoint should fan out `library_changed` to the
+    user's other open sessions (see events.py/routers/events.py) so a second
+    tab picks up the change without waiting on its own next navigation."""
+    from renar_backend import events
+
+    user, headers = alice
+    queue = events.subscribe(user["id"])
+    try:
+        item = _create(client, headers, media_type="tv_show", title="Dark")
+        assert queue.get_nowait() == "library_changed"
+
+        client.patch(f"/media/{item['id']}", json={"is_favorite": True}, headers=headers)
+        assert queue.get_nowait() == "library_changed"
+
+        client.put(f"/media/{item['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+        assert queue.get_nowait() == "library_changed"
+
+        client.delete(f"/media/{item['id']}", headers=headers)
+        assert queue.get_nowait() == "library_changed"
+    finally:
+        events.unsubscribe(user["id"], queue)
 
 
 # ---------- community ratings ----------

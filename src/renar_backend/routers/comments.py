@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.875365
-Revised: 2026/08/25 14:05:14.067080
+Revised: 2026/08/27 09:52:21.892840
 
 Comments on titles (global across users), with likes, nested replies and
 user reports.
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
+from ..events import publish as publish_event
 from ..models import Comment, CommentLike, CommentReport, EpisodeWatch, LibraryEntry, MediaType, User
 from ..schemas import CommentCreate, CommentReportCreate
 from ..social.comment_threads import ancestor_depth, load_thread, resolve_root_scope
@@ -192,6 +193,7 @@ def create_comment(
     db.add(comment)
     db.commit()
     db.refresh(comment)
+    publish_event(me.id, "comment_changed")
     # `data.season`/`data.episode` are the thread's real scope even for a
     # reply (the Comment row itself stores None there — see above — but the
     # request payload is validated against the parent's own root scope just
@@ -212,6 +214,7 @@ def delete_comment(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     db.delete(comment)
     db.commit()
+    publish_event(me.id, "comment_changed")
 
 
 def _set_reaction(db: Session, comment_id: int, me: User, value: int) -> None:
@@ -227,9 +230,11 @@ def _set_reaction(db: Session, comment_id: int, me: User, value: int) -> None:
         if existing.value != value:
             existing.value = value
             db.commit()
+            publish_event(me.id, "comment_changed")
     else:
         db.add(CommentLike(comment_id=comment_id, user_id=me.id, value=value))
         db.commit()
+        publish_event(me.id, "comment_changed")
 
 
 def _clear_reaction(db: Session, comment_id: int, me: User, value: int) -> None:
@@ -239,6 +244,7 @@ def _clear_reaction(db: Session, comment_id: int, me: User, value: int) -> None:
     if reaction and reaction.value == value:
         db.delete(reaction)
         db.commit()
+        publish_event(me.id, "comment_changed")
 
 
 @router.post("/{comment_id}/like", status_code=status.HTTP_204_NO_CONTENT)

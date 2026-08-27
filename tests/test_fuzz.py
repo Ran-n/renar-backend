@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:42:31.539562
-Revised: 2026/08/18 17:42:31.539562
+Revised: 2026/08/27 10:03:42.956229
 
 Fuzz tests (hypothesis): throw a wide range of malformed/random input at a
 few request-parsing endpoints and assert the server never 500s — a 4xx
@@ -78,3 +78,49 @@ def test_confirm_email_never_500s_on_malformed_code(client, alice, code):
     _, headers = alice
     r = client.post("/auth/confirm-email-session", json={"code": code}, headers=headers)
     assert r.status_code < 500, f"500 on code={code!r}:\n{r.text}"
+
+
+# ---------- comments.py (previously no fuzz coverage — see docs/backlog.md) ----------
+
+
+@_fuzz_settings
+@given(
+    payload=st.dictionaries(
+        st.sampled_from(["media_type", "tmdb_id", "title", "season", "episode", "parent_id", "text"]),
+        st.one_of(
+            st.none(), st.booleans(), st.integers(), st.floats(allow_nan=False, allow_infinity=False), _fuzzy_text
+        ),
+        max_size=7,
+    )
+)
+def test_create_comment_never_500s_on_arbitrary_json(client, alice, payload):
+    _, headers = alice
+    r = client.post("/comments", json=payload, headers=headers)
+    assert r.status_code < 500, f"500 on payload={payload!r}:\n{r.text}"
+
+
+@_fuzz_settings
+@given(comment_id=st.integers(min_value=-(10**9), max_value=10**9))
+def test_delete_comment_never_500s_on_arbitrary_comment_id(client, alice, comment_id):
+    _, headers = alice
+    r = client.delete(f"/comments/{comment_id}", headers=headers)
+    assert r.status_code < 500, f"500 on comment_id={comment_id!r}:\n{r.text}"
+
+
+# ---------- notifications.py (previously no fuzz coverage — see docs/backlog.md) ----------
+
+
+@_fuzz_settings
+@given(notification_id=st.integers(min_value=-(10**9), max_value=10**9))
+def test_mark_read_never_500s_on_arbitrary_notification_id(client, alice, notification_id):
+    _, headers = alice
+    r = client.post(f"/notifications/{notification_id}/read", headers=headers)
+    assert r.status_code < 500, f"500 on notification_id={notification_id!r}:\n{r.text}"
+
+
+@_fuzz_settings
+@given(notification_id=st.integers(min_value=-(10**9), max_value=10**9))
+def test_delete_notification_never_500s_on_arbitrary_notification_id(client, alice, notification_id):
+    _, headers = alice
+    r = client.delete(f"/notifications/{notification_id}", headers=headers)
+    assert r.status_code < 500, f"500 on notification_id={notification_id!r}:\n{r.text}"

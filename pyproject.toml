@@ -1,6 +1,6 @@
 [project]
 name = "renar-backend"
-version = "0.18.3"
+version = "0.19.0"
 description = "FastAPI backend for Renar — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]
@@ -27,7 +27,7 @@ dependencies = [
 be = "renar_backend.__main__:run"
 
 [dependency-groups]
-dev = ["pytest>=8", "hypothesis>=6.100", "bandit>=1.7", "pip-audit>=2.7", "locust>=2.31", "mutmut>=3.2"]
+dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6.100", "bandit>=1.7", "pip-audit>=2.7", "locust>=2.31", "mutmut>=3.2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -59,6 +59,18 @@ markers = [
 # needs network access (pip-audit queries a vulnerability database), so
 # it's excluded the same way — `pytest -m security` to run it.
 addopts = "-m \"not integration and not security\""
+
+[tool.coverage.run]
+source = ["src/renar_backend"]
+branch = true
+
+[tool.coverage.report]
+# Baseline measurement per docs/backlog.md's Testing entry — no threshold
+# enforced yet (`pytest --cov` is meant to be read, not gated on, until the
+# missing per-router property/fuzz/unit coverage it names is actually
+# written). Run: `pytest --cov --cov-report=term-missing`.
+show_missing = true
+skip_empty = true
 
 [tool.bandit]
 # B608 (hardcoded_sql_expressions) false-positives on db_triggers.py's

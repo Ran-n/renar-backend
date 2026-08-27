@@ -2,13 +2,14 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/08/24 12:39:04.182223
+Revised: 2026/08/27 09:56:07.498353
 """
 
+import html
 import logging
 from datetime import timedelta
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_
@@ -690,3 +691,81 @@ def cancel_account_deletion(
 ):
     accounts.cancel_deletion(user, db)
     return UserOut.model_validate(user)
+
+
+# Google Play policy requires an account-deletion request to be reachable
+# *without* installing the app (a plain hosted web page), in addition to the
+# in-app DELETE /auth/me above — see docs/backlog.md's "Account-deletion page
+# needs a web-reachable path" entry. This reuses the same grace-period
+# deletion (accounts.request_deletion) and the same credential-check/
+# rate-limit helper /confirm-email already relies on, rather than a second
+# deletion path or a second brute-force surface.
+_ACCOUNT_DELETION_STYLE = """
+  html{height:100%;margin:0;background:#1d2021;color:#ebdbb2;
+    font-family:system-ui,-apple-system,Segoe UI,sans-serif;}
+  body{margin:0;min-height:100%;display:flex;align-items:center;justify-content:center;padding:2rem 1rem;}
+  .card{max-width:26rem;width:100%;background:#282828;border-radius:12px;padding:1.75rem;}
+  h1{font-size:1.25rem;margin:0 0 .75rem;}
+  p{font-size:.9rem;line-height:1.5;color:#bdae93;}
+  label{display:block;font-size:.85rem;margin:1rem 0 .3rem;}
+  input{width:100%;box-sizing:border-box;padding:.55rem .65rem;border-radius:6px;
+    border:1px solid #504945;background:#32302f;color:#ebdbb2;font-size:.95rem;}
+  button{margin-top:1.25rem;width:100%;padding:.6rem;border:none;border-radius:6px;
+    background:#fb4934;color:#1d2021;font-weight:600;font-size:.95rem;cursor:pointer;}
+  .error{color:#fb4934;font-size:.85rem;margin-top:.75rem;}
+  .ok{color:#b8bb26;}
+"""
+
+
+def _account_deletion_page(*, error: str | None = None, done: bool = False) -> str:
+    body = """
+    <h1>Delete your Renar account</h1>
+    <p>This starts the same account-deletion process as the in-app option.
+    Your account enters a grace period — logging back in during that window
+    cancels the deletion. After the grace period, your account and its data
+    are permanently removed.</p>
+    <form method="post" action="/auth/account-deletion">
+      <label for="username">Username or email</label>
+      <input id="username" name="username" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Request account deletion</button>
+    </form>"""
+    if done:
+        body = """
+    <h1>Deletion requested</h1>
+    <p class="ok">Your account is now in its deletion grace period. Logging
+    back in before it ends cancels the deletion.</p>"""
+    error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Renar — Delete account</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>{_ACCOUNT_DELETION_STYLE}</style></head>
+<body><div class="card">{body}{error_html}</div></body></html>"""
+
+
+@router.get("/account-deletion", response_class=HTMLResponse, include_in_schema=False)
+def account_deletion_page(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return _account_deletion_page()
+
+
+@router.post("/account-deletion", response_class=HTMLResponse, include_in_schema=False)
+def account_deletion_submit(
+    request: Request,
+    response: Response,
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    ip = client_ip(request)
+    try:
+        user = _authenticate_for_confirmation(username, password, ip, db)
+    except HTTPException as exc:
+        # Same generic message regardless of bad username vs. bad password —
+        # no account enumeration, matching /auth/login's own error shape.
+        return _account_deletion_page(error=exc.detail if isinstance(exc.detail, str) else "Request failed")
+    accounts.request_deletion(user, db)
+    return _account_deletion_page(done=True)

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/08/26 08:54:13.455550
+Revised: 2026/08/27 09:52:21.987998
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from .. import task_runs
 from ..catalog.titles import backfill_title_tmdb_id, find_title
 from ..database import SessionLocal
+from ..events import publish as publish_event
 from ..models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus, utcnow
 from ..tmdb.tmdb_http import tmdb_get
 from ..tmdb.tmdb_store import ENDED_STATUSES, store_details, sync_show_episodes
@@ -105,6 +106,7 @@ def check_new_episodes(db: Session, fetch=fetch_show) -> int:
 
         show_name = data.get("name") or group[0].title
         ep_name = last.get("name") or f"Episode {episode}"
+        notified_user_ids: set[int] = set()
         for item in group:
             already_watched = (
                 db.query(EpisodeWatch).filter_by(media_item_id=item.id, season=season, episode=episode).first()
@@ -140,6 +142,7 @@ def check_new_episodes(db: Session, fetch=fetch_show) -> int:
                     episode=episode,
                 )
             )
+            notified_user_ids.add(item.user_id)
             created += 1
         # commit per show instead of batching the whole scan into one
         # transaction — otherwise this loop holds tmdb_cache row locks for
@@ -148,6 +151,8 @@ def check_new_episodes(db: Session, fetch=fetch_show) -> int:
         # updating the same rows in a different order (see also
         # resync_tmdb_metadata / check_upcoming_films below).
         db.commit()
+        for user_id in notified_user_ids:
+            publish_event(user_id, "notification_changed")
     return created
 
 
