@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/27 10:31:24.768627 )
+[//]: # (+ Revised: 	2026/08/27 11:19:37.718084 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -37,13 +37,16 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
     `upcoming.py`, `stats.py`, `imports.py`, `export.py`, `social.py`,
     `admin.py`, ...) still has no property or fuzz coverage at all.
   - **Unit/integration**: coverage exists per-router (`tests/test_*.py`).
-    First real baseline now measured (`pytest --cov`, default marker set):
-    **82% branch coverage** — much healthier than assumed-from-file-
-    existence, but real gaps remain: `tvdb/tvdb_http.py` (35%),
-    `social/notifier.py` (53%, mostly the periodic-task loop bodies rather
-    than the testable `*_once()` functions the suite already exercises),
-    `users/tvtime_import.py` (68%, the largest single file in the codebase),
-    `tmdb/tmdb_store.py` (69%).
+    First real baseline measured (`pytest --cov`, default marker set): 82%
+    branch coverage, since then raised on its two worst outliers —
+    `tvdb/tvdb_http.py` 35% → **100%** (`tests/test_tvdb_http.py`: login
+    caching/forced-refresh, the 401-relogin-then-retry path, every
+    TVDB-unavailable fallback) and `social/notifier.py` 53% → **86%**
+    (`tests/test_notifier_loops.py`: all eight periodic-task loops —
+    enabled/disabled, success, and the failure path that must not crash the
+    loop — the remaining gap is now just the thin `*_once()` wrapper
+    functions themselves). Still real gaps: `users/tvtime_import.py` (68%,
+    the largest single file in the codebase), `tmdb/tmdb_store.py` (69%).
   - **Mutation**: config exists (`pyproject.toml`'s `[tool.mutmut]`) but
     has never actually run (no WSL on the dev machine) and is scoped to
     just `models.py` + `schemas.py`.
@@ -509,27 +512,6 @@ fallback identity, not just a name source".
   not a blocker for an Android-first ship.
 
 ## Infrastructure
-
-- **[Blocking for 1.0] Cloudflare Turnstile captcha on `/auth/register` — shipped, a few
-  loose ends remain.** Added to combat fake-account registration inflating
-  stats/rankings. Live keys configured (`TURNSTILE_SITE_KEY`/
-  `TURNSTILE_SECRET_KEY` in `.env`, hostname `api.renar.app`
-  registered in the Cloudflare Turnstile dashboard), on/off toggle is a
-  live admin Site Settings switch (`site_settings.turnstile_enabled`, not
-  an env var — flips instantly, no restart). `/auth/registration-status`,
-  `/auth/turnstile-session`, `-widget`, `-callback`, `-token` all send
-  `Cache-Control: no-store` (see 2026-07-19 fix — a caching intermediary,
-  most likely a mobile carrier's transparent proxy, was serving a stale
-  `registration-status`/`turnstile-token` response for several minutes
-  after an admin toggle, which for the token-poll endpoint specifically
-  could have meant the register screen never seeing an already-resolved
-  token). Mobile's `android:usesCleartextTraffic="true"` is patched into
-  the Android manifest automatically on every build (`launcher.py`'s
-  `_patch_android_manifest()`), not a hand-edit that silently went missing
-  after a template regen — kept intentionally even now that the backend
-  serves real HTTPS (see `docs/design-decisions.md`'s HTTPS entry), since
-  the register screen's self-hosted-server field is a documented first-class
-  `http://` use case independent of the default deployment's own scheme.
 
 - **[Future] No human-facing mailbox on `breren.com` yet (e.g. `support@`/`hello@`).**
   Distinct from the OTP-sending item above (Brevo, transactional-only, no
