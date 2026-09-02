@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/19 00:00:00.000000
-Revised: 2026/08/21 16:27:43.371727
+Revised: 2026/09/02 10:58:27.603431
 
 Cloudflare Turnstile gate on /auth/register. Mocks the siteverify HTTP call
 (no real network dependency in the suite) — verify_turnstile() itself is a
@@ -235,3 +235,56 @@ def test_turnstile_widget_page_is_not_cacheable(client, monkeypatch):
         assert r.headers["cache-control"] == "no-store"
     finally:
         cleanup()
+
+
+def test_verify_turnstile_without_remote_ip_omits_remoteip_field(monkeypatch):
+    """verify_turnstile with remote_ip=None skips the remoteip field —
+    covers turnstile.py line 57->60 (if remote_ip: False branch)."""
+    from renar_backend.users.turnstile import verify_turnstile
+
+    captured = {}
+
+    def fake_post(url, data=None, **kw):
+        captured["data"] = data
+
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"success": True}
+
+        return R()
+
+    monkeypatch.setattr(turnstile_module.http_client, "post", fake_post)
+    result = verify_turnstile("token", None, enabled=True, secret_key="secret")
+    assert result is True
+    assert "remoteip" not in captured["data"]
+
+
+def test_verify_turnstile_http_error_returns_false(monkeypatch):
+    """An httpx.HTTPError during siteverify returns False —
+    covers turnstile.py lines 63-65."""
+    import httpx
+
+    from renar_backend.users.turnstile import verify_turnstile
+
+    def _raise(*a, **kw):
+        raise httpx.ConnectError("timeout")
+
+    monkeypatch.setattr(turnstile_module.http_client, "post", _raise)
+    result = verify_turnstile("token", "1.2.3.4", enabled=True, secret_key="secret")
+    assert result is False
+
+
+def test_widget_html_standalone_renders_branded_card(monkeypatch):
+    """widget_html with standalone=True renders the branded standalone page —
+    covers turnstile.py lines 174-191."""
+    from renar_backend.users.turnstile import widget_html
+
+    html = widget_html("test-site-key", "sess123", "dark", standalone=True)
+    assert "rn-card" in html
+    assert "rn-brand" in html
+    assert "Verify you" in html
+    assert "window.close" in html
+    assert "sess123" in html

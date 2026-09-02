@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:37:49.855061
-Revised: 2026/08/27 09:56:07.596509
+Revised: 2026/09/02 10:57:32.359088
 
 Soft-delete account deletion: DELETE /auth/me starts a grace period instead
 of purging immediately (see users/accounts.py's request_deletion/
@@ -170,3 +170,44 @@ def test_hard_delete_still_works_regardless_of_pending_deletion_flag(client, ali
     user, _ = alice
     hard_delete(user["id"])
     assert _user_row(user["id"]) is None
+
+
+def test_delete_account_gcs_custom_poster_image(client, alice):
+    """Deleting an account with a custom poster GCs the image file — covers
+    accounts.py's image GC loop (line 124) for poster_image_ids."""
+    import base64
+    import io
+
+    from PIL import Image as PILImage
+
+    from renar_backend.database import SessionLocal
+    from renar_backend.models import Image
+
+    user, headers = alice
+
+    # Grant premium so we can upload a poster
+    with SessionLocal() as db:
+        from datetime import timedelta
+
+        from renar_backend.models import utcnow
+
+        db.get(User, user["id"]).premium_until = utcnow() + timedelta(days=30)
+        db.commit()
+
+    # Add a media item and upload a custom poster
+    item = client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 949}, headers=headers).json()
+    img = PILImage.new("RGB", (20, 30), (200, 30, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    r = client.put(f"/media/{item['id']}/poster", json={"image_b64": b64}, headers=headers)
+    assert r.status_code == 200
+
+    with SessionLocal() as db:
+        image_count_before = db.query(Image).count()
+    assert image_count_before == 1
+
+    hard_delete(user["id"])
+    assert _user_row(user["id"]) is None
+    with SessionLocal() as db:
+        assert db.query(Image).count() == 0

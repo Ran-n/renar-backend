@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/09 09:30:00.000000
-Revised: 2026/07/21 09:51:05.228509
+Revised: 2026/09/02 10:57:11.499049
 
 Per-endpoint usage tracking.
 
@@ -21,6 +21,7 @@ the numbers it shows.
 
 import logging
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -47,43 +48,77 @@ def _bearer_user_id(request: Request) -> int | None:
 def _record(method: str, path: str, user_id: int | None) -> None:
     """Atomically bump the (method, path, user) counter, inserting it if new.
 
-    The increment is a server-side UPDATE (not read-modify-write) so concurrent
-    requests can't lose counts; a lost insert race only ever creates a duplicate
-    row, which still sums correctly.
+    For authenticated requests the unique constraint (method, path, user_id) is
+    fully non-nullable, so a true PostgreSQL INSERT … ON CONFLICT DO UPDATE
+    upsert is safe and serialises concurrent inserts without losing any count.
+
+    For anonymous requests (user_id IS NULL) PostgreSQL unique constraints treat
+    NULL values as distinct, so ON CONFLICT never fires against a NULL key — we
+    fall back to UPDATE-or-INSERT for that minority path.  Anonymous endpoint
+    traffic is inherently low-concurrency (rate-limited before it reaches here),
+    so the residual race is acceptable and mirrors the previous behaviour.
     """
     with SessionLocal() as db:
-        query = db.query(EndpointStat).filter(EndpointStat.method == method, EndpointStat.path == path)
-        if user_id is None:
-            query = query.filter(EndpointStat.user_id.is_(None))
-        else:
-            query = query.filter(EndpointStat.user_id == user_id)
-        updated = query.update(
-            {EndpointStat.count: EndpointStat.count + 1, EndpointStat.last_at: utcnow()},
-            synchronize_session=False,
-        )
-        if not updated:
-            # A self-delete (DELETE /auth/me) removes the user before this
-            # post-response hook runs; attribute that trailing request to no
-            # one rather than leaving a dangling user_id (a FK violation).
-            if user_id is not None and db.get(User, user_id) is None:
-                user_id = None
-            db.add(EndpointStat(method=method, path=path, user_id=user_id, count=1, last_at=utcnow()))
+        now = utcnow()
         if user_id is not None:
+            # Self-delete guard: a DELETE /auth/me removes the user before this
+            # post-response hook runs; check once here so both upserts can skip
+            # cleanly without each doing their own existence query.
+            user_exists = db.get(User, user_id) is not None
+            if not user_exists:
+                user_id = None  # attribute the trailing request to no one
+
+        if user_id is not None:
+            # True atomic upsert: concurrent inserts on the same key are merged
+            # by Postgres rather than racing to a UniqueViolation.
+            stmt = (
+                pg_insert(EndpointStat)
+                .values(method=method, path=path, user_id=user_id, count=1, last_at=now)
+                .on_conflict_do_update(
+                    constraint="uq_endpoint_stat",
+                    set_={
+                        "count": EndpointStat.count + 1,
+                        "last_at": now,
+                    },
+                )
+            )
+            db.execute(stmt)
             _record_request_day(db, user_id)
+        else:
+            updated = (
+                db.query(EndpointStat)
+                .filter(
+                    EndpointStat.method == method,
+                    EndpointStat.path == path,
+                    EndpointStat.user_id.is_(None),
+                )
+                .update(
+                    {EndpointStat.count: EndpointStat.count + 1, EndpointStat.last_at: now},
+                    synchronize_session=False,
+                )
+            )
+            if not updated:
+                db.add(EndpointStat(method=method, path=path, user_id=None, count=1, last_at=now))
         db.commit()
 
 
 def _record_request_day(db: Session, user_id: int) -> None:
-    """Bump the (user, today) request counter for the per-day chart. Skips the
-    insert if the user was just deleted (same trailing-self-delete guard)."""
+    """Bump the (user, today) request counter for the per-day chart.
+
+    Uses a true upsert so concurrent requests from the same user on the same
+    calendar day never race to a UniqueViolation on uq_request_day.  The caller
+    (_record) has already verified the user still exists, so no extra guard here.
+    """
     today = utcnow().date()
-    updated = (
-        db.query(RequestDay)
-        .filter(RequestDay.user_id == user_id, RequestDay.day == today)
-        .update({RequestDay.count: RequestDay.count + 1}, synchronize_session=False)
+    stmt = (
+        pg_insert(RequestDay)
+        .values(user_id=user_id, day=today, count=1)
+        .on_conflict_do_update(
+            constraint="uq_request_day",
+            set_={"count": RequestDay.count + 1},
+        )
     )
-    if not updated and db.get(User, user_id) is not None:
-        db.add(RequestDay(user_id=user_id, day=today, count=1))
+    db.execute(stmt)
 
 
 class UsageTrackingMiddleware(BaseHTTPMiddleware):

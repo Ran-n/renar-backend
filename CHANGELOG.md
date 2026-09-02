@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/08/27 11:39:31.052770 )
+[//]: # (+ Revised: 	2026/09/02 10:57:10.160089 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.19.2] - 2026-09-02
+
+### Fixed
+
+- `users/renar_import.py`, `users/tvtime_import.py`, `routers/imports.py`:
+  fixed check-then-act race where two concurrent `POST /import` requests for
+  the same user could both pass the in-memory `is_running` check (before either
+  called `start_job`) and launch duplicate background import threads. Added
+  `_user_lock`/`_active_users` to each importer and a `try_start_job` function
+  that atomically claims the per-user running slot; updated `_run`'s `finally`
+  block to call `finish_user` so the slot is released when the import completes.
+  Added three regression tests in `tests/test_imports.py`.
+- `models.py`: declared `User.__table_args__` with explicit two-column
+  `Index("ix_users_total_watch_minutes", "total_watch_minutes", "created_at")`
+  to match the DB index migration `a7c2e9f4b816` intentionally created for
+  ranking queries; previously the column-level `index=True` would cause
+  `alembic check` to report drift and, if acted on, would silently drop the
+  second column and degrade ranking-query performance.
+- `models.py`: declared `ReviewWhitelist.__table_args__` with the named
+  `UniqueConstraint("user_id", name="uq_review_whitelist_user_id")` matching
+  what migration `88137cd72bc2` created in the DB; previously the column-level
+  `unique=True` generated an unnamed constraint, causing `alembic check` drift.
+- `tests/test_notifier_loops.py`: replaced bare `try/except CancelledError:
+  pass` with `contextlib.suppress(asyncio.CancelledError)` (ruff SIM105).
+- `tests/test_title_merge.py`: removed duplicate `#!/usr/bin/env python3`
+  shebang and docstring block that caused E265/E402 ruff violations.
+- `routers/media.py` (`list_episodes` endpoint): added
+  `joinedload(EpisodeCustomStill.still_image)` to the custom-stills query so
+  each `s.still_image.hash/source_url` access does not fire a separate
+  `SELECT images` query (N+1 per custom still for premium users).
+- `routers/reviews.py` (`list_reviews` endpoint): added
+  `selectinload(Review.author)` to the reviews query so
+  `review.author.username/avatar` accesses resolve in one batch query
+  instead of one `SELECT users` query per review (N+1 per reviewer).
+- `tests/test_tvdb_http.py`: applied ruff auto-format (trailing whitespace).
+- `models.py` (`User.avatar_image`): set `lazy="joined"` on the relationship
+  so every `User.avatar` access (comment threads, review lists, follower/
+  following pages, profile search) resolves `avatar_image.hash` in the same
+  query that loaded the User row, rather than issuing a separate
+  `SELECT images` per distinct author (N+1 per author in any list endpoint
+  that renders avatars — up to 100+ queries for a loaded comment thread).
+- `users/usage.py` (`_record`, `_record_request_day`): replaced the
+  check-then-act UPDATE-or-INSERT pattern with PostgreSQL
+  `INSERT … ON CONFLICT DO UPDATE` upserts for authenticated-user counters
+  (`endpoint_stats` and `request_days`).  The old pattern had a window where
+  concurrent requests from the same user to the same endpoint all saw zero
+  rows from the UPDATE and then all attempted INSERT, producing a
+  UniqueViolation on `uq_endpoint_stat`/`uq_request_day` that silently
+  discarded analytics events.  Under the 10-thread concurrency test this
+  reliably logged an `IntegrityError` per losing thread even though the
+  middleware's outer `except` prevented any 5xx response.  The upsert is
+  atomic at the Postgres level and can never race.
+- `users/security.py` (`permaban`): replaced the SELECT-then-INSERT guard
+  (`if not db.query(BannedIP)…first(): db.add(…)`) with a savepoint-wrapped
+  INSERT that catches `IntegrityError` and silently discards it.  The old
+  pattern logged a spurious exception-level error whenever two concurrent
+  requests from the same IP both triggered a permaban (honeypot, repeated
+  strikes) before either had added the IP to `_permabanned`; the in-memory
+  ban was already set so there was no functional impact, but the error log
+  was misleading.
+- `users/security.py` (`strike_and_maybe_ban`): added `with_for_update()` to
+  the `Strike` row query and wrapped the initial INSERT in a savepoint with
+  `IntegrityError` recovery.  The old read-modify-write was non-atomic: two
+  concurrent ban triggers for the same offending IP (typical under a flood)
+  both read the same `count`, both wrote `count + 1`, and the correct
+  `count + 2` was never stored — systematically under-counting strikes and
+  delaying permaban escalation under attack load.
+- `routers/auth.py` (POST `/auth/register`): wrapped `db.commit()` in
+  `try/except IntegrityError` so two simultaneous registrations with the same
+  username/email that both pass the pre-commit SELECT check return 409 instead
+  of propagating an unhandled `IntegrityError` as a 500.
+- `routers/social.py` (POST `/users/{user_id}/follow`): wrapped `db.commit()`
+  in `try/except IntegrityError` so a concurrent duplicate follow request
+  silently becomes a no-op (204) rather than a 500 from `uq_follow_pair`.
+- `routers/comments.py` (`_set_reaction`, `report_comment`): wrapped
+  `db.commit()` in `try/except IntegrityError` on the `CommentLike` and
+  `CommentReport` insert paths so concurrent duplicate reactions/reports from
+  the same user are silently dropped rather than surfaced as 500.
+- `routers/reviews.py` (POST create review): wrapped `db.commit()` in
+  `try/except IntegrityError` so a concurrent duplicate submission from the
+  same reviewer returns 409 instead of a 500.
+- `tvdb/tvdb_store.py` (`sync_tvdb_episodes`): wrapped the `Episode` INSERT in
+  a `begin_nested()` savepoint with `IntegrityError` catch so two concurrent
+  TVDB syncs for the same show (e.g. triggered by simultaneous import jobs)
+  do not crash on `uq_episode_key`; the losing thread now logs a debug message
+  and continues.
+- `routers/admin/users.py` (POST `/users/{user_id}/whitelist-review`): wrapped
+  `db.commit()` in `try/except IntegrityError` so a double-submit of the
+  whitelist form becomes a silent no-op rather than a 500.
+- `routers/media.py` (POST create library entry): wrapped `db.commit()` in
+  `try/except IntegrityError` so two simultaneous adds of the same title by
+  the same user (e.g. double-tap on a slow connection) return 409 instead of
+  propagating an unhandled `IntegrityError` as a 500.
+- `routers/lists.py` (POST add list item): wrapped `db.commit()` in
+  `try/except IntegrityError` so a concurrent duplicate-add race that bypasses
+  the Python-level existence check returns 409 (matching the sequential-path
+  response) instead of propagating the `uq_list_item` constraint violation as
+  a 500; added a corresponding regression test to `tests/test_lists.py`.
 
 ## [0.19.1] - 2026-08-27
 

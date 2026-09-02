@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/08/25 14:05:14.166722
+Revised: 2026/09/02 10:57:11.048396
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -11,6 +11,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import case, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..catalog.titles import WITH_TITLE_GENRES
@@ -182,7 +183,10 @@ def follow_user(
     _user_or_404(user_id, db)
     if not _is_following(me.id, user_id, db):
         db.add(Follow(follower_id=me.id, followed_id=user_id))
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()  # concurrent follow request beat us — already following
 
 
 @router.delete("/users/{user_id}/follow", status_code=status.HTTP_204_NO_CONTENT)

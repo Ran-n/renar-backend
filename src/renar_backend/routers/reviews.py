@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:36:40.138297
-Revised: 2026/08/24 15:28:10.024708
+Revised: 2026/09/02 10:57:10.961341
 
 Reviews: longer, considered write-ups on a title, distinct from the casual
 Comments thread — restricted to a hand-picked whitelist of reviewers (see
@@ -14,7 +14,8 @@ import logging
 from collections.abc import Iterable
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, selectinload
 
 from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
@@ -92,7 +93,13 @@ def list_reviews(
     target = find_title(db, media_type, tmdb_id, title)
     if target is None:  # nobody has tracked or reviewed this title yet
         return []
-    reviews = db.query(Review).filter(Review.title_id == target.id).order_by(Review.created_at.desc()).all()
+    reviews = (
+        db.query(Review)
+        .options(selectinload(Review.author))
+        .filter(Review.title_id == target.id)
+        .order_by(Review.created_at.desc())
+        .all()
+    )
     rev_ids = reviewer_ids(db, {r.user_id for r in reviews})
     return [_review_out(r, me, r.user_id in rev_ids) for r in reviews]
 
@@ -117,7 +124,16 @@ def create_review(
         )
     review = Review(user_id=me.id, title_id=target.id, text=data.text.strip(), rating=data.rating)
     db.add(review)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # Two simultaneous submissions from the same reviewer raced past the
+        # SELECT check above — surface the same 409 as the pre-commit path.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You already reviewed this title — edit your existing review instead",
+        ) from None
     db.refresh(review)
     # already checked above — no second query needed for this single-user case
     return _review_out(review, me, True)

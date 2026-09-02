@@ -2,11 +2,13 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/08/27 09:52:22.465115
+Revised: 2026/09/02 10:57:34.534480
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
 
+import base64
+import io
 from datetime import timedelta
 
 from conftest import ADMIN_BASIC as BASIC
@@ -22,6 +24,7 @@ from renar_backend.models import (
     LoginEvent,
     Notification,
     PeriodicTaskRun,
+    ReviewWhitelist,
     SiteSettings,
     User,
     utcnow,
@@ -642,6 +645,91 @@ def test_admin_periodic_tasks_interval_requires_auth(client, admin_enabled):
     assert r.status_code == 401
 
 
+# ---------- task_runs internal paths ----------
+
+
+def test_task_runs_set_enabled_updates_existing_row(admin_enabled):
+    """set_enabled() on a task that already has a DB row hits the update
+    branch (line 189) instead of inserting a new one."""
+    from renar_backend import task_runs
+
+    task_runs.set_enabled("episode_check", False)  # creates row
+    task_runs.set_enabled("episode_check", True)  # updates existing row
+    assert task_runs.is_enabled("episode_check") is True
+
+
+def test_task_runs_set_interval_minutes_updates_existing_row(admin_enabled):
+    """set_interval_minutes() on a task with an existing row hits the update
+    branch (line 201) instead of inserting."""
+    from renar_backend import task_runs
+
+    task_runs.set_interval_minutes("film_check", 45)  # creates row
+    task_runs.set_interval_minutes("film_check", 90)  # updates existing row
+    assert task_runs.get_interval_minutes("film_check") == 90
+
+
+def test_task_runs_record_run_updates_existing_row(admin_enabled):
+    """record_run() called twice updates the existing PeriodicTaskRun row
+    instead of inserting a second one — covers task_runs.py line 212->215."""
+    from renar_backend import task_runs
+    from renar_backend.models import PeriodicTaskRun, utcnow
+
+    task_runs.record_run("strike_cleanup", utcnow(), "ok", "first run")
+    task_runs.record_run("strike_cleanup", utcnow(), "ok", "second run")
+
+    with SessionLocal() as db:
+        rows = db.query(PeriodicTaskRun).filter(PeriodicTaskRun.task_key == "strike_cleanup").all()
+    assert len(rows) == 1
+    assert rows[0].last_detail == "second run"
+
+
+def test_task_runs_record_run_swallows_db_error(admin_enabled, monkeypatch):
+    """record_run() must never raise even if the DB write fails —
+    covers task_runs.py lines 220-221."""
+    import renar_backend.task_runs as tr_mod
+    from renar_backend import task_runs
+    from renar_backend.models import utcnow
+
+    def _exploding_session(*a, **kw):
+        raise RuntimeError("db is down")
+
+    monkeypatch.setattr(tr_mod, "SessionLocal", _exploding_session)
+    # Must not raise:
+    task_runs.record_run("episode_check", utcnow(), "ok", "ignored")
+
+
+def test_task_runs_list_runs_swallows_db_error(admin_enabled, monkeypatch):
+    """list_runs() returns {} instead of raising when the DB read fails —
+    covers task_runs.py lines 232-234."""
+    import renar_backend.task_runs as tr_mod
+    from renar_backend import task_runs
+
+    def _exploding_session(*a, **kw):
+        raise RuntimeError("db is down")
+
+    monkeypatch.setattr(tr_mod, "SessionLocal", _exploding_session)
+    result = task_runs.list_runs()
+    assert result == {}
+
+
+def test_task_runs_state_falls_back_to_defaults_on_load_error(admin_enabled, monkeypatch):
+    """_state() logs and uses defaults when _load_state() raises and the
+    cache is empty — covers task_runs.py lines 155-158."""
+    import renar_backend.task_runs as tr_mod
+
+    # Expire the cache so _load_state() will be called
+    tr_mod._state_cache = None
+    tr_mod._state_cache_ts = 0.0
+
+    def _failing_load():
+        raise RuntimeError("db is down")
+
+    monkeypatch.setattr(tr_mod, "_load_state", _failing_load)
+    # Should not raise; falls back to defaults
+    result = tr_mod._state("episode_check")
+    assert result.enabled is True  # default
+
+
 # ---------- invite codes ----------
 
 
@@ -1022,3 +1110,470 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
         json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code_val},
     )
     assert r.status_code == 400
+
+
+# ---------- ban / unban ----------
+
+
+def test_admin_ban_user(client, admin_enabled, alice):
+    user, _ = alice
+    r = client.post(f"/admin/users/{user['id']}/ban", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.get(User, user["id"]).banned is True
+    finally:
+        db.close()
+
+
+def test_admin_ban_missing_user_not_found(client, admin_enabled):
+    assert client.post("/admin/users/9999/ban", auth=BASIC).status_code == 404
+
+
+def test_admin_unban_user(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).banned = True
+        db.commit()
+    finally:
+        db.close()
+    r = client.post(f"/admin/users/{user['id']}/unban", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.get(User, user["id"]).banned is False
+    finally:
+        db.close()
+
+
+def test_admin_unban_missing_user_not_found(client, admin_enabled):
+    assert client.post("/admin/users/9999/unban", auth=BASIC).status_code == 404
+
+
+# ---------- premium revoke 404 ----------
+
+
+def test_admin_revoke_premium_missing_user(client, admin_enabled):
+    assert client.post("/admin/users/9999/premium/revoke", auth=BASIC).status_code == 404
+
+
+# ---------- cancel deletion ----------
+
+
+def test_admin_cancel_deletion(client, admin_enabled, alice):
+    user, headers = alice
+    client.delete("/auth/me", headers=headers)
+    db = SessionLocal()
+    try:
+        assert db.get(User, user["id"]).deletion_requested_at is not None
+    finally:
+        db.close()
+    r = client.post(f"/admin/users/{user['id']}/cancel-deletion", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.get(User, user["id"]).deletion_requested_at is None
+    finally:
+        db.close()
+
+
+def test_admin_cancel_deletion_missing_user(client, admin_enabled):
+    assert client.post("/admin/users/9999/cancel-deletion", auth=BASIC).status_code == 404
+
+
+# ---------- reviewer whitelist ----------
+
+
+def test_admin_whitelist_review(client, admin_enabled, alice):
+    user, _ = alice
+    r = client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user["id"]).first() is not None
+    finally:
+        db.close()
+
+
+def test_admin_whitelist_review_missing_user(client, admin_enabled):
+    assert client.post("/admin/users/9999/whitelist-review", auth=BASIC).status_code == 404
+
+
+def test_admin_whitelist_review_already_whitelisted_noop(client, admin_enabled, alice):
+    """Second POST when user is already whitelisted must not error (skips the if body)."""
+    user, _ = alice
+    client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user["id"]).count() == 1
+    finally:
+        db.close()
+
+
+def test_admin_unwhitelist_review(client, admin_enabled, alice):
+    user, _ = alice
+    client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/unwhitelist-review", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user["id"]).first() is None
+    finally:
+        db.close()
+
+
+def test_admin_unwhitelist_review_missing_user(client, admin_enabled):
+    assert client.post("/admin/users/9999/unwhitelist-review", auth=BASIC).status_code == 404
+
+
+# ---------- verification ----------
+
+
+def test_admin_deny_verification(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).verification_requested = True
+        db.commit()
+    finally:
+        db.close()
+    r = client.post(f"/admin/users/{user['id']}/verify/deny", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.get(User, user["id"]).verification_requested is False
+    finally:
+        db.close()
+
+
+def test_admin_deny_verification_missing_user(client, admin_enabled):
+    assert client.post("/admin/users/9999/verify/deny", auth=BASIC).status_code == 404
+
+
+def test_admin_unverify_missing_user(client, admin_enabled):
+    assert client.post("/admin/users/9999/unverify", auth=BASIC).status_code == 404
+
+
+# ---------- reset login limit / onboarding ----------
+
+
+def test_admin_reset_login_limit(client, admin_enabled, alice):
+    user, _ = alice
+    r = client.post(f"/admin/users/{user['id']}/reset-login-limit", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+
+
+def test_admin_reset_login_limit_missing_user(client, admin_enabled):
+    assert client.post("/admin/users/9999/reset-login-limit", auth=BASIC).status_code == 404
+
+
+def test_admin_reset_onboarding(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).has_seen_welcome = True
+        db.commit()
+    finally:
+        db.close()
+    r = client.post(f"/admin/users/{user['id']}/reset-onboarding", auth=BASIC, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.get(User, user["id"]).has_seen_welcome is False
+    finally:
+        db.close()
+
+
+def test_admin_reset_onboarding_missing_user(client, admin_enabled):
+    assert client.post("/admin/users/9999/reset-onboarding", auth=BASIC).status_code == 404
+
+
+# ---------- user library ----------
+
+
+def test_admin_user_library_missing_user(client, admin_enabled):
+    assert client.get("/admin/users/9999/library", auth=BASIC).status_code == 404
+
+
+def test_admin_user_library_all_entries(client, admin_enabled, alice):
+    user, headers = alice
+    client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 949}, headers=headers)
+    r = client.get(f"/admin/users/{user['id']}/library", auth=BASIC)
+    assert r.status_code == 200
+    assert "Heat" in r.text
+    assert "all titles" in r.text
+
+
+def test_admin_user_library_filter_media_type(client, admin_enabled, alice):
+    user, headers = alice
+    client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 949}, headers=headers)
+    r = client.get(f"/admin/users/{user['id']}/library", params={"media_type": "film"}, auth=BASIC)
+    assert r.status_code == 200
+    assert "Heat" in r.text
+    assert "film" in r.text
+
+
+def test_admin_user_library_filter_status(client, admin_enabled, alice):
+    user, headers = alice
+    client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 949}, headers=headers)
+    r = client.get(f"/admin/users/{user['id']}/library", params={"status": "want_to_watch"}, auth=BASIC)
+    assert r.status_code == 200
+    assert "want to watch" in r.text
+
+
+# ---------- HTML helper: _pagination_nav ----------
+
+
+def test_pagination_nav_single_page_returns_empty():
+    from renar_backend.routers.admin.users import _pagination_nav
+
+    assert _pagination_nav(1, 1) == ""
+
+
+def test_pagination_nav_multi_page_shows_links():
+    from renar_backend.routers.admin.users import _pagination_nav
+
+    html = _pagination_nav(1, 3)
+    assert "Page 1 / 3" in html
+    assert "Next" in html
+    # page 1 → Prev is disabled (no href)
+    assert "Prev" in html
+    assert 'href="/admin/users?page=0"' not in html  # no page 0
+
+    html2 = _pagination_nav(2, 3)
+    assert "Page 2 / 3" in html2
+    assert 'href="/admin/users?page=1"' in html2  # active Prev
+    assert 'href="/admin/users?page=3"' in html2  # active Next
+
+    html3 = _pagination_nav(3, 3)
+    assert "Page 3 / 3" in html3
+    # last page → Next is disabled
+    assert 'href="/admin/users?page=4"' not in html3
+
+
+# ---------- HTML helper: premium/verified/reviewer state on detail page ----------
+
+
+def test_admin_user_detail_premium_forever_state(client, admin_enabled, alice):
+    user, _ = alice
+    client.post(f"/admin/users/{user['id']}/premium", data={"forever": "1"}, auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert r.status_code == 200
+    assert "Premium active forever" in r.text
+
+
+def test_admin_user_detail_premium_active_shows_revoke(client, admin_enabled, alice):
+    user, _ = alice
+    client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "Premium active until" in r.text
+    assert "Revoke premium" in r.text
+
+
+def test_admin_user_detail_premium_lapsed_shows_revoke(client, admin_enabled, alice):
+    user, _ = alice
+    from datetime import timedelta
+
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).premium_until = utcnow() - timedelta(days=1)
+        db.commit()
+    finally:
+        db.close()
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "Premium lapsed" in r.text
+    assert "Revoke premium" in r.text  # premium_until is set even when lapsed
+
+
+def test_admin_user_detail_verified_shows_revoke_and_badge(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).verified = True
+        db.commit()
+    finally:
+        db.close()
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "Revoke verified" in r.text
+    assert "xg-verified" in r.text  # _premium_pills verified badge SVG
+
+
+def test_admin_user_detail_verification_requested(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).verification_requested = True
+        db.commit()
+    finally:
+        db.close()
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "Approve verification" in r.text
+    assert "verification requested" in r.text  # _premium_pills pill text
+
+
+def test_admin_user_detail_premium_badge_shown(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).premium_until = utcnow() + timedelta(days=30)
+        db.commit()
+    finally:
+        db.close()
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "xg-premium" in r.text  # _premium_pills premium branch SVG
+
+
+def test_admin_user_detail_banned_shows_unban_action(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).banned = True
+        db.commit()
+    finally:
+        db.close()
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "Unban" in r.text
+    assert "banned" in r.text
+
+
+def test_admin_user_detail_pending_deletion_shown(client, admin_enabled, alice):
+    user, headers = alice
+    client.delete("/auth/me", headers=headers)
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "pending deletion" in r.text
+    assert "Cancel pending deletion" in r.text
+
+
+def test_admin_user_detail_reviewer_pill_and_action(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.add(ReviewWhitelist(user_id=user["id"]))
+        db.commit()
+    finally:
+        db.close()
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert "reviewer" in r.text
+    assert "Remove from reviewer whitelist" in r.text
+
+
+def _png_b64_small() -> str:
+    from PIL import Image as PILImage
+
+    img = PILImage.new("RGB", (32, 32), (100, 150, 200))
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return base64.b64encode(out.getvalue()).decode()
+
+
+def test_admin_user_detail_with_avatar(client, admin_enabled, alice):
+    user, headers = alice
+    client.patch("/auth/profile", json={"avatar_b64": _png_b64_small()}, headers=headers)
+    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    assert '<img class="detail-avatar"' in r.text
+
+
+# ---------- user list: banned + comments + avatar branches ----------
+
+
+def test_admin_user_list_banned_shows_unban_button(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).banned = True
+        db.commit()
+    finally:
+        db.close()
+    r = client.get("/admin/users", auth=BASIC)
+    assert "Unban" in r.text
+    assert "banned" in r.text
+
+
+def test_admin_user_list_comments_link_rendered(client, admin_enabled, alice):
+    _, headers = alice
+    client.post("/comments", json={"media_type": "film", "title": "Heat", "text": "solid"}, headers=headers)
+    r = client.get("/admin/users", auth=BASIC)
+    assert "/admin/comments?user_id=" in r.text
+
+
+def test_admin_user_list_with_avatar(client, admin_enabled, alice):
+    user, headers = alice
+    client.patch("/auth/profile", json={"avatar_b64": _png_b64_small()}, headers=headers)
+    r = client.get("/admin/users", auth=BASIC)
+    assert '<img class="avatar"' in r.text
+
+
+def test_admin_user_list_unconfirmed_email_class(client, admin_enabled, alice):
+    user, _ = alice
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).email_confirmed = False
+        db.commit()
+    finally:
+        db.close()
+    r = client.get("/admin/users", auth=BASIC)
+    assert "email-unconfirmed" in r.text
+
+
+# ---------- admin premium feature page ----------
+
+
+def test_admin_premium_page_renders(client, admin_enabled):
+    r = client.get("/admin/premium", auth=BASIC)
+    assert r.status_code == 200
+    assert "Premium Features" in r.text
+    assert "Profile style" in r.text
+    assert "Paid themes" in r.text
+
+
+def test_admin_premium_page_requires_auth(client, admin_enabled):
+    assert client.get("/admin/premium").status_code == 401
+
+
+def test_admin_premium_toggle_feature_persists(client, admin_enabled):
+    r = client.post(
+        "/admin/premium/toggle",
+        data={"feature": "themes", "value": "0"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        ss = db.get(SiteSettings, 1)
+        assert ss.premium_themes_enabled is False
+    finally:
+        db.close()
+
+
+def test_admin_premium_toggle_enables_feature(client, admin_enabled):
+    # first disable
+    client.post("/admin/premium/toggle", data={"feature": "ranking", "value": "0"}, auth=BASIC)
+    # then re-enable
+    r = client.post(
+        "/admin/premium/toggle",
+        data={"feature": "ranking", "value": "1"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    db = SessionLocal()
+    try:
+        ss = db.get(SiteSettings, 1)
+        assert ss.premium_ranking_enabled is True
+    finally:
+        db.close()
+
+
+def test_admin_premium_toggle_unknown_feature_redirects(client, admin_enabled):
+    """Unknown feature hits the early-return branch (line 271) without touching DB."""
+    r = client.post(
+        "/admin/premium/toggle",
+        data={"feature": "not_a_real_feature", "value": "1"},
+        auth=BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303

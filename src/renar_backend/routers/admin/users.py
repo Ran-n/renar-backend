@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/08/27 09:52:22.083918
+Revised: 2026/09/02 10:57:10.428481
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from fastapi import APIRouter, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...database import get_db
@@ -1023,7 +1024,10 @@ def whitelist_review(
         raise HTTPException(status_code=404, detail="User not found")
     if not db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user_id).first():
         db.add(ReviewWhitelist(user_id=user_id))
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()  # double-submit race — already whitelisted
     _log.info("admin=%s added user id=%s username=%s to reviewer whitelist", admin_user, user_id, user.username)
     return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
 

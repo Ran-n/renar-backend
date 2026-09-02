@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/09 14:29:25.931212
-Revised: 2026/08/24 14:06:08.848940
+Revised: 2026/09/02 10:57:48.628828
 
 TV Time import reconciliation: merging into titles the user already tracks
 (manually or from a prior import), instead of skipping them outright.
@@ -1275,3 +1275,121 @@ def test_import_lists_dead_uuid_is_skipped_not_error(client, alice, monkeypatch)
     # The List row itself is still created (we discovered dead uuid while processing items)
     assert _list_count(user["id"]) == 1
     assert _list_item_count(user["id"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# try_start_job / finish_user — per-user concurrent-submit race guard
+# ---------------------------------------------------------------------------
+
+
+def test_try_start_job_claims_slot_for_new_user():
+    """First call for a user_id succeeds and marks them active."""
+    uid = 99991
+    imports_mod._active_users.discard(uid)  # ensure clean state
+    try:
+        ok = imports_mod.try_start_job(uid)
+        assert ok, "first try_start_job should succeed"
+        assert uid in imports_mod._active_users
+    finally:
+        imports_mod.finish_user(uid)
+
+
+def test_try_start_job_blocks_second_concurrent_call():
+    """A second try_start_job for the same user_id while one is in flight
+    must return False — this is the race guard added in pass 8."""
+    uid = 99992
+    imports_mod._active_users.discard(uid)
+    try:
+        first = imports_mod.try_start_job(uid)
+        assert first, "first call must succeed"
+        second = imports_mod.try_start_job(uid)
+        assert not second, "concurrent second call must be rejected"
+        # only one active slot taken
+        assert uid in imports_mod._active_users
+    finally:
+        imports_mod.finish_user(uid)
+
+
+def test_finish_user_releases_slot_so_next_import_can_proceed():
+    """After finish_user the slot is free and try_start_job succeeds again."""
+    uid = 99993
+    imports_mod._active_users.discard(uid)
+    imports_mod.try_start_job(uid)
+    imports_mod.finish_user(uid)
+    assert uid not in imports_mod._active_users
+    ok = imports_mod.try_start_job(uid)
+    assert ok, "try_start_job after finish_user must succeed"
+    imports_mod.finish_user(uid)  # cleanup
+
+
+# ---------- import_data router edge-cases ----------
+
+
+def test_import_rejects_upload_when_semaphore_exhausted(client, alice, monkeypatch):
+    """POST /import returns 429 when the upload semaphore is exhausted —
+    covers imports.py line 97."""
+    from renar_backend.routers import imports as router_mod
+
+    _, headers = alice
+    # Drain all upload slots
+    for _ in range(router_mod.MAX_CONCURRENT_UPLOADS):
+        router_mod._upload_slots.acquire()
+    try:
+        data = _build_zip()
+        r = client.post("/import", files={"file": ("export.zip", data, "application/zip")}, headers=headers)
+        assert r.status_code == 429
+    finally:
+        for _ in range(router_mod.MAX_CONCURRENT_UPLOADS):
+            router_mod._upload_slots.release()
+
+
+def test_import_rejects_oversized_upload(client, alice, monkeypatch):
+    """POST /import returns 413 when the uploaded file exceeds MAX_UPLOAD_BYTES —
+    covers imports.py line 104."""
+    from renar_backend.routers import imports as router_mod
+
+    _, headers = alice
+    monkeypatch.setattr(router_mod, "MAX_UPLOAD_BYTES", 1)  # make any file "too large"
+    data = _build_zip()
+    r = client.post("/import", files={"file": ("export.zip", data, "application/zip")}, headers=headers)
+    assert r.status_code == 413
+
+
+def test_import_rejects_when_importer_slot_exhausted(client, alice, monkeypatch):
+    """POST /import returns 429 when the importer's own concurrency slot is
+    full — covers imports.py line 121."""
+    _, headers = alice
+    monkeypatch.setattr(imports_mod, "acquire_slot", lambda: False)
+    data = _build_zip()
+    r = client.post("/import", files={"file": ("export.zip", data, "application/zip")}, headers=headers)
+    assert r.status_code == 429
+
+
+def test_import_rejects_concurrent_duplicate_start(client, alice, monkeypatch):
+    """POST /import returns 409 when try_start_job loses the race —
+    covers imports.py lines 129-130."""
+    _, headers = alice
+    monkeypatch.setattr(imports_mod, "acquire_slot", lambda: True)
+    monkeypatch.setattr(imports_mod, "try_start_job", lambda uid: False)
+    data = _build_zip()
+    r = client.post("/import", files={"file": ("export.zip", data, "application/zip")}, headers=headers)
+    assert r.status_code == 409
+
+
+def test_import_status_interrupted_job_reports_restart_error(client, alice):
+    """GET /import/status returns an "interrupted" message for a job stuck
+    with finished=False — covers imports.py lines 173-183."""
+    from renar_backend.database import SessionLocal
+    from renar_backend.models import ImportJob
+
+    user, headers = alice
+    with SessionLocal() as db:
+        job = ImportJob(user_id=user["id"], kind="tvtime", finished=False)
+        db.add(job)
+        db.commit()
+
+    r = client.get("/import/status", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["finished"] is True
+    assert "interrupted" in (body.get("error") or "").lower() or "restart" in (body.get("error") or "").lower()

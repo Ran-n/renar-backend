@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/07/27 10:44:15.615104
+Revised: 2026/09/02 10:57:10.695196
 
 One upload endpoint, many import origins: POST /import takes whatever file
 the user picked, auto-detects which registered importer it belongs to (by
@@ -122,12 +122,18 @@ async def import_data(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many imports running right now. Please try again shortly.",
         )
-    importer.start_job(user.id)
+    # Atomic check-and-set: if a concurrent request for the same user won the
+    # race between is_running (above) and here, try_start_job returns False
+    # and we release the slot rather than launching a duplicate thread.
+    if not importer.try_start_job(user.id):
+        importer.release_slot()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An import is already running")
 
     def _run():
         try:
             importer.run(user.id, data)
         finally:
+            importer.finish_user(user.id)
             importer.release_slot()
 
     threading.Thread(target=_run, daemon=True).start()

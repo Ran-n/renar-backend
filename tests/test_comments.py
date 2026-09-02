@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.125706
-Revised: 2026/08/27 09:52:22.273324
+Revised: 2026/09/02 10:57:39.269950
 
 Comments on titles: create, list, like/unlike, delete, replies, reports.
 """
@@ -326,6 +326,165 @@ def test_report_own_comment_rejected(client, alice):
 def test_report_missing_comment_not_found(client, alice):
     _, headers = alice
     assert client.post("/comments/9999/report", headers=headers).status_code == 404
+
+
+def test_list_comments_unknown_title_returns_empty(client, alice):
+    """GET /comments for an unseen title returns [] without error —
+    covers comments.py list_comments line 128 (target is None)."""
+    _, headers = alice
+    r = client.get("/comments", params={"media_type": "film", "tmdb_id": 88888, "title": "NoSuchFilm"}, headers=headers)
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_reply_nesting_limit_rejected(client, alice, bob):
+    """Replying past MAX_REPLY_DEPTH (8) returns 422 —
+    covers comments.py line 179."""
+    _, alice_headers = alice
+    _, bob_headers = bob
+    # Build a chain of 8 levels (root + 7 replies) then try to add one more
+    current = _post_comment(client, alice_headers, text="level0")
+    headers_cycle = [bob_headers, alice_headers]
+    for i in range(7):  # creates levels 1-7
+        current = _post_comment(client, headers_cycle[i % 2], parent_id=current["id"], text=f"level{i + 1}")
+    # current is now at depth 7; trying to reply would make depth 8 >= MAX_REPLY_DEPTH
+    r = client.post(
+        "/comments",
+        json={"media_type": "film", "tmdb_id": 949, "title": "Heat", "text": "too deep", "parent_id": current["id"]},
+        headers=alice_headers,
+    )
+    assert r.status_code == 422
+    assert "nesting" in r.json()["detail"].lower() or "limit" in r.json()["detail"].lower()
+
+
+def test_like_concurrent_integrity_error_is_noop(client, alice, bob, monkeypatch):
+    """An IntegrityError in _set_reaction (concurrent like) is silently swallowed —
+    covers comments.py lines 239-241."""
+    from sqlalchemy.exc import IntegrityError as SAIntegrityError
+    from sqlalchemy.orm import Session
+
+    _, alice_headers = alice
+    _, bob_headers = bob
+    comment = _post_comment(client, alice_headers)
+
+    call_count = [0]
+    original_commit = Session.commit
+
+    def patched_commit(self):
+        from renar_backend.models import CommentLike
+
+        new_likes = [obj for obj in self.new if isinstance(obj, CommentLike)]
+        if new_likes and call_count[0] == 0:
+            call_count[0] += 1
+            self.rollback()
+            raise SAIntegrityError("INSERT INTO comment_likes", {}, Exception("unique violation"))
+        return original_commit(self)
+
+    monkeypatch.setattr(Session, "commit", patched_commit)
+    r = client.post(f"/comments/{comment['id']}/like", headers=bob_headers)
+    # Must return 204 (no-op), not 500
+    assert r.status_code == 204
+
+
+def test_report_concurrent_integrity_error_is_noop(client, alice, bob, monkeypatch):
+    """An IntegrityError in report_comment (concurrent report) is silently swallowed —
+    covers comments.py lines 313-315."""
+    from sqlalchemy.exc import IntegrityError as SAIntegrityError
+    from sqlalchemy.orm import Session
+
+    _, alice_headers = alice
+    _, bob_headers = bob
+    comment = _post_comment(client, alice_headers)
+
+    call_count = [0]
+    original_commit = Session.commit
+
+    def patched_commit(self):
+        from renar_backend.models import CommentReport
+
+        new_reports = [obj for obj in self.new if isinstance(obj, CommentReport)]
+        if new_reports and call_count[0] == 0:
+            call_count[0] += 1
+            self.rollback()
+            raise SAIntegrityError("INSERT INTO comment_reports", {}, Exception("unique violation"))
+        return original_commit(self)
+
+    monkeypatch.setattr(Session, "commit", patched_commit)
+    r = client.post(f"/comments/{comment['id']}/report", headers=bob_headers)
+    # Must return 204 (no-op), not 500
+    assert r.status_code == 204
+
+
+def test_build_watch_info_episode_branch_with_library_entry(client, alice):
+    """_build_watch_info hits the episode-scoped branch (lines 53-64) when
+    the commenter has a library entry for the title and episode is not None."""
+    from renar_backend.catalog.titles import find_or_create_title
+    from renar_backend.database import SessionLocal
+    from renar_backend.models import EpisodeWatch, LibraryEntry, MediaType
+
+    user, headers = alice
+
+    # Post an episode-scoped comment first (creates the Title row)
+    _post_comment(client, headers, media_type="tv_show", season=1, episode=3, text="great ep")
+
+    # Create LibraryEntry + EpisodeWatch directly so we can control the data
+    with SessionLocal() as db:
+        title = find_or_create_title(db, MediaType.tv_show, 949, "Heat")
+        # Ensure a LibraryEntry exists for alice
+        entry = db.query(LibraryEntry).filter_by(user_id=user["id"], title_id=title.id).first()
+        if entry is None:
+            entry = LibraryEntry(user_id=user["id"], title_id=title.id)
+            db.add(entry)
+            db.flush()
+        # Add an EpisodeWatch for season 1, episode 3
+        existing_watch = db.query(EpisodeWatch).filter_by(media_item_id=entry.id, season=1, episode=3).first()
+        if existing_watch is None:
+            db.add(EpisodeWatch(media_item_id=entry.id, season=1, episode=3))
+        db.commit()
+
+    # List episode-scoped comments — _build_watch_info is called with episode=3
+    r = client.get(
+        "/comments",
+        params={"media_type": "tv_show", "tmdb_id": 949, "season": 1, "episode": 3},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    comments = r.json()
+    assert len(comments) == 1
+    # The commenter has watched the episode, so seen_by_author must be True
+    assert comments[0]["seen_by_author"] is True
+
+
+def test_load_thread_empty_root_ids(client):
+    """load_thread([]) returns ({}, {}) immediately — covers comment_threads.py line 75."""
+    from renar_backend.database import SessionLocal
+    from renar_backend.social.comment_threads import load_thread
+
+    with SessionLocal() as db:
+        result = load_thread(db, [])
+    assert result == ({}, {})
+
+
+def test_resolve_root_scope_broken_thread_raises(client, alice):
+    """resolve_root_scope raises RuntimeError when a reply has no ancestor with
+    title_id — covers comment_threads.py line 58."""
+    from renar_backend.database import SessionLocal
+    from renar_backend.models import Comment
+    from renar_backend.social.comment_threads import resolve_root_scope
+
+    user, _headers = alice
+    with SessionLocal() as db:
+        # Insert a reply with no parent and no title_id (data-corruption scenario)
+        orphan_reply = Comment(
+            user_id=user["id"], title_id=None, parent_id=None, season=None, episode=None, text="broken reply"
+        )
+        db.add(orphan_reply)
+        db.flush()
+        import pytest as _pytest
+
+        with _pytest.raises(RuntimeError, match="no root with a title_id"):
+            resolve_root_scope(db, orphan_reply)
+        db.rollback()  # don't persist the broken row
 
 
 def test_delete_reported_comment_removes_reports(client, alice, bob):

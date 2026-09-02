@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.607537
-Revised: 2026/08/25 14:05:14.372218
+Revised: 2026/09/02 10:58:04.647045
 
 Premium accounts: badge derivation, style colors, verification requests,
 custom posters (upload + GC) and the admin grant/revoke/verify actions.
@@ -17,7 +17,7 @@ from conftest import ADMIN_BASIC as BASIC
 from PIL import Image as PILImage
 
 from renar_backend.database import SessionLocal
-from renar_backend.models import Image, Title, User, utcnow
+from renar_backend.models import Image, SiteSettings, Title, User, utcnow
 from renar_backend.users.premium import PALETTE
 
 pytestmark = pytest.mark.regression
@@ -605,6 +605,23 @@ def test_tmdb_posters_unconfigured_returns_503(client, alice):
     assert r.status_code == 503  # no TMDB_API_KEY in the test env
 
 
+# ---------- /images/{hash} endpoint (routers/images.py) ----------
+
+
+def test_image_invalid_hash_format_returns_404(client):
+    """A hash that's not 64 hex chars must return 404 — covers images.py
+    HASH_RE.match check (line 27)."""
+    assert client.get("/images/not-a-hex-hash").status_code == 404
+    assert client.get("/images/abc123").status_code == 404
+
+
+def test_image_valid_hash_but_missing_file_returns_404(client):
+    """A properly-formatted 64-char hex hash for a file that doesn't exist
+    returns 404 — covers images.py path.is_file() check (line 30)."""
+    missing_hash = "a" * 64
+    assert client.get(f"/images/{missing_hash}").status_code == 404
+
+
 # ---------- admin actions ----------
 
 
@@ -700,3 +717,92 @@ def test_admin_verify_and_unverify(client, admin_enabled, alice):
 def test_admin_premium_actions_missing_user_not_found(client, admin_enabled):
     assert client.post("/admin/users/9999/premium", data={"days": "30"}, auth=BASIC).status_code == 404
     assert client.post("/admin/users/9999/verify", auth=BASIC).status_code == 404
+
+
+# ---------- feature-disabled kill-switch paths ----------
+
+
+def _disable_feature(feature: str) -> None:
+    db = SessionLocal()
+    try:
+        row = db.get(SiteSettings, 1)
+        if row is None:
+            row = SiteSettings(id=1)
+            db.add(row)
+        setattr(row, f"premium_{feature}_enabled", False)
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_style_update_rejected_when_feature_disabled(client, alice, monkeypatch):
+    """When the admin has disabled the 'style' feature, PATCH /premium/style
+    returns 403 even for premium users — covers routers/premium.py line 43."""
+    from renar_backend import site_settings as ss_mod
+
+    user, headers = alice
+    _set_premium(user["id"])
+    _disable_feature("style")
+    ss_mod.invalidate()
+
+    r = client.patch("/premium/style", json={"ring_color": COLOR}, headers=headers)
+    assert r.status_code == 403
+    assert "disabled" in r.json()["detail"].lower()
+
+
+def test_style_update_no_event_when_no_fields_sent(client, alice):
+    """An empty PATCH body means model_dump(exclude_unset=True) returns {}, so
+    `changes` stays empty throughout and publish_event is NOT called — covers
+    routers/premium.py's `if changes:` False branch."""
+    import asyncio
+
+    from renar_backend import events
+
+    user, headers = alice
+    _set_premium(user["id"])
+
+    queue = events.subscribe(user["id"])
+    try:
+        r = client.patch("/premium/style", json={}, headers=headers)
+        assert r.status_code == 200
+        # No event should have been published (changes was empty)
+        try:
+            queue.get_nowait()
+            raise AssertionError("no event should have been published")
+        except asyncio.QueueEmpty:
+            pass
+    finally:
+        events.unsubscribe(user["id"], queue)
+
+
+def test_verification_request_rejected_when_feature_disabled(client, alice):
+    """When the admin has disabled the 'verification' feature, POST
+    /premium/verification-request returns 403 — covers line 83."""
+    from renar_backend import site_settings as ss_mod
+
+    user, headers = alice
+    _set_premium(user["id"])
+    _disable_feature("verification")
+    ss_mod.invalidate()
+
+    r = client.post("/premium/verification-request", headers=headers)
+    assert r.status_code == 403
+    assert "disabled" in r.json()["detail"].lower()
+
+
+def test_premium_style_countdown_colors_null_clears_all(client, alice):
+    """PATCH with countdown_colors=null passes validator returning None (line 258)."""
+    user, headers = alice
+    _set_premium(user["id"])
+    client.patch("/premium/style", json={"countdown_colors": {"urgent": COLOR}}, headers=headers)
+    r = client.patch("/premium/style", json={"countdown_colors": None}, headers=headers)
+    assert r.status_code == 200
+
+
+def test_premium_style_status_colors_null_clears_all(client, alice):
+    """PATCH with status_colors=null passes validator returning None (line 270 in schemas.py)."""
+    user, headers = alice
+    _set_premium(user["id"])
+    client.patch("/premium/style", json={"status_colors": {"watching": COLOR}}, headers=headers)
+    r = client.patch("/premium/style", json={"status_colors": None}, headers=headers)
+    assert r.status_code == 200

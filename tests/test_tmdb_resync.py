@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/18 22:40:40.143841
-Revised: 2026/08/26 08:54:18.227430
+Revised: 2026/09/02 10:58:25.351344
 
 resync_tmdb_metadata is the only background job that revisits a tracked
 title regardless of watch status — check_new_episodes/check_upcoming_films
@@ -108,5 +108,29 @@ def test_resync_skips_untracked_title(client, alice):
 
         n = resync_tmdb_metadata(db, fetch_show=fail_if_called, fetch_film=fail_if_called, pace_seconds=0)
         assert n == 0
+    finally:
+        db.close()
+
+
+def test_resync_sleeps_between_titles_when_pace_nonzero(client, alice, monkeypatch):
+    """pace_seconds > 0 must call time.sleep once per refreshed title."""
+    _, headers = alice
+    _add(client, headers, media_type="tv_show", title="Dark", tmdb_id=70523, status="watching")
+
+    import time as _time
+
+    slept = []
+    monkeypatch.setattr(_time, "sleep", lambda s: slept.append(s))
+
+    db = SessionLocal()
+    try:
+        n = resync_tmdb_metadata(
+            db,
+            fetch_show=_fake_fetch("/poster.jpg"),
+            fetch_film=_fake_fetch("/unused.jpg"),
+            pace_seconds=0.05,
+        )
+        assert n == 1
+        assert slept == [0.05]
     finally:
         db.close()
