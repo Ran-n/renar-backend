@@ -18,6 +18,7 @@ task that dies once must not stop running forever).
 """
 
 import asyncio
+from contextlib import suppress
 
 import pytest
 
@@ -116,9 +117,113 @@ def test_start_periodic_tasks_launches_all_eight_loops(monkeypatch):
             for t in tasks:
                 t.cancel()
             for t in tasks:
-                try:
+                with suppress(asyncio.CancelledError):
                     await t
-                except asyncio.CancelledError:
-                    pass
 
     asyncio.run(_drive())
+
+
+# ---------------------------------------------------------------------------
+# fetch_show / fetch_film module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_show_delegates_to_tmdb_get(monkeypatch):
+    monkeypatch.setattr(notifier, "tmdb_get", lambda path: {"id": 1, "name": "Dark"})
+    assert notifier.fetch_show(70523) == {"id": 1, "name": "Dark"}
+
+
+def test_fetch_film_delegates_to_tmdb_get(monkeypatch):
+    monkeypatch.setattr(notifier, "tmdb_get", lambda path: {"id": 2, "title": "Dune"})
+    assert notifier.fetch_film(438631) == {"id": 2, "title": "Dune"}
+
+
+# ---------------------------------------------------------------------------
+# *_once() wrapper functions — each opens a real SessionLocal and delegates
+# ---------------------------------------------------------------------------
+
+
+def test_check_once_with_empty_db():
+    """check_once() must open a session, run check_new_episodes, and return 0
+    for an empty library."""
+    assert notifier.check_once() == 0
+
+
+def test_check_films_once_with_empty_db():
+    assert notifier.check_films_once() == 0
+
+
+def test_sync_episode_history_once_with_empty_db():
+    assert notifier.sync_episode_history_once() == 0
+
+
+def test_resync_tmdb_metadata_once_with_empty_db():
+    assert notifier.resync_tmdb_metadata_once() == 0
+
+
+def test_retry_unmatched_titles_once_with_empty_db():
+    """With no unmatched titles, retry_unmatched_titles_once returns 0.
+    Also exercises the lazy import of tvtime_import search helpers
+    (lines 292–299) that only runs when no stubs are provided."""
+    assert notifier.retry_unmatched_titles_once() == 0
+
+
+def test_cleanup_unconfirmed_accounts_once_with_empty_db():
+    assert notifier.cleanup_unconfirmed_accounts_once() == 0
+
+
+def test_purge_expired_exports_once_with_empty_db():
+    assert notifier.purge_expired_exports_once() == 0
+
+
+# ---------------------------------------------------------------------------
+# sync_episode_history: happy-path and exception-path
+# ---------------------------------------------------------------------------
+
+
+def test_sync_episode_history_calls_sync_show_episodes_per_tracked_show(client, alice, monkeypatch):
+    _, headers = alice
+    client.post(
+        "/media",
+        json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 70523, "status": "watching"},
+        headers=headers,
+    )
+
+    from renar_backend.database import SessionLocal
+
+    calls = []
+    monkeypatch.setattr(notifier, "sync_show_episodes", lambda db, title: calls.append(title.id))
+
+    db = SessionLocal()
+    try:
+        n = notifier.sync_episode_history(db)
+    finally:
+        db.close()
+
+    assert n == 1
+    assert len(calls) == 1
+
+
+def test_sync_episode_history_catches_exception_and_returns_count(client, alice, monkeypatch):
+    _, headers = alice
+    client.post(
+        "/media",
+        json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 70523, "status": "watching"},
+        headers=headers,
+    )
+
+    from renar_backend.database import SessionLocal
+
+    def boom(db, title):
+        raise RuntimeError("TMDB down")
+
+    monkeypatch.setattr(notifier, "sync_show_episodes", boom)
+
+    db = SessionLocal()
+    try:
+        n = notifier.sync_episode_history(db)
+    finally:
+        db.close()
+
+    # exception must be caught; len(titles) still returned
+    assert n == 1

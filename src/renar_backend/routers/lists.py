@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:36:14.018888
-Revised: 2026/08/24 12:36:14.018888
+Revised: 2026/09/02 10:57:10.784995
 
 Custom lists: user-made collections of titles, independent of LibraryEntry's
 own tracking status. See models.py's List/ListItem docstrings.
@@ -11,6 +11,7 @@ own tracking status. See models.py's List/ListItem docstrings.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from ..catalog.titles import find_or_create_title, find_title
@@ -135,7 +136,11 @@ def add_list_item(
     next_position = (max((item.position for item in lst.items), default=-1)) + 1
     item = ListItem(list_id=lst.id, title_id=target.id, position=next_position)
     db.add(item)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Title already in this list") from None
     db.refresh(item)
     return _item_out(item)
 

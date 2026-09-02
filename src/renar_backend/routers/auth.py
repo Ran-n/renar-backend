@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/08/27 09:56:07.498353
+Revised: 2026/09/02 10:57:10.517026
 """
 
 import html
@@ -13,6 +13,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Re
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -262,7 +263,16 @@ def register(data: UserCreate, request: Request, background_tasks: BackgroundTas
     if invite is not None:
         invite.uses += 1
         invite.last_used_at = utcnow()
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # Two registrations with the same username/email raced past the SELECT
+        # check above — treat identically to the pre-commit duplicate check.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username or email already taken",
+        ) from None
     db.refresh(user)
     if invite is not None:
         _log.info(

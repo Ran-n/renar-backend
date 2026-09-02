@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 18:10:00.000000
-Revised: 2026/08/03 11:14:16.764873
+Revised: 2026/09/02 10:58:34.701773
 
 /upcoming reads next-episode/release-date data straight off Title (synced
 by the background pollers) instead of hitting TMDB on the request path;
@@ -13,10 +13,11 @@ import base64
 import io
 from datetime import date, timedelta
 
+from fastapi import HTTPException
 from PIL import Image as PILImage
 
 from renar_backend.database import SessionLocal
-from renar_backend.models import User, utcnow
+from renar_backend.models import Title, User, utcnow
 from renar_backend.social.notifier import check_upcoming_films
 
 
@@ -216,5 +217,22 @@ def test_film_checker_survives_fetch_failure(client, alice):
     db = SessionLocal()
     try:
         assert check_upcoming_films(db, fetch=broken_fetch) == 0
+    finally:
+        db.close()
+
+
+def test_film_checker_delinks_dead_tmdb_id_on_404(client, alice):
+    """A 404 from TMDB clears the tmdb_id so re-matching can pick it up."""
+    _, headers = alice
+    _add(client, headers, media_type="film", title="Dune Part Three", tmdb_id=999, status="want_to_watch")
+
+    def not_found_fetch(tmdb_id: int) -> dict:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    db = SessionLocal()
+    try:
+        assert check_upcoming_films(db, fetch=not_found_fetch) == 0
+        title = db.query(Title).filter_by(title="Dune Part Three").one()
+        assert title.tmdb_id is None
     finally:
         db.close()

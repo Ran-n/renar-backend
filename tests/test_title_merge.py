@@ -2,14 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/19 19:11:30.977386
-Revised: 2026/08/19 19:11:30.977386
-"""
-
-#!/usr/bin/env python3
-"""
-Authors: Ran# <ran.hash@proton.me>
-Created: 2026/08/19 00:00:00.000000
-Revised: 2026/08/19 00:00:00.000000
+Revised: 2026/09/02 10:58:18.793037
 
 merge_titles folds a duplicate, still-unmatched Title into the Title that
 already holds the tmdb_id/tvdb_id it was about to claim (see

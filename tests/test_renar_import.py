@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/08/25 16:09:52.366178
+Revised: 2026/09/02 10:58:06.951269
 
 Import a Renar export (.7z) back into an account: the round trip half of
 GDPR Art. 20 that users/export.py builds, exercised end-to-end through the
@@ -426,3 +426,375 @@ def test_claimed_kind_match_proceeds(client, alice):
 def _register_and_login(client, username: str) -> dict:
     register(client, username)
     return login(client, username)
+
+
+def _full_7z(*, profile=None, library=None, comments=None, social=None) -> bytes:
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as zf:
+        zf.writestr(json.dumps(profile or {}), "profile.json")
+        if library is not None:
+            zf.writestr(json.dumps(library), "library.json")
+        if comments is not None:
+            zf.writestr(json.dumps(comments), "comments.json")
+        if social is not None:
+            zf.writestr(json.dumps(social), "social.json")
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — pure functions, no DB needed
+# ---------------------------------------------------------------------------
+
+
+def test_parse_iso_handles_none_empty_and_invalid():
+    from renar_backend.users.renar_import import _parse_iso
+
+    assert _parse_iso(None) is None
+    assert _parse_iso("") is None
+    assert _parse_iso("not-a-date") is None
+    dt = _parse_iso("2025-01-15T10:00:00+00:00")
+    assert dt is not None
+
+
+def test_reconcile_library_entry_fills_rating_and_notes():
+    from unittest.mock import MagicMock
+
+    from renar_backend.users.renar_import import _reconcile_library_entry
+
+    entry = MagicMock()
+    entry.is_favorite = False
+    entry.rating = None
+    entry.notes = None
+
+    changed = _reconcile_library_entry(entry, {"rating": 80, "notes": "great", "is_favorite": True})
+    assert changed is True
+    assert entry.rating == 80
+    assert entry.notes == "great"
+    assert entry.is_favorite is True
+
+
+def test_try_start_job_returns_false_when_already_active():
+    from renar_backend.users import renar_import
+
+    user_id = 9_000_001
+    renar_import._active_users.add(user_id)
+    try:
+        assert renar_import.try_start_job(user_id) is False
+    finally:
+        renar_import._active_users.discard(user_id)
+        renar_import._progress.pop(user_id, None)
+
+
+def test_read_json_returns_empty_for_missing_file():
+    import tempfile
+    from pathlib import Path
+
+    from renar_backend.users.renar_import import _read_json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        assert _read_json(Path(tmp), "nonexistent.json") == {}
+
+
+def test_mark_job_db_exception_does_not_raise(monkeypatch):
+    from renar_backend.users import renar_import
+
+    class _FailDB:
+        def get(self, *a, **kw):
+            raise RuntimeError("injected DB failure")
+
+        def add(self, *a):
+            pass
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(renar_import, "SessionLocal", lambda: _FailDB())
+    # Must not propagate — exception is caught and logged
+    renar_import._mark_job(9_000_002, finished=True, error=None, summary=None)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — library edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_import_skips_invalid_media_type_and_status(client, alice):
+    _, headers = alice
+    rows = [
+        {"media_type": "alien_type", "title": "Bad", "tmdb_id": 1, "status": "watching"},
+        {"media_type": "tv_show", "title": "Also Bad", "tmdb_id": 2, "status": "INVALID_STATUS"},
+    ]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _library_7z(rows), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["error"] is None
+    assert body["summary"]["library_skipped"] == 2
+
+
+def test_import_progress_counter_fires_at_50_rows(client, alice):
+    """_import_library calls _set(done=n) every 50 rows (line 274)."""
+    _, headers = alice
+    rows = [{"media_type": "film", "title": f"Film{i}", "status": "completed"} for i in range(55)]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _library_7z(rows), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["error"] is None
+    assert body["summary"]["library_entries"] == 55
+
+
+def test_import_library_no_tmdb_id_in_existing_map(client, alice):
+    """An existing library entry without a tmdb_id must still be dedup'd by title_key
+    (covers the False branch of `if t.tmdb_id:` in the existing_map build loop)."""
+    _, headers = alice
+    # Add an entry without tmdb_id via the regular API first
+    client.post(
+        "/media",
+        json={"media_type": "film", "title": "NoTmdbFilm", "status": "completed"},
+        headers=headers,
+    ).raise_for_status()
+    # Re-import that same title — reconcile path, not new-entry path
+    rows = [{"media_type": "film", "title": "NoTmdbFilm", "status": "completed", "rating": 75}]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _library_7z(rows), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["error"] is None
+    # Reconciled, not new
+    assert body["summary"]["library_entries"] == 0
+
+
+def test_import_deduplicates_episode_watches_and_skips_none_key(client, alice):
+    """Duplicate watch entries in the archive are only inserted once;
+    watches with a None season/episode key are skipped."""
+    _, headers = alice
+    rows = [
+        {
+            "media_type": "tv_show",
+            "title": "Probe",
+            "tmdb_id": 9_000_900,
+            "status": "watching",
+            "episode_watches": [
+                {"season": 1, "episode": 1},
+                {"season": 1, "episode": 1},  # duplicate
+                {"season": None, "episode": 1},  # None key → skip
+                {"season": 1, "episode": None},  # None key → skip
+            ],
+        }
+    ]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _library_7z(rows), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["error"] is None
+    assert body["summary"]["episodes"] == 1
+
+
+def test_import_autocompletes_when_all_episodes_watched(client, alice):
+    """_sync_progress sets status=completed when episodes_watched >= total_episodes."""
+    _, headers = alice
+    entry = client.post(
+        "/media",
+        json={"media_type": "tv_show", "title": "Miniseries", "tmdb_id": 9_000_800, "status": "watching"},
+        headers=headers,
+    ).json()
+
+    from renar_backend.database import SessionLocal
+    from renar_backend.models import LibraryEntry
+
+    db = SessionLocal()
+    try:
+        lib = db.get(LibraryEntry, entry["id"])
+        lib.title_ref.total_episodes = 1  # total_episodes is on Title, not LibraryEntry
+        db.commit()
+    finally:
+        db.close()
+
+    rows = [
+        {
+            "media_type": "tv_show",
+            "title": "Miniseries",
+            "tmdb_id": 9_000_800,
+            "status": "watching",
+            "episode_watches": [{"season": 1, "episode": 1}],
+        }
+    ]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _library_7z(rows), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["error"] is None
+    final = client.get(f"/media/{entry['id']}", headers=headers).json()
+    assert final["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — comments edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_import_comments_skips_incomplete_rows(client, alice):
+    _, headers = alice
+    comments = [
+        {"id": 1, "media_type": None, "title": "X", "text": "hi", "parent_id": None},
+        {"id": 2, "media_type": "tv_show", "title": None, "text": "hi", "parent_id": None},
+        {"id": 3, "media_type": "tv_show", "title": "X", "text": None, "parent_id": None},
+    ]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _full_7z(comments=comments), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["error"] is None
+    assert body["summary"]["comments"] == 0
+    assert body["summary"]["comments_skipped"] == 3
+
+
+def test_import_comments_deduplicates_existing_root(client, alice):
+    _, headers = alice
+    client.post(
+        "/media",
+        json={"media_type": "tv_show", "title": "Dark", "tmdb_id": 555, "status": "watching"},
+        headers=headers,
+    ).raise_for_status()
+    client.post(
+        "/comments",
+        json={"media_type": "tv_show", "tmdb_id": 555, "title": "Dark", "text": "nice show"},
+        headers=headers,
+    ).raise_for_status()
+
+    comments = [
+        {"id": 10, "media_type": "tv_show", "tmdb_id": 555, "title": "Dark", "text": "nice show", "parent_id": None}
+    ]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _full_7z(comments=comments), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["error"] is None
+    # dedup: same comment already exists — not re-created
+    assert body["summary"]["comments"] == 0
+
+
+def test_import_comments_with_replies_and_orphan(client, alice):
+    _, headers = alice
+    comments = [
+        {"id": 1, "media_type": "tv_show", "tmdb_id": 555, "title": "Dark", "text": "root", "parent_id": None},
+        {"id": 2, "media_type": None, "title": None, "text": "reply to root", "parent_id": 1},
+        {"id": 3, "media_type": None, "title": None, "text": "orphan", "parent_id": 99_999},
+    ]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _full_7z(comments=comments), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["error"] is None
+    assert body["summary"]["comments"] == 2  # root + reply
+    assert body["summary"]["comments_skipped"] == 1  # orphan dropped
+
+
+def test_import_comments_progress_counter_at_100_roots(client, alice):
+    """_import_comments calls _set(done=done) every 100 root comments (line 371)."""
+    _, headers = alice
+    comments = [
+        {"id": i, "media_type": "tv_show", "tmdb_id": 555, "title": "Dark", "text": f"comment {i}", "parent_id": None}
+        for i in range(105)
+    ]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _full_7z(comments=comments), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers, timeout=15.0)
+    assert body["error"] is None
+    assert body["summary"]["comments"] == 105
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — social edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_import_social_skips_self_and_nonexistent(client, alice):
+    alice_user, alice_headers = alice
+    social = {"following": [alice_user["username"], "zzz_no_such_user_xyz"]}
+    r = client.post(
+        "/import",
+        files={"file": ("x.7z", _full_7z(social=social), "application/x-7z-compressed")},
+        headers=alice_headers,
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, alice_headers)
+    assert body["error"] is None
+    assert body["summary"]["follows_skipped"] == 2
+    assert body["summary"]["follows"] == 0
+
+
+def test_import_social_skips_existing_follow(client, alice, bob):
+    alice_user, alice_headers = alice
+    bob_user, _ = bob
+    client.post(f"/users/{bob_user['id']}/follow", headers=alice_headers).raise_for_status()
+
+    social = {"following": [bob_user["username"]]}
+    r = client.post(
+        "/import",
+        files={"file": ("x.7z", _full_7z(social=social), "application/x-7z-compressed")},
+        headers=alice_headers,
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, alice_headers)
+    assert body["error"] is None
+    assert body["summary"]["follows_skipped"] == 1
+    assert body["summary"]["follows"] == 0
+
+
+def test_import_social_progress_counter_at_50(client, alice):
+    """_import_social calls _set(done=n) every 50 entries (line 438)."""
+    alice_user, alice_headers = alice
+    # 55 nonexistent usernames — all skipped, but counter still ticks
+    social = {"following": [f"ghost_user_{i}" for i in range(55)]}
+    r = client.post(
+        "/import",
+        files={"file": ("x.7z", _full_7z(social=social), "application/x-7z-compressed")},
+        headers=alice_headers,
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, alice_headers)
+    assert body["error"] is None
+    assert body["summary"]["follows_skipped"] == 55
+
+
+# ---------------------------------------------------------------------------
+# Integration test — run() exception handling
+# ---------------------------------------------------------------------------
+
+
+def test_run_exception_is_captured_in_status(client, alice, monkeypatch):
+    """An unhandled exception inside run() must set finished=True and error!=None."""
+    from renar_backend.users import renar_import
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("Injected failure for coverage")
+
+    monkeypatch.setattr(renar_import, "_import_library", _boom)
+
+    _, headers = alice
+    rows = [{"media_type": "tv_show", "title": "X", "tmdb_id": 1, "status": "watching"}]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _library_7z(rows), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, headers)
+    assert body["finished"] is True
+    assert body["error"] is not None

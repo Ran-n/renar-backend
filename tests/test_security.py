@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/08/20 19:24:48.805603
+Revised: 2026/09/02 10:58:12.005083
 
 AbuseGuardMiddleware + login backoff: what gets stopped, and — just as
 important for a commercial deployment — what must never be flagged.
@@ -374,3 +374,349 @@ def test_turnstile_widget_csp_allows_cloudflare_script():
     assert "https://challenges.cloudflare.com" in csp
     assert "'unsafe-inline'" in csp
     assert "frame-ancestors 'none'" in csp
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — pure / low-level security helpers
+# ---------------------------------------------------------------------------
+
+
+def test_prune_removes_stale_entries():
+    """_prune discards deque entries older than the cutoff (line 332)."""
+    import time
+    from collections import deque
+
+    from renar_backend.users.security import _prune
+
+    dq = deque([1.0, 2.0, 3.0, time.time()])
+    _prune(dq, time.time() - 0.1)  # cutoff 100ms ago — only the recent entry survives
+    assert len(dq) == 1
+
+
+def test_reset_login_backoff_clears_all_tracked_failures():
+    """reset_login_backoff removes failures across every IP for the account (lines 318-322)."""
+    from renar_backend.users.security import reset_login_backoff
+
+    for ip in ("1.2.3.4", "5.6.7.8", "9.9.9.9"):
+        note_login_failure("charlie", ip)
+    reset_login_backoff("charlie")
+    # All IPs cleared — no 429 should be raised for charlie
+    check_login_allowed("charlie", "1.2.3.4")
+    check_login_allowed("charlie", "5.6.7.8")
+    check_login_allowed("charlie", "9.9.9.9")
+
+
+def test_client_ip_reads_x_forwarded_for_when_trust_proxy_enabled():
+    """client_ip returns the rightmost X-Forwarded-For hop when trust_proxy_headers=True
+    (lines 337-341)."""
+    from renar_backend import site_settings as _ss
+    from renar_backend.database import SessionLocal
+    from renar_backend.users.security import client_ip
+
+    db = SessionLocal()
+    try:
+        from renar_backend.site_settings import get_site_settings
+
+        ss = get_site_settings(db)
+        ss.trust_proxy_headers = True
+        db.commit()
+    finally:
+        db.close()
+    _ss._cache_ts = 0.0  # invalidate cache so next call re-reads
+
+    class _FakeHeaders(dict):
+        def get(self, key, default=None):
+            return super().get(key, default)
+
+    class _FakeRequest:
+        headers = _FakeHeaders({"x-forwarded-for": "203.0.113.1, 10.0.0.1"})
+        client = type("c", (), {"host": "10.0.0.1"})()
+
+    assert client_ip(_FakeRequest()) == "10.0.0.1"
+
+
+def test_client_ip_falls_back_to_client_host_when_no_forwarded_header():
+    """When trust_proxy_headers=True but X-Forwarded-For is absent, fall back to client.host."""
+    from renar_backend import site_settings as _ss
+    from renar_backend.database import SessionLocal
+    from renar_backend.users.security import client_ip
+
+    db = SessionLocal()
+    try:
+        from renar_backend.site_settings import get_site_settings
+
+        ss = get_site_settings(db)
+        ss.trust_proxy_headers = True
+        db.commit()
+    finally:
+        db.close()
+    _ss._cache_ts = 0.0
+
+    class _FakeHeaders(dict):
+        def get(self, key, default=None):
+            return super().get(key, default)
+
+    class _FakeRequest:
+        headers = _FakeHeaders({})  # no x-forwarded-for
+        client = type("c", (), {"host": "192.168.1.1"})()
+
+    assert client_ip(_FakeRequest()) == "192.168.1.1"
+
+
+# ---------------------------------------------------------------------------
+# DB-exception paths — monkeypatch SessionLocal to raise
+# ---------------------------------------------------------------------------
+
+
+def test_load_permabans_db_exception_is_swallowed(monkeypatch):
+    """_load_permabans catches any DB error and logs it (lines 124-125)."""
+    from renar_backend.users import security
+
+    monkeypatch.setattr(security, "SessionLocal", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+    security._permabans_loaded = False
+    security._load_permabans()  # must not raise
+    assert not security._permabans_loaded  # stays False on error
+
+
+def test_permaban_db_exception_still_adds_to_memory(monkeypatch):
+    """permaban adds to the in-memory set even when DB write fails (lines 138-139)."""
+    from renar_backend.users import security
+
+    monkeypatch.setattr(security, "SessionLocal", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+    security._permabanned.discard("9.8.7.6")
+    security.permaban("9.8.7.6", "test")
+    assert "9.8.7.6" in security._permabanned  # memory set updated despite DB error
+
+
+def test_permaban_duplicate_handles_integrity_error():
+    """A second permaban call for the same IP hits the unique constraint on
+    banned_ips.ip — the IntegrityError is caught silently (lines 135-136)."""
+    from renar_backend.users import security
+
+    security.permaban("10.0.0.200", "first hit")
+    security.permaban("10.0.0.200", "second hit")  # must not raise
+    assert "10.0.0.200" in security._permabanned
+
+
+def test_strike_and_maybe_ban_db_exception_returns_fallback(monkeypatch):
+    """When the DB is unreachable, strike_and_maybe_ban returns a safe fallback
+    (1 strike, short ban) instead of propagating (lines 210-212)."""
+    from renar_backend.users import security
+
+    monkeypatch.setattr(security, "SessionLocal", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+    count, until = security.strike_and_maybe_ban("1.2.3.99", "test")
+    assert count == 1
+    assert until is not None and until > 0
+
+
+def test_load_active_temp_bans_db_exception_returns_empty(monkeypatch):
+    """load_active_temp_bans logs and returns {} when DB is unreachable (lines 231-232)."""
+    from renar_backend.users import security
+
+    monkeypatch.setattr(security, "SessionLocal", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+    result = security.load_active_temp_bans()
+    assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# load_active_temp_bans — datetime and expiry branches
+# ---------------------------------------------------------------------------
+
+
+def test_load_active_temp_bans_with_naive_datetime(monkeypatch):
+    """When the DB driver returns a timezone-naive banned_until, the code attaches
+    UTC tzinfo before comparing (line 228). Monkeypatch the query so the test
+    doesn't depend on the driver's own timezone handling."""
+    from datetime import UTC, datetime, timedelta
+
+    from renar_backend.users import security
+    from renar_backend.users.security import load_active_temp_bans
+
+    naive_future = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+
+    class _FakeQuery:
+        def filter(self, *a, **kw):
+            return self
+
+        def all(self):
+            return [("203.0.113.50", naive_future)]
+
+    class _FakeDB:
+        def query(self, *a):
+            return _FakeQuery()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    monkeypatch.setattr(security, "SessionLocal", lambda: _FakeDB())
+    result = load_active_temp_bans()
+    assert "203.0.113.50" in result
+
+
+def test_load_active_temp_bans_excludes_already_expired():
+    """A Strike whose banned_until is in the past must NOT appear in the result
+    (the False branch of `if banned_until > now_dt:`, line 229->226)."""
+    from datetime import UTC, datetime, timedelta
+
+    from renar_backend.database import SessionLocal
+    from renar_backend.models import Strike
+    from renar_backend.users.security import load_active_temp_bans
+
+    past = datetime.now(UTC) - timedelta(hours=2)
+    with SessionLocal() as db:
+        db.add(Strike(ip="203.0.113.51", count=1, reason="test", last_offense_at=datetime.now(UTC), banned_until=past))
+        db.commit()
+
+    result = load_active_temp_bans()
+    assert "203.0.113.51" not in result
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_old_strikes — enabled/disabled/exception branches
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_old_strikes_when_disabled(monkeypatch):
+    """When the strike_cleanup task is disabled, _cleanup_old_strikes returns
+    immediately without touching the DB (line 241)."""
+    from renar_backend import task_runs
+    from renar_backend.users import security
+
+    monkeypatch.setattr(task_runs, "is_enabled", lambda key: False)
+    security._last_strike_cleanup = 0.0
+    security._cleanup_old_strikes(0.0)  # must return early without DB access
+
+
+def test_cleanup_old_strikes_db_exception_is_swallowed(monkeypatch):
+    """A DB error during strike cleanup is logged and swallowed (lines 253-255)."""
+    from renar_backend import task_runs
+    from renar_backend.users import security
+
+    monkeypatch.setattr(task_runs, "is_enabled", lambda key: True)
+    monkeypatch.setattr(task_runs, "get_interval_minutes", lambda key: 0)  # interval = 0 → always runs
+    security._last_strike_cleanup = 0.0
+    monkeypatch.setattr(security, "SessionLocal", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+    security._cleanup_old_strikes(security.time.time())  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Middleware instance-level tests — sweep and temp-ban loading
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_removes_expired_temp_bans_from_dict():
+    """_sweep deletes entries from banned_until whose `until` is in the past (line 409)."""
+    import time
+    from unittest.mock import MagicMock
+
+    from renar_backend.users.security import AbuseGuardMiddleware
+
+    mw = AbuseGuardMiddleware(MagicMock())
+    mw.banned_until = {"expired.ip": time.time() - 100, "live.ip": time.time() + 3600}
+    mw._sweep(time.time())
+    assert "expired.ip" not in mw.banned_until
+    assert "live.ip" in mw.banned_until
+
+
+def test_sweep_prunes_oversized_tracker(monkeypatch):
+    """When a tracker dict exceeds 10 000 entries, _sweep removes stale ones (lines 406-407)."""
+    import time
+    from unittest.mock import MagicMock
+
+    from renar_backend import task_runs
+    from renar_backend.users.security import AbuseGuardMiddleware
+
+    # Prevent _cleanup_old_strikes from touching the DB during this test
+    monkeypatch.setattr(task_runs, "is_enabled", lambda key: False)
+
+    mw = AbuseGuardMiddleware(MagicMock())
+    now = time.time()
+    # Inject 10 001 stale hits (200 s old, well past the 60 s window)
+    for i in range(10_001):
+        mw.hits[f"10.{i // 65536}.{(i // 256) % 256}.{i % 256}"].append(now - 200)
+
+    assert len(mw.hits) == 10_001
+    mw._sweep(now)
+    assert len(mw.hits) == 0
+
+
+def test_active_temp_bans_loaded_on_first_dispatch():
+    """On the first request through a fresh AbuseGuardMiddleware instance,
+    active temp bans from the DB are loaded into banned_until (line 418)."""
+    from datetime import UTC, datetime, timedelta
+
+    from renar_backend.database import SessionLocal
+    from renar_backend.models import Strike
+
+    future = datetime.now(UTC) + timedelta(hours=1)
+    with SessionLocal() as db:
+        db.add(
+            Strike(
+                ip="testclient", count=1, reason="pre-existing", last_offense_at=datetime.now(UTC), banned_until=future
+            )
+        )
+        db.commit()
+
+    client = make_client()
+    r = client.get("/")
+    assert r.status_code == 429  # temp ban loaded from DB, request denied
+
+
+def test_expired_temp_ban_is_cleared_on_next_request(monkeypatch):
+    """When an IP's ban epoch has passed, dispatch removes it from banned_until
+    and allows the request through (line 433)."""
+    import time as _time_mod
+
+    from renar_backend.users import security
+
+    client = make_client()
+    # Trigger a temp ban via flood
+    for _ in range(41):
+        client.get("/")
+    assert client.get("/health").status_code == 429  # currently banned
+
+    # Fast-forward time past every ban and rate-limit window
+    far_future = _time_mod.time() + 90_000  # 25 hours ahead
+    monkeypatch.setattr(security.time, "time", lambda: far_future)
+    r = client.get("/health")
+    # Ban expired → request goes through (health is always uncounted)
+    assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Middleware — flood escalates to permaban at strike threshold
+# ---------------------------------------------------------------------------
+
+
+def test_flood_ban_escalates_to_permaban_at_threshold():
+    """When the offense count reaches strike_ban_threshold, _ban calls permaban
+    instead of setting a temp ban (lines 388-390)."""
+    from renar_backend import site_settings as _ss
+    from renar_backend.database import SessionLocal
+    from renar_backend.users import security
+
+    db = SessionLocal()
+    try:
+        from renar_backend.site_settings import get_site_settings
+
+        ss = get_site_settings(db)
+        ss.strike_ban_threshold = 1  # first offense = permaban
+        db.commit()
+    finally:
+        db.close()
+    _ss._cache_ts = 0.0  # invalidate cache
+
+    client = make_client()
+    # Trigger flood ban (> 40 req/min per guard_settings)
+    for _ in range(41):
+        client.get("/")
+
+    # After the first ban, count=1 >= threshold=1 → permabanned, not temp-banned
+    r = client.get("/")
+    assert r.status_code == 403  # permanent ban
+
+    # Confirm in-memory mirror was updated
+    assert "testclient" in security._permabanned

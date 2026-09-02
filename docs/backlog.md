@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/08/27 11:19:37.718084 )
+[//]: # (+ Revised: 	2026/09/02 10:57:10.248802 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -38,15 +38,23 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
     `admin.py`, ...) still has no property or fuzz coverage at all.
   - **Unit/integration**: coverage exists per-router (`tests/test_*.py`).
     First real baseline measured (`pytest --cov`, default marker set): 82%
-    branch coverage, since then raised on its two worst outliers —
-    `tvdb/tvdb_http.py` 35% → **100%** (`tests/test_tvdb_http.py`: login
-    caching/forced-refresh, the 401-relogin-then-retry path, every
-    TVDB-unavailable fallback) and `social/notifier.py` 53% → **86%**
-    (`tests/test_notifier_loops.py`: all eight periodic-task loops —
-    enabled/disabled, success, and the failure path that must not crash the
-    loop — the remaining gap is now just the thin `*_once()` wrapper
-    functions themselves). Still real gaps: `users/tvtime_import.py` (68%,
-    the largest single file in the codebase), `tmdb/tmdb_store.py` (69%).
+    branch coverage. Raised to **96%** in the 2026-09-02 pass, targeting
+    every module below ~95%: `users/tvtime_import.py` 68% → 98% (the
+    largest single file in the codebase), `tmdb/tmdb_store.py` 69% → 96%,
+    `routers/admin/users.py` 77% → 99%, `users/renar_import.py` 76% → 98%,
+    `catalog/titles.py` 73% → 86%, `users/security.py` 83% → 95%, plus
+    every router/media-util file individually below 95%. While writing
+    concurrency-focused tests for that pass, several genuine races
+    surfaced and were fixed (not just tested around) — see
+    `docs/design-decisions.md`'s entries on `strike_and_maybe_ban`/
+    `permaban`'s row locks, the `endpoint_stats`/`request_days` upserts,
+    per-user import locking, and the unhandled-`IntegrityError` guards
+    added to `auth.py`/`social.py`/`comments.py`/`reviews.py`/`lists.py`/
+    `media.py`/`admin/users.py`/`tvdb_store.py`'s concurrent-write paths.
+    Remaining real gaps: `catalog/titles.py` (86%), `_devserver.py` (54%,
+    OS-level/subprocess code not reachable from in-process coverage),
+    `_test_server.py` (0%, invoked only as a subprocess by
+    `tests/integration/`, never measured by this instrumented run).
   - **Mutation**: config exists (`pyproject.toml`'s `[tool.mutmut]`) but
     has never actually run (no WSL on the dev machine) and is scoped to
     just `models.py` + `schemas.py`.
@@ -55,9 +63,7 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
     write-heavy paths (comments, ratings, imports) under concurrent load.
 
   Getting to "full coverage, all test types, 100%" means, in rough order:
-  write the missing unit/integration tests for the lowest-coverage modules
-  named above (82% → meaningfully higher); extend property/fuzz to
-  every router with a pydantic-validated request body; turn the contract
+  extend property/fuzz to every router with a pydantic-validated request body; turn the contract
   test into real schema validation (response body against the OpenAPI
   response model, not just route existence — `schemathesis` or hand-rolled
   `jsonschema` validation against `app.openapi()` are the two realistic

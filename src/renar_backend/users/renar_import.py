@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/08/25 15:17:03.884503
+Revised: 2026/09/02 10:57:11.225854
 
 Import a Renar-native export (users/export.py's .7z of profile/library/
 comments/social JSON) back into an account — the write side of GDPR Art.
@@ -72,6 +72,11 @@ MAX_CONCURRENT_IMPORTS = 5
 _slots = threading.Semaphore(MAX_CONCURRENT_IMPORTS)
 
 _progress: dict[int, dict] = {}
+# Guards per-user running state so concurrent POST /import requests for the
+# same user can't both slip through the is_running check (which reads
+# _progress) before either calls start_job (which writes _progress).
+_user_lock = threading.Lock()
+_active_users: set[int] = set()
 
 
 def detect(data: bytes) -> bool:
@@ -123,6 +128,29 @@ def progress(user_id: int) -> dict | None:
 def is_running(user_id: int) -> bool:
     live = _progress.get(user_id)
     return bool(live and not live.get("finished", True))
+
+
+def try_start_job(user_id: int) -> bool:
+    """Atomically claim the running slot for user_id.
+
+    Returns True if this call successfully started the job (caller should
+    proceed to launch the background thread). Returns False if another import
+    is already in flight for this user (concurrent-submit race guard — caller
+    must release the importer slot and raise 409).
+    """
+    with _user_lock:
+        if user_id in _active_users:
+            return False
+        _active_users.add(user_id)
+    start_job(user_id)
+    return True
+
+
+def finish_user(user_id: int) -> None:
+    """Release the per-user running slot (call from the background thread's
+    finally block so a subsequent import request can proceed)."""
+    with _user_lock:
+        _active_users.discard(user_id)
 
 
 def start_job(user_id: int) -> None:

@@ -2,21 +2,26 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.984505
-Revised: 2026/08/24 12:39:05.195240
+Revised: 2026/09/02 10:57:36.960211
 
 Auth endpoints: register, login, me, profile, password change, account delete.
 """
 
+import base64
+import io
 import secrets
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import PASSWORD, hard_delete, login, register
+from PIL import Image as PILImage
+from sqlalchemy.exc import IntegrityError
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import (
     Comment,
     CommentReport,
+    EmailConfirmationCode,
     EpisodeWatch,
     ImportJob,
     InviteCode,
@@ -25,6 +30,7 @@ from renar_backend.models import (
     SiteSettings,
     User,
     WatchEvent,
+    utcnow,
 )
 
 pytestmark = pytest.mark.regression
@@ -682,3 +688,387 @@ def test_authenticated_request_bumps_activity(client, alice):
 
     row = _user_row(user["id"])
     assert row.last_active_at is not None
+
+
+# ---------- banned account (auth.py lines 315, 354) ----------
+
+
+def _ban_user(user_id: int) -> None:
+    db = SessionLocal()
+    try:
+        db.get(User, user_id).banned = True
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_login_banned_account_returns_403(client):
+    """Banned users are rejected at login with 403 (line 315 in auth.py)."""
+    user = register(client, "alice")
+    _ban_user(user["id"])
+    r = client.post("/auth/login", data={"username": "alice", "password": PASSWORD})
+    assert r.status_code == 403
+    assert "banned" in r.json()["detail"].lower()
+
+
+def test_confirm_email_banned_user_returns_403(client):
+    """_authenticate_for_confirmation also checks banned (line 354 in auth.py)."""
+    db = SessionLocal()
+    try:
+        # Register without auto-confirm so the account needs confirmation.
+        r = client.post(
+            "/auth/register",
+            json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+        )
+        assert r.status_code == 201
+        user_id = r.json()["id"]
+        _ban_user(user_id)
+    finally:
+        db.close()
+
+    r = client.post(
+        "/auth/confirm-email",
+        json={"username": "alice", "password": PASSWORD, "code": "000000"},
+    )
+    assert r.status_code == 403
+    assert "banned" in r.json()["detail"].lower()
+
+
+# ---------- register IntegrityError race (lines 268-272) ----------
+
+
+def test_register_race_condition_returns_409(client, monkeypatch):
+    """Two registrations that race past the duplicate-check SELECT both land
+    the same 409 — the IntegrityError path inside register (lines 268-272)."""
+    import sqlalchemy.orm
+
+    original_commit = sqlalchemy.orm.Session.commit
+    call_count = [0]
+
+    def _raise_on_user_commit(self):
+        call_count[0] += 1
+        # Allow the first commit (site_settings creation) and raise on the
+        # second (User row insert) to simulate the race condition.
+        if call_count[0] >= 2:
+            sqlalchemy.orm.Session.commit = original_commit
+            raise IntegrityError("", {}, Exception("duplicate"))
+        return original_commit(self)
+
+    monkeypatch.setattr(sqlalchemy.orm.Session, "commit", _raise_on_user_commit)
+
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+    )
+    assert r.status_code == 409
+
+
+# ---------- unknown confirmation purpose (lines 402-407) ----------
+
+
+def test_confirm_email_unknown_purpose_returns_400(client):
+    """An EmailConfirmationCode row with an unknown purpose field results in
+    a 400 error (the else branch at lines 402-407 in auth.py)."""
+    from renar_backend.users.email_confirmation import hash_code
+
+    # Register without auto-confirm.
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+    )
+    assert r.status_code == 201
+    user_id = r.json()["id"]
+
+    CODE = "424242"
+
+    db = SessionLocal()
+    try:
+        db.add(
+            EmailConfirmationCode(
+                user_id=user_id,
+                code_hash=hash_code(CODE),
+                purpose="unknown_purpose",
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.post(
+        "/auth/confirm-email",
+        json={"username": "alice", "password": PASSWORD, "code": CODE},
+    )
+    assert r.status_code == 400
+    assert "unknown" in r.json()["detail"].lower()
+
+
+# ---------- resend_confirmation with pending_email (lines 512-521) ----------
+
+
+def _set_user_attrs(user_id: int, **attrs) -> None:
+    db = SessionLocal()
+    try:
+        u = db.get(User, user_id)
+        for k, v in attrs.items():
+            setattr(u, k, v)
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_resend_confirmation_with_pending_email_change_confirm(client, alice):
+    """When user has pending_email and latest code is change_confirm, resend
+    sends change_confirm again (branch 519 in auth.py)."""
+    from renar_backend.users.email_confirmation import hash_code
+
+    user, headers = alice
+
+    # Simulate a pending email-change at the change_confirm stage:
+    # pending_email is set, latest unconsumed code has purpose=change_confirm.
+    _set_user_attrs(user["id"], pending_email="new@example.com", email_confirmed=False)
+
+    db = SessionLocal()
+    try:
+        db.add(
+            EmailConfirmationCode(
+                user_id=user["id"],
+                code_hash=hash_code("424242"),
+                purpose="change_confirm",
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.post(
+        "/auth/resend-confirmation",
+        json={"username": "alice", "password": PASSWORD},
+    )
+    assert r.status_code == 204
+
+
+def test_resend_confirmation_with_pending_email_change_authorize(client):
+    """When user has pending_email and latest code is NOT change_confirm, resend
+    sends change_authorize to the original address (branch 521 in auth.py)."""
+    # Register (creates a "register" code automatically).
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+    )
+    assert r.status_code == 201
+    user_id = r.json()["id"]
+
+    # Simulate a pending email-change: pending_email set, latest code is "register" not "change_confirm".
+    _set_user_attrs(user_id, pending_email="pending@example.com")
+
+    r = client.post(
+        "/auth/resend-confirmation",
+        json={"username": "alice", "password": PASSWORD},
+    )
+    assert r.status_code == 204
+
+
+# ---------- update_profile email change (lines 576->585) ----------
+
+
+def test_update_profile_email_change_initiates_two_step_flow(client, alice):
+    """Changing email to a new non-taken address starts the two-step
+    change_authorize/change_confirm flow: pending_email is set (lines 582-584)."""
+    user, headers = alice
+    r = client.patch("/auth/profile", json={"email": "newalice@example.com"}, headers=headers)
+    assert r.status_code == 200
+    # The email field itself hasn't moved yet; pending_email is set.
+    db = SessionLocal()
+    try:
+        u = db.get(User, user["id"])
+        assert u.pending_email == "newalice@example.com"
+        assert not u.email_confirmed
+    finally:
+        db.close()
+
+
+# ---------- update_profile avatar (lines 594, 595->598) ----------
+
+
+def _png_b64_auth(color: tuple[int, int, int] = (200, 30, 30)) -> str:
+    img = PILImage.new("RGB", (20, 30), color)
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return base64.b64encode(out.getvalue()).decode()
+
+
+def _set_premium_auth(user_id: int, days: int = 30) -> None:
+    db = SessionLocal()
+    try:
+        db.get(User, user_id).premium_until = utcnow() + timedelta(days=days)
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_update_profile_clear_avatar(client, alice):
+    """Setting avatar_b64 to empty string clears the avatar (lines 594-598 in
+    auth.py — avatar_b64 present but falsy → user.avatar_id = None)."""
+    _, headers = alice
+    # First set an avatar.
+    r = client.patch("/auth/profile", json={"avatar_b64": _png_b64_auth()}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["avatar"] is not None
+    # Then clear it.
+    r = client.patch("/auth/profile", json={"avatar_b64": ""}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["avatar"] is None
+
+
+# ---------- update_profile background (lines 599-613) ----------
+
+
+def test_update_profile_background_without_premium_returns_403(client, alice):
+    """Non-premium user cannot set a background image (lines 599-602)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"background_b64": _png_b64_auth()}, headers=headers)
+    assert r.status_code == 403
+    assert "premium" in r.json()["detail"].lower()
+
+
+def test_update_profile_background_with_premium(client, alice):
+    """Premium user can set then clear a background image (lines 603-613)."""
+    user, headers = alice
+    _set_premium_auth(user["id"])
+    r = client.patch("/auth/profile", json={"background_b64": _png_b64_auth()}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["background"] is not None
+    # Clear it.
+    r = client.patch("/auth/profile", json={"background_b64": ""}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["background"] is None
+
+
+# ---------- update_profile theme (lines 615-620) ----------
+
+
+def test_update_profile_premium_theme_without_premium_returns_403(client, alice):
+    """Non-premium user cannot set a premium theme (lines 615-620)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"theme": "midnight"}, headers=headers)
+    assert r.status_code == 403
+    assert "premium" in r.json()["detail"].lower()
+
+
+def test_update_profile_free_theme_allowed(client, alice):
+    """gruvbox is a free theme — no premium needed."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"theme": "gruvbox"}, headers=headers)
+    assert r.status_code == 200
+
+
+# ---------- update_profile other fields (622, 624, 626) ----------
+
+
+def test_update_profile_show_original_titles(client, alice):
+    """show_original_titles can be toggled without premium (line 622)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"show_original_titles": True}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["show_original_titles"] is True
+
+
+def test_update_profile_home_hero_enabled(client, alice):
+    """home_hero_enabled can be toggled (line 624)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"home_hero_enabled": False}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["home_hero_enabled"] is False
+
+
+def test_update_profile_home_on_launch(client, alice):
+    """home_on_launch can be toggled (line 626)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"home_on_launch": False}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["home_on_launch"] is False
+
+
+# ---------- update_profile progress_style (lines 628-633) ----------
+
+
+def test_update_profile_premium_progress_style_without_premium_returns_403(client, alice):
+    """Non-premium user cannot set a premium progress style (lines 628-632)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"home_progress_style": "capsule"}, headers=headers)
+    assert r.status_code == 403
+    assert "premium" in r.json()["detail"].lower()
+
+
+def test_update_profile_free_progress_style_allowed(client, alice):
+    """'rings' is the free progress style (line 633)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"home_progress_style": "rings"}, headers=headers)
+    assert r.status_code == 200
+
+
+# ---------- update_profile episode_label_style (lines 635-640) ----------
+
+
+def test_update_profile_premium_episode_label_without_premium_returns_403(client, alice):
+    """Non-premium user cannot set a premium episode label style (lines 635-639)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"episode_label_style": "standard"}, headers=headers)
+    assert r.status_code == 403
+    assert "premium" in r.json()["detail"].lower()
+
+
+def test_update_profile_free_episode_label_allowed(client, alice):
+    """'cross' is the free episode label style (line 640)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"episode_label_style": "cross"}, headers=headers)
+    assert r.status_code == 200
+
+
+# ---------- update_profile has_seen_welcome (line 642) ----------
+
+
+def test_update_profile_has_seen_welcome(client, alice):
+    """has_seen_welcome can be set to True (line 642 in auth.py)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"has_seen_welcome": True}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["has_seen_welcome"] is True
+
+
+def test_banned_account_token_rejected_with_403(client, alice):
+    """A token issued before a ban is rejected with 403 on subsequent authenticated
+    requests — covers auth.py get_current_user's banned branch (line 105)."""
+    user, headers = alice
+    with SessionLocal() as db:
+        db.get(User, user["id"]).banned = True
+        db.commit()
+    r = client.get("/auth/me", headers=headers)
+    assert r.status_code == 403
+    assert "banned" in r.json()["detail"].lower()
+
+
+def test_profile_update_invalid_theme_rejected(client, alice):
+    """An unrecognized theme name must be 422 — covers schemas.ProfileUpdate
+    _valid_theme's ValueError branch (lines 324-326)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"theme": "neon_flamingo"}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_profile_update_invalid_progress_style_rejected(client, alice):
+    """An unrecognized home_progress_style must be 422 — covers
+    _valid_progress_style (lines 331-333)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"home_progress_style": "not_a_style"}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_profile_update_invalid_episode_label_style_rejected(client, alice):
+    """An unrecognized episode_label_style must be 422 — covers
+    _valid_episode_label_style (lines 338-340)."""
+    _, headers = alice
+    r = client.patch("/auth/profile", json={"episode_label_style": "not_a_style"}, headers=headers)
+    assert r.status_code == 422

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 17:01:06.338846
-Revised: 2026/08/20 10:49:47.847588
+Revised: 2026/09/02 10:58:16.587085
 
 The /svc/bans and /svc/strikes endpoints the frontend's own anti-abuse guard
 uses to share this server's persisted ban/strike state.
@@ -158,3 +158,44 @@ def test_repeated_strikes_escalate_to_permaban(client, monkeypatch):
     assert ip in security._permabanned
     with SessionLocal() as db:
         assert db.query(BannedIP).filter(BannedIP.ip == ip).count() == 1
+
+
+def test_old_auth_failures_pruned_from_window(client, monkeypatch):
+    """Entries older than 1 minute are pruned from the sliding window —
+    covers svc.py _require_internal_secret's failures.popleft() (line 74)."""
+    import time as _time
+
+    from renar_backend.routers import svc
+
+    old_ts = _time.time() - 120.0  # 2 minutes ago — outside the 1-minute window
+    svc._auth_failures["testclient"].append(old_ts)
+    # This request prunes the old entry and appends the new one; count stays 1
+    client.get("/svc/bans", headers={"X-Internal-Secret": "wrong"})
+    assert old_ts not in svc._auth_failures["testclient"]
+
+
+def test_repeated_wrong_secret_from_non_exempt_ip_triggers_permaban(client, monkeypatch):
+    """After enough wrong-secret attempts the non-exempt caller is permabanned —
+    covers svc.py _require_internal_secret's permaban branch (line 79)."""
+    from renar_backend.models import SiteSettings
+
+    with SessionLocal() as db:
+        row = db.get(SiteSettings, 1)
+        if row is None:
+            row = SiteSettings(id=1)
+            db.add(row)
+        row.strike_ban_threshold = 1
+        db.commit()
+    from renar_backend import site_settings as ss_mod
+
+    ss_mod.invalidate()
+
+    # Drive enough wrong-secret requests to trigger a strike (> _FAIL_LIMIT_PER_MINUTE)
+    # then have that single strike immediately trigger a permaban (threshold=1).
+    from renar_backend.routers import svc
+
+    svc._auth_failures.clear()
+    for _ in range(6):  # _FAIL_LIMIT_PER_MINUTE + 1
+        client.get("/svc/bans", headers={"X-Internal-Secret": "wrong"})
+
+    assert "testclient" in security._permabanned

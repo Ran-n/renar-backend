@@ -94,9 +94,7 @@ def test_tvdb_get_returns_none_when_login_fails(monkeypatch):
 
 def test_tvdb_get_happy_path(monkeypatch):
     monkeypatch.setattr(tvdb_http, "_login", lambda force=False: "tok1")
-    monkeypatch.setattr(
-        tvdb_http.http_client, "get", lambda url, **kw: FakeResponse(200, {"data": {"name": "Dark"}})
-    )
+    monkeypatch.setattr(tvdb_http.http_client, "get", lambda url, **kw: FakeResponse(200, {"data": {"name": "Dark"}}))
     assert tvdb_http.tvdb_get("/series/1") == {"name": "Dark"}
 
 

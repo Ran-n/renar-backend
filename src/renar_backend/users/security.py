@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/08/20 19:23:52.306446
+Revised: 2026/09/02 10:57:11.316476
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -39,6 +39,7 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
@@ -128,9 +129,12 @@ def permaban(ip: str, reason: str) -> None:
     _permabanned.add(ip)  # effective immediately even if the DB write fails
     try:
         with SessionLocal() as db:
-            if not db.query(BannedIP).filter(BannedIP.ip == ip).first():
-                db.add(BannedIP(ip=ip, reason=reason))
-                db.commit()
+            try:
+                with db.begin_nested():
+                    db.add(BannedIP(ip=ip, reason=reason))
+            except IntegrityError:
+                pass  # concurrent call already persisted the row; in-memory set is authoritative
+            db.commit()
     except Exception:
         _log.exception("could not persist permaban for %s (in-memory ban still active)", ip)
     _log.warning("PERMABANNED %s: %s", ip, reason)
@@ -164,10 +168,27 @@ def strike_and_maybe_ban(ip: str, reason: str) -> tuple[int, float | None]:
     now_dt = datetime.now(UTC)
     try:
         with SessionLocal() as db:
-            strike = db.query(Strike).filter(Strike.ip == ip).first()
+            # with_for_update() serialises concurrent offenses from the same IP:
+            # two simultaneous ban triggers both read the row, the second waits
+            # until the first commits, then reads the already-incremented count.
+            strike = db.query(Strike).filter(Strike.ip == ip).with_for_update().first()
             if strike is None:
-                strike = Strike(ip=ip, count=1, reason=reason, last_offense_at=now_dt)
-                db.add(strike)
+                try:
+                    with db.begin_nested():
+                        strike = Strike(ip=ip, count=1, reason=reason, last_offense_at=now_dt)
+                        db.add(strike)
+                except IntegrityError:
+                    # Another request raced us to the first INSERT; re-read with lock.
+                    strike = db.query(Strike).filter(Strike.ip == ip).with_for_update().first()
+                    if strike is None:
+                        _log.error("strike for %s neither insertable nor findable after race", ip)
+                        return 1, time.time() + site_settings.current().ban_minutes * _MINUTE
+                    last = strike.last_offense_at
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=UTC)
+                    strike.count = 1 if now_dt - last > timedelta(hours=24) else strike.count + 1
+                    strike.reason = reason
+                    strike.last_offense_at = now_dt
             else:
                 last = strike.last_offense_at
                 if last.tzinfo is None:

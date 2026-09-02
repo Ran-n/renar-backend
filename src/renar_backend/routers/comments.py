@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.875365
-Revised: 2026/08/27 09:52:21.892840
+Revised: 2026/09/02 10:57:10.606896
 
 Comments on titles (global across users), with likes, nested replies and
 user reports.
@@ -11,6 +11,7 @@ user reports.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..catalog.titles import find_or_create_title, find_title
@@ -233,7 +234,11 @@ def _set_reaction(db: Session, comment_id: int, me: User, value: int) -> None:
             publish_event(me.id, "comment_changed")
     else:
         db.add(CommentLike(comment_id=comment_id, user_id=me.id, value=value))
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()  # concurrent reaction from the same user — treat as no-op
+            return
         publish_event(me.id, "comment_changed")
 
 
@@ -303,7 +308,11 @@ def report_comment(
     )
     if not already:  # repeat reports by the same user are no-ops
         db.add(CommentReport(comment_id=comment_id, user_id=me.id, reason=(data.reason.strip() if data else "")))
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()  # concurrent report from same user — no-op
+            return
         _log.info("comment %s reported by user %s", comment_id, me.id)
 
 

@@ -2,13 +2,15 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 00:00:00.000000
-Revised: 2026/08/19 19:11:31.076036
+Revised: 2026/09/02 10:58:32.376203
 
 retry_unmatched_titles is the periodic counterpart to tmdb_get's retry/
 backoff and the raw-name-keyed import reconciliation: it's what heals a
 title that's still unmatched after both of those, without requiring the
 user to ever re-import or manually relink (see docs/backlog.md).
 """
+
+import time as _time
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import Title
@@ -154,6 +156,28 @@ def test_retry_survives_details_fetch_failure_but_keeps_the_match(client, alice)
     out = client.get(f"/media/{item['id']}", headers=headers).json()
     assert out["tmdb_id"] == 111
     assert out["title"] == "Resolved Name"
+
+
+def test_retry_sleeps_between_titles_when_pace_nonzero(client, alice, monkeypatch):
+    """pace_seconds > 0 calls time.sleep once per fixed title."""
+    _, headers = alice
+    _add_unmatched(client, headers, media_type="film", title="Test Film")
+
+    slept = []
+    monkeypatch.setattr(_time, "sleep", lambda s: slept.append(s))
+
+    db = SessionLocal()
+    try:
+        n = retry_unmatched_titles(
+            db,
+            search_movie=lambda name, year: ({"id": 555, "title": "Resolved Film"}, False),
+            fetch_film=lambda tmdb_id: {},
+            pace_seconds=0.01,
+        )
+        assert n == 1
+        assert slept == [0.01]
+    finally:
+        db.close()
 
 
 def test_retry_merges_into_a_concurrently_claimed_tmdb_id(client, alice, bob):

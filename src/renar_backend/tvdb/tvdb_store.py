@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 00:00:00.000000
-Revised: 2026/08/18 20:25:47.705125
+Revised: 2026/09/02 10:57:11.136899
 
 Fetch + shape TheTVDB v4 data for the import fallback path: a series'
 extended record (name/aliases/poster/overview/status) and its full episode
@@ -15,6 +15,7 @@ backfill_title_tmdb_id, which never touches a Title once tmdb_id is set).
 import logging
 from datetime import date
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models import Episode, Title
@@ -114,12 +115,22 @@ def sync_tvdb_episodes(db: Session, title: Title, episodes: list[dict]) -> None:
             row.name = e["name"]
             row.air_date = air_date
         else:
-            db.add(
-                Episode(
-                    title_id=title.id,
-                    season=e["season"],
-                    episode_number=e["episode_number"],
-                    name=e["name"],
-                    air_date=air_date,
+            try:
+                with db.begin_nested():
+                    db.add(
+                        Episode(
+                            title_id=title.id,
+                            season=e["season"],
+                            episode_number=e["episode_number"],
+                            name=e["name"],
+                            air_date=air_date,
+                        )
+                    )
+            except IntegrityError:
+                # concurrent sync request inserted the same episode — skip
+                _log.debug(
+                    "episode (%s, s%se%s) already inserted by a concurrent sync",
+                    title.id,
+                    e["season"],
+                    e["episode_number"],
                 )
-            )

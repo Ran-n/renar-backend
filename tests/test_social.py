@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.681273
-Revised: 2026/07/16 09:54:31.933339
+Revised: 2026/09/02 10:58:14.356603
 
 Social graph: search, public profiles, follow/unfollow, feed.
 """
@@ -181,3 +181,53 @@ def test_feed_shows_followed_users_activity(client, alice, bob):
 def test_social_endpoints_require_auth(client):
     assert client.get("/feed").status_code == 401
     assert client.get("/users/search", params={"q": "a"}).status_code == 401
+
+
+def test_unfollow_someone_not_followed_is_a_noop(client, alice, bob):
+    """DELETE /users/{id}/follow when not following is a silent no-op (204).
+    Covers social.py unfollow_user's `if follow:` False branch (line 199->exit)."""
+    _, headers = alice
+    bob_user, _ = bob
+    # Never followed bob — unfollow must succeed without error
+    r = client.delete(f"/users/{bob_user['id']}/follow", headers=headers)
+    assert r.status_code == 204
+
+
+def test_follow_concurrent_integrity_error_is_swallowed(client, alice, bob, monkeypatch):
+    """When db.commit() raises IntegrityError (concurrent follow from two
+    simultaneous requests) the handler rolls back and continues silently —
+    covers social.py follow_user's db.rollback() branch (lines 188-189)."""
+    from sqlalchemy.exc import IntegrityError as SAIntegrityError
+    from sqlalchemy.orm import Session
+
+    _, headers = alice
+    bob_user, _ = bob
+
+    call_count = [0]
+    original_commit = Session.commit
+
+    def patched_commit(self):
+        # Only raise on the first commit that's adding a Follow
+        from renar_backend.models import Follow
+
+        new_follows = [obj for obj in self.new if isinstance(obj, Follow)]
+        if new_follows and call_count[0] == 0:
+            call_count[0] += 1
+            self.rollback()
+            raise SAIntegrityError("INSERT INTO follows", {}, Exception("unique violation"))
+        return original_commit(self)
+
+    monkeypatch.setattr(Session, "commit", patched_commit)
+    r = client.post(f"/users/{bob_user['id']}/follow", headers=headers)
+    assert r.status_code == 204  # no error propagated
+
+
+def test_total_watch_minutes_direct_call(alice):
+    """Call _total_watch_minutes() directly to cover lines 77-84 in social.py."""
+    from renar_backend.database import SessionLocal
+    from renar_backend.routers.social import _total_watch_minutes
+
+    user, _ = alice
+    with SessionLocal() as db:
+        result = _total_watch_minutes(user["id"], db)
+    assert result == 0  # no library entries yet

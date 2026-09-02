@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 13:10:00.000000
-Revised: 2026/08/24 12:39:05.320719
+Revised: 2026/09/02 10:57:41.615749
 
 Registration/email-change confirmation codes (users/email_confirmation.py,
 routers/auth.py's /auth/confirm-email + /auth/resend-confirmation) and the
@@ -773,3 +773,79 @@ def test_genuinely_confirmed_account_still_rejects_resend(client, fixed_code):
     token = _login_token(client)
     r = client.post("/auth/resend-confirmation-session", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 400
+
+
+# ---------- email_confirmation internal unit tests ----------
+
+
+def test_verify_code_invalid_hash_returns_false():
+    """verify_code with a malformed bcrypt hash returns False —
+    covers email_confirmation.py lines 125-126."""
+    result = ec.verify_code("123456", "not-a-valid-bcrypt-hash")
+    assert result is False
+
+
+def test_send_confirmation_email_without_brevo_key_logs_and_returns(monkeypatch):
+    """send_confirmation_email with no brevo_api_key logs the code and
+    returns without hitting the network — covers lines 134-141."""
+    from renar_backend.config import settings
+
+    monkeypatch.setattr(settings, "brevo_api_key", "")
+    # Just call it — should not raise and should not call http_client.post
+    called = []
+    monkeypatch.setattr(ec._http_client, "post", lambda *a, **kw: called.append(True) or None)
+    ec.send_confirmation_email("user@example.com", "123456", "en", "register")
+    assert called == []  # network was never called
+
+
+def test_send_confirmation_email_http_status_error_logged(monkeypatch):
+    """An HTTP 4xx/5xx from Brevo is logged without raising —
+    covers email_confirmation.py lines 163-169."""
+    import httpx
+
+    from renar_backend.config import settings
+
+    monkeypatch.setattr(settings, "brevo_api_key", "fake-api-key")
+
+    class _BadResponse:
+        status_code = 500
+        text = "Internal Error"
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("500", request=None, response=self)
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(ec._http_client, "post", lambda *a, **kw: _BadResponse())
+    # Must not raise:
+    ec.send_confirmation_email("user@example.com", "123456", "en", "register")
+
+
+def test_send_confirmation_email_http_error_logged(monkeypatch):
+    """A network-level httpx.HTTPError from Brevo is logged without raising —
+    covers email_confirmation.py lines 170-171."""
+    import httpx
+
+    from renar_backend.config import settings
+
+    monkeypatch.setattr(settings, "brevo_api_key", "fake-api-key")
+
+    def _raise(*a, **kw):
+        raise httpx.ConnectError("timeout")
+
+    monkeypatch.setattr(ec._http_client, "post", _raise)
+    # Must not raise:
+    ec.send_confirmation_email("user@example.com", "123456", "en", "register")
+
+
+def test_prune_removes_old_resend_attempts():
+    """_prune() removes entries older than the cutoff via popleft() —
+    covers email_confirmation.py line 212."""
+    import time
+    from collections import deque
+
+    dq = deque([time.time() - 400, time.time() - 400, time.time()])
+    cutoff = time.time() - 300  # entries older than 300s are stale
+    ec._prune(dq, cutoff)
+    assert len(dq) == 1  # only the fresh entry remains

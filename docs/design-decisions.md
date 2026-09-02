@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/08/27 09:56:07.812300 )
+[//]: # (+ Revised: 	2026/09/02 10:57:10.338921 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -343,7 +343,13 @@ a timer) means either a background job that runs whether or not anyone's
 using the app, or an unlucky request eating a live recompute when the
 cache expires. Both were tried and rejected in favor of storing the
 total on `users.total_watch_minutes` (migration `a7c2e9f4b816`), so a
-read is just an indexed `COUNT`.
+read is just an indexed `COUNT`. The index on that column is a **two-column
+composite** `(total_watch_minutes, created_at)` — the second column serves
+as the tiebreaker for the ranking query (`total_watch_minutes > :own OR
+(total_watch_minutes = :own AND created_at < :own_ts)`), resolving ties
+with a stable secondary key via a single index scan. `models.py` declares
+this explicitly in `User.__table_args__` so `alembic check` stays clean and
+autogenerate cannot silently drop the second column.
 
 **Why this doesn't repeat the `login_count` mistake:** the whole reason
 per-user counters are normally derived at read time (see above) is that
@@ -702,6 +708,27 @@ comments (strip authorship, keep content and subtree) instead of deleting
 them becomes worth the added complexity (an UPDATE with cascading side
 effects instead of a clean DELETE, plus a decision on what "anonymized
 comment" renders as client-side).
+
+### `User.avatar_image` is eager (`lazy="joined"`)
+
+`User.avatar` (the URL property) accesses `self.avatar_image.hash`.  Every
+list endpoint that renders per-author avatars — comment threads (up to 100
+root comments plus their replies), review lists, follower/following pages,
+user-search results — calls this property after loading User objects through
+a `selectinload(…author)` or a direct `db.query(User)`.  Without eager
+loading, each distinct author in a response would fire a separate
+`SELECT * FROM images WHERE id = ?` (N+1).
+
+`lazy="joined"` on the relationship makes SQLAlchemy add a LEFT OUTER JOIN on
+`images` to every query that loads a `User` row, pre-populating `avatar_image`
+in the session identity map.  Since it is a M→1 relationship keyed on the
+indexed `images.id` PK, the join costs at most one additional row per user
+and eliminates the whole class of avatar-related N+1 across the codebase
+without touching individual query sites.
+
+`background_image` stays lazy: it is only accessed in the single-user `/me`
+and profile endpoints, never in a list context, so adding a second JOIN to
+every user load would cost more than it saves.
 
 ### Content-addressed image store (`storage.py`)
 
@@ -2307,3 +2334,61 @@ account — no user enumeration, matching `/auth/login`'s own error shape.
 Success starts the same grace-period deletion the in-app path does (not an
 immediate purge), so logging back in during the grace period still cancels
 it either way.
+
+### `endpoint_stats` and `request_days` use `INSERT … ON CONFLICT DO UPDATE`, not UPDATE-or-INSERT
+
+`UsageTrackingMiddleware._record` previously did a server-side UPDATE then,
+if no rows were affected, an INSERT. Under concurrent load (e.g. 10 threads
+marking episodes simultaneously), all threads can see `updated == 0`
+simultaneously (the row doesn't exist yet) and race to INSERT, producing a
+`UniqueViolation` on `uq_endpoint_stat` for every thread but the winner.
+The middleware's outer `except Exception` caught these silently — requests
+returned 200 — but the losing threads' analytics events were discarded.
+
+**Why upsert:** PostgreSQL's `INSERT … ON CONFLICT DO UPDATE` is atomic at
+the engine level; concurrent inserts on the same key are serialised by the
+row lock taken during conflict resolution, not by application-level locking.
+The anonymous-user path (NULL `user_id`) is exempt because PostgreSQL unique
+constraints treat NULLs as distinct, so ON CONFLICT never fires for NULL
+keys; that path keeps the UPDATE-or-INSERT pattern which is safe for
+anonymous traffic (rate-limited before reaching this code).
+
+**Scope:** `uq_endpoint_stat` (method, path, user_id) and `uq_request_day`
+(user_id, day) both gained upserts. The self-delete guard (a user deleting
+their account between request dispatch and middleware post-processing) is now
+checked once per `_record` call rather than duplicated in both helpers.
+
+### `strike_and_maybe_ban` uses `with_for_update()` on the Strike row
+
+`strike_and_maybe_ban` (`users/security.py`) previously did a plain SELECT
+on the `strikes` table row for an offending IP, then incremented `count` and
+committed. Under attack load the same IP can trigger multiple concurrent ban
+calls (e.g. a flood that generates 50 hits simultaneously all cross the
+`flood_ban_per_minute` threshold at once). All concurrent callers would read
+the same `count = N`, all write `count = N+1`, and the correct `count = N+k`
+was never stored — systematically under-counting repeat offenses and delaying
+permaban escalation.
+
+**Why `with_for_update()`:** Postgres row-level locks serialise writers: the
+second concurrent call blocks at the SELECT until the first commits its
+incremented count, then reads the fresh value and increments again.
+
+The initial INSERT path (first offense ever) is wrapped in a `begin_nested()`
+savepoint: if two threads race to create the first strike row for an IP, the
+second's INSERT hits the `unique=True` constraint on `Strike.ip`, the
+savepoint rolls back the insert only, and the caller re-reads the now-existing
+row with `with_for_update()` and applies the increment normally.
+
+### `permaban` uses a savepoint, not SELECT-then-INSERT
+
+`permaban` (`users/security.py`) previously checked
+`if not db.query(BannedIP)…first()` before inserting. If two concurrent
+requests from the same IP both triggered a permaban before either had added
+the IP to `_permabanned` (the GIL-atomic in-memory set that gates subsequent
+calls), both would pass the guard and race to INSERT, causing the second to
+throw `IntegrityError` caught by the outer `except Exception` — logged as an
+unexpected error even though the ban was already active.
+
+**Fix:** unconditionally `db.add(BannedIP(…))` inside a `begin_nested()`
+savepoint; catch `IntegrityError` silently. The in-memory set is the
+authoritative gate; the DB write is only persistence.

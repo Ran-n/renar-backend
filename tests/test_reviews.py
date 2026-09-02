@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:37:50.106302
-Revised: 2026/08/24 15:31:01.810896
+Revised: 2026/09/02 10:58:09.669589
 
 Reviews: whitelist-gated create, edit/delete own, one-per-title,
 ownership, and the admin whitelist toggle.
@@ -134,6 +134,96 @@ def test_admin_whitelist_toggle_round_trip(client, alice, admin_enabled):
 
     me = client.get("/auth/me", headers=headers).json()
     assert me["can_review"] is False
+
+
+def test_reviewer_ids_empty_set_returns_empty(client):
+    """reviewer_ids() with an empty iterable returns set() without querying —
+    covers reviews.py line 42."""
+    from renar_backend.routers.reviews import reviewer_ids
+
+    with SessionLocal() as db:
+        result = reviewer_ids(db, [])
+    assert result == set()
+
+
+def test_list_reviews_no_tmdb_id_no_title_rejected(client, alice):
+    """GET /media/reviews with neither tmdb_id nor title returns 422 —
+    covers reviews.py _require_target line 49."""
+    _, headers = alice
+    r = client.get("/media/reviews", params={"media_type": "film"}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_create_review_no_tmdb_id_no_title_rejected(client, alice):
+    """POST /media/reviews with neither tmdb_id nor title returns 422 —
+    covers reviews.py _require_target line 49 via create path."""
+    user, headers = alice
+    _whitelist(user["id"])
+    r = client.post(
+        "/media/reviews",
+        params={"media_type": "film"},
+        json={"text": "Great film.", "rating": 90},
+        headers=headers,
+    )
+    assert r.status_code == 422
+
+
+def test_list_reviews_unknown_title_returns_empty(client, alice):
+    """GET /media/reviews for an unseen tmdb_id returns [] without error —
+    covers reviews.py line 95."""
+    _, headers = alice
+    params = {"media_type": "film", "tmdb_id": 99999, "title": "Unknown Film"}
+    r = client.get("/media/reviews", params=params, headers=headers)
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_create_review_tmdb_id_only_unknown_title_rejected(client, alice):
+    """POST /media/reviews with tmdb_id only for an unknown title returns 422 —
+    covers reviews.py _resolve_target lines 74-80."""
+    user, headers = alice
+    _whitelist(user["id"])
+    r = client.post(
+        "/media/reviews",
+        params={"media_type": "film", "tmdb_id": 77777},
+        json={"text": "Great film.", "rating": 90},
+        headers=headers,
+    )
+    assert r.status_code == 422
+    assert "tmdb_id" in r.json()["detail"].lower() or "title" in r.json()["detail"].lower()
+
+
+def test_create_review_integrity_error_returns_409(client, alice, monkeypatch):
+    """When db.commit() raises IntegrityError past the Python-level duplicate
+    check, the handler returns 409 — covers reviews.py lines 129-133."""
+    from sqlalchemy.exc import IntegrityError as SAIntegrityError
+    from sqlalchemy.orm import Session
+
+    user, headers = alice
+    _whitelist(user["id"])
+
+    call_count = [0]
+    original_commit = Session.commit
+
+    def patched_commit(self):
+        from renar_backend.models import Review as ReviewModel
+
+        new_reviews = [obj for obj in self.new if isinstance(obj, ReviewModel)]
+        if new_reviews and call_count[0] == 0:
+            call_count[0] += 1
+            self.rollback()
+            raise SAIntegrityError("INSERT INTO reviews", {}, Exception("unique violation"))
+        return original_commit(self)
+
+    monkeypatch.setattr(Session, "commit", patched_commit)
+
+    r = client.post(
+        "/media/reviews",
+        params={"media_type": "film", "tmdb_id": 949, "title": "Heat"},
+        json={"text": "A genuine masterpiece.", "rating": 95},
+        headers=headers,
+    )
+    assert r.status_code == 409
 
 
 def test_delete_account_removes_reviews_and_whitelist(client, alice):

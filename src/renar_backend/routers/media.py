@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/08/27 09:52:21.793868
+Revised: 2026/09/02 10:57:10.872908
 """
 
 import logging
@@ -10,7 +10,8 @@ from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import Date, and_, cast, exists, func, inspect, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload
 
 from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, find_or_create_title, find_title
 from ..database import get_db
@@ -333,7 +334,16 @@ def create_media(
         last_watched_at=utcnow() if data.status in (WatchStatus.watching, WatchStatus.completed) else None,
     )
     db.add(item)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # Two simultaneous adds for the same title raced past the duplicate
+        # SELECT check above — surface the same 409 as the pre-commit path.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You already saved this title",
+        ) from None
     db.refresh(item)
     # Record the initial watch event so this viewing has a WatchEvent to
     # attach a rating to. Only for statuses that imply an actual watch
@@ -957,7 +967,10 @@ def list_episodes(
                 "still_url": f"/images/{s.still_image.hash}",
                 "still_source_url": s.still_image.source_url,
             }
-            for s in db.query(EpisodeCustomStill).filter(EpisodeCustomStill.media_item_id == item.id).all()
+            for s in db.query(EpisodeCustomStill)
+            .options(joinedload(EpisodeCustomStill.still_image))
+            .filter(EpisodeCustomStill.media_item_id == item.id)
+            .all()
         ]
         if item.owner.is_premium
         else []

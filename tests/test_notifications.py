@@ -2,15 +2,17 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.529415
-Revised: 2026/08/27 09:52:22.369669
+Revised: 2026/09/02 10:58:00.022795
 
 Notification center + the new-episode checker (with an injected TMDB fetch).
 """
 
 from datetime import date, timedelta
 
+from fastapi import HTTPException
+
 from renar_backend.database import SessionLocal
-from renar_backend.models import Notification
+from renar_backend.models import LibraryEntry, Notification, Title, WatchStatus
 from renar_backend.social.notifier import check_new_episodes
 
 
@@ -202,5 +204,70 @@ def test_checker_survives_fetch_failure(client, alice):
     db = SessionLocal()
     try:
         assert check_new_episodes(db, fetch=broken_fetch) == 0
+    finally:
+        db.close()
+
+
+def test_checker_delinks_dead_tmdb_id_on_404(client, alice):
+    """A 404 from TMDB means the id is gone — clear it for re-matching."""
+    _, headers = alice
+    _tracked_show(client, headers)
+
+    def not_found_fetch(tmdb_id: int) -> dict:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    db = SessionLocal()
+    try:
+        assert check_new_episodes(db, fetch=not_found_fetch) == 0
+        title = db.query(Title).filter_by(title="Dark").one()
+        assert title.tmdb_id is None
+    finally:
+        db.close()
+
+
+def test_checker_skips_show_with_no_air_date(client, alice):
+    """Missing air_date in last_episode_to_air must not create a notification."""
+    _, headers = alice
+    _tracked_show(client, headers)
+
+    def fetch_no_air_date(tmdb_id: int) -> dict:
+        return {
+            "name": "Dark",
+            "last_episode_to_air": {
+                "air_date": None,
+                "season_number": 2,
+                "episode_number": 3,
+                "name": "Episode",
+            },
+        }
+
+    db = SessionLocal()
+    try:
+        assert check_new_episodes(db, fetch=fetch_no_air_date) == 0
+    finally:
+        db.close()
+
+
+def test_checker_reactivates_completed_show_on_new_episode(client, alice):
+    """A show parked as 'completed' must be flipped back to 'watching' when
+    a new unwatched episode airs so it reappears on Home."""
+    user, headers = alice
+    show = _tracked_show(client, headers)
+
+    # move to completed directly in the DB
+    db = SessionLocal()
+    try:
+        db.get(LibraryEntry, show["id"]).status = WatchStatus.completed
+        db.commit()
+    finally:
+        db.close()
+
+    aired = (date.today() - timedelta(days=1)).isoformat()
+    db = SessionLocal()
+    try:
+        n = check_new_episodes(db, fetch=_fake_fetch(aired))
+        assert n == 1
+        entry = db.get(LibraryEntry, show["id"])
+        assert entry.status == WatchStatus.watching
     finally:
         db.close()
