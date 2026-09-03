@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/08/20 21:15:27.769249
+Revised: 2026/09/03 08:33:31.304026
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -23,6 +23,7 @@ from ..catalog.titles import popular_local_titles, search_local_titles
 from ..database import SessionLocal, get_db
 from ..media.image_cache import store_external_image, stored_external_image
 from ..models import LibraryEntry, MediaType, Title, User
+from ..schemas import TmdbCreditsOut, TmdbDetailsOut, TmdbEpisodeOut, TmdbImageOut, TmdbResultOut
 from ..tmdb.tmdb_http import BACKDROP_BASE, IMAGE_BASE, POSTER_BASE, TMDB_KIND, http_client, tmdb_get
 from ..tmdb.tmdb_store import TMDB_LOCALE, cached_tmdb
 from ..users.auth import get_current_user
@@ -115,7 +116,7 @@ def _map_local_titles(titles: list[Title], poster_overrides: dict[int, str] | No
     return results
 
 
-@router.get("/search")
+@router.get("/search", response_model=list[TmdbResultOut])
 def search_tmdb(
     query: str = Query(min_length=1, max_length=200),
     media_type: str = Query(pattern="^(film|tv_show)$"),
@@ -140,7 +141,7 @@ def search_tmdb(
     return _map_results(results, limit=10, poster_overrides=overrides)
 
 
-@router.get("/trending")
+@router.get("/trending", response_model=list[TmdbResultOut])
 def trending_tmdb(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     language: str = Query(default="en", pattern="^(en|gl|pt|es|eo)$"),
@@ -161,7 +162,7 @@ def trending_tmdb(
     return _map_results(results, poster_overrides=overrides)
 
 
-@router.get("/popular")
+@router.get("/popular", response_model=list[TmdbResultOut])
 def popular_tmdb(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     language: str = Query(default="en", pattern="^(en|gl|pt|es|eo)$"),
@@ -243,7 +244,7 @@ def _map_details(media_type: str, tmdb_id: int, data: dict) -> dict:
     }
 
 
-@router.get("/details")
+@router.get("/details", response_model=TmdbDetailsOut)
 def details_tmdb(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     tmdb_id: int = Query(ge=1),
@@ -311,7 +312,7 @@ def image_proxy(size: str, filename: str):
     return Response(resp.content, media_type=ctype, headers=_IMMUTABLE)
 
 
-@router.get("/posters")
+@router.get("/posters", response_model=list[TmdbImageOut])
 def alternate_posters(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     tmdb_id: int = Query(ge=1),
@@ -331,7 +332,7 @@ def alternate_posters(
     ]
 
 
-@router.get("/backdrops")
+@router.get("/backdrops", response_model=list[TmdbImageOut])
 def alternate_backdrops(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     tmdb_id: int = Query(ge=1),
@@ -351,7 +352,7 @@ def alternate_backdrops(
     ]
 
 
-@router.get("/episode-stills")
+@router.get("/episode-stills", response_model=list[TmdbImageOut])
 def alternate_episode_stills(
     tmdb_id: int = Query(ge=1),
     season: int = Query(ge=0),
@@ -387,7 +388,7 @@ def fetch_poster_bytes(url: str) -> bytes:
     return resp.content
 
 
-@router.get("/credits")
+@router.get("/credits", response_model=TmdbCreditsOut)
 def credits_tmdb(
     media_type: str = Query(pattern="^(film|tv_show)$"),
     tmdb_id: int = Query(ge=1),
@@ -432,7 +433,7 @@ def credits_tmdb(
     return {"cast": cast, "crew": crew, "directors": directors, "director_role": role}
 
 
-@router.get("/season")
+@router.get("/season", response_model=list[TmdbEpisodeOut])
 def season_tmdb(
     tmdb_id: int = Query(ge=1),
     season_number: int = Query(ge=0),

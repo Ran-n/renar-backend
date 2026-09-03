@@ -2,13 +2,14 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/08/24 12:39:04.306500
+Revised: 2026/09/03 14:06:02.021190
 """
 
 import re
 from datetime import date, datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from .models import COUNTDOWN_TIERS, MediaType, WatchStatus
 from .users.premium import EPISODE_LABEL_STYLES, PROGRESS_STYLES, THEME_NAMES
@@ -20,6 +21,12 @@ _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # validator below and by the admin reset-password endpoint.
 BCRYPT_MAX_PASSWORD_BYTES = 72
 
+# Postgres INTEGER (int4) upper bound.  A Pydantic int field with no `le=`
+# happily accepts values Postgres can't store (e.g. 2**31), which then reach
+# the DB driver as an unhandled DataError/NumericValueOutOfRange (500) rather
+# than a clean 422 — fuzz-discovered on RewatchCreate.season/episode.
+PG_INT32_MAX = 2147483647
+
 
 def _password_fits_bcrypt(password: str) -> str:
     # Reject oversized passwords here so the client gets a 422, not a 500
@@ -29,22 +36,27 @@ def _password_fits_bcrypt(password: str) -> str:
 
 
 def _no_nul_bytes(value: str) -> str:
-    # Postgres text columns reject NUL (0x00) outright — a username
-    # containing one would otherwise reach the DB layer as an unhandled
-    # DataError (500) on the very next query that filters by it, both here
-    # at registration (the username-taken check) and at login (routers/
-    # auth.py's login(), which guards form.username the same way since it
-    # bypasses this schema entirely — see tests/test_fuzz.py).
+    # Postgres text columns reject NUL (0x00) outright — a value containing
+    # one reaches the DB driver as an unhandled DataError (500) rather than
+    # a clean 422.  This validator is the single authoritative guard; it is
+    # wired into every free-text field that is written to or queried against
+    # a Postgres text column, via the SafeStr annotated type below.
     if "\x00" in value:
         raise ValueError("must not contain NUL bytes")
     return value
+
+
+# Annotated type for any free-text field that reaches Postgres.  Pydantic
+# v2 runs AfterValidator only when the value is a str (not None), so
+# `SafeStr | None` is safe — None values skip the check correctly.
+SafeStr = Annotated[str, AfterValidator(_no_nul_bytes)]
 
 
 # ---------- auth ----------
 
 
 class UserCreate(BaseModel):
-    username: str = Field(min_length=3, max_length=50)
+    username: SafeStr = Field(min_length=3, max_length=50)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     invite_code: str | None = None
@@ -53,7 +65,6 @@ class UserCreate(BaseModel):
     turnstile_token: str = ""
 
     _password_len = field_validator("password")(_password_fits_bcrypt)
-    _username_no_nul = field_validator("username")(_no_nul_bytes)
 
 
 class RegistrationStatus(BaseModel):
@@ -303,7 +314,7 @@ class CustomPosterSet(BaseModel):
 
 
 class ProfileUpdate(BaseModel):
-    username: str | None = Field(default=None, min_length=3, max_length=50)
+    username: SafeStr | None = Field(default=None, min_length=3, max_length=50)
     email: EmailStr | None = None
     language: str | None = Field(default=None, min_length=2, max_length=10, pattern=r"^[a-z]{2,10}$")
     avatar_b64: str | None = Field(default=None, max_length=8_000_000)  # raw upload, re-encoded server-side
@@ -364,7 +375,7 @@ class TitleOut(BaseModel):
 class LibraryEntryCreate(BaseModel):
     # title-identifying fields: used once, to find-or-create the shared Title
     media_type: MediaType
-    title: str = Field(min_length=1, max_length=300)
+    title: SafeStr = Field(min_length=1, max_length=300)
     year: int | None = Field(default=None, ge=1880, le=2100)
     poster_url: str | None = Field(default=None, max_length=500)
     tmdb_id: int | None = None
@@ -372,10 +383,10 @@ class LibraryEntryCreate(BaseModel):
     total_episodes: int | None = Field(default=None, ge=0)
     genres: list[str] | None = Field(default=None, max_length=20)
     # user-owned fields
-    url: str | None = Field(default=None, max_length=500)
+    url: SafeStr | None = Field(default=None, max_length=500)
     status: WatchStatus = WatchStatus.want_to_watch
     rating: int | None = Field(default=None, ge=1, le=100)
-    notes: str | None = None
+    notes: SafeStr | None = None
     current_season: int | None = Field(default=None, ge=0)
     current_episode: int | None = Field(default=None, ge=0)
     episodes_watched: int = Field(default=0, ge=0)
@@ -387,14 +398,28 @@ class LibraryEntryUpdate(BaseModel):
     # user picked in the "Link to catalog" search — see update_media's
     # _relink_tmdb. Not usable to change an already-linked entry's match.
     tmdb_id: int | None = Field(default=None, ge=1)
-    url: str | None = Field(default=None, max_length=500)
+    url: SafeStr | None = Field(default=None, max_length=500)
     status: WatchStatus | None = None
     rating: int | None = Field(default=None, ge=1, le=100)
-    notes: str | None = None
+    notes: SafeStr | None = None
     current_season: int | None = Field(default=None, ge=0)
     current_episode: int | None = Field(default=None, ge=0)
     episodes_watched: int | None = Field(default=None, ge=0)
     is_favorite: bool | None = None
+
+    @field_validator("status", "episodes_watched", "is_favorite")
+    @classmethod
+    def _not_explicitly_null(cls, v: object, info) -> object:
+        # These three fields are Optional only so a PATCH can omit them
+        # (leave unchanged, via update_media's exclude_unset=True) — none of
+        # them is nullable on the DB side (media_items.status/episodes_watched/
+        # is_favorite are all NOT NULL). Explicitly sending e.g.
+        # {"status": null} or {"is_favorite": null} used to reach
+        # setattr(item, field, None) and die as an unhandled IntegrityError
+        # (500); fuzz-discovered on both status and is_favorite.
+        if v is None:
+            raise ValueError(f"{info.field_name} must not be explicitly null")
+        return v
 
 
 class LibraryEntryOut(BaseModel):
@@ -448,8 +473,8 @@ class EpisodeSet(BaseModel):
 
 
 class EpisodeBulk(BaseModel):
-    season: int = Field(ge=0)
-    episodes: list[int] = Field(min_length=1, max_length=500)
+    season: int = Field(ge=0, le=PG_INT32_MAX)
+    episodes: list[Annotated[int, Field(le=PG_INT32_MAX)]] = Field(min_length=1, max_length=500)
     watched: bool = True
 
 
@@ -457,11 +482,11 @@ class EpisodeBulk(BaseModel):
 
 
 class ListCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
+    name: SafeStr = Field(min_length=1, max_length=100)
 
 
 class ListUpdate(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
+    name: SafeStr = Field(min_length=1, max_length=100)
 
 
 class ListItemCreate(BaseModel):
@@ -469,7 +494,7 @@ class ListItemCreate(BaseModel):
     # knows a title by (media_type, tmdb_id), never the internal title_id
     media_type: MediaType
     tmdb_id: int | None = None
-    title: str | None = Field(default=None, max_length=300)
+    title: SafeStr | None = Field(default=None, max_length=300)
 
 
 class ListItemReorder(BaseModel):
@@ -479,17 +504,252 @@ class ListItemReorder(BaseModel):
     item_ids: list[int] = Field(min_length=1, max_length=2000)
 
 
+class ListItemOut(BaseModel):
+    """One title inside a custom list — shape returned by POST /{list_id}/items
+    and embedded in the items array of ListDetailOut."""
+
+    id: int
+    title_id: int
+    media_type: MediaType
+    tmdb_id: int | None = None
+    title: str
+    poster_url: str | None = None
+    position: int
+
+
+class ListOut(BaseModel):
+    """Summary of a custom list (no items) — shape returned by GET /lists,
+    POST /lists, and PATCH /lists/{list_id}."""
+
+    id: int
+    name: str
+    item_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ListDetailOut(BaseModel):
+    """Full custom list including its ordered items — shape returned by
+    GET /lists/{list_id} and PUT /lists/{list_id}/items/reorder."""
+
+    id: int
+    name: str
+    item_count: int
+    created_at: datetime
+    updated_at: datetime
+    items: list[ListItemOut] = []
+
+
+# ---------- social ----------
+
+
+class PublicUserOut(BaseModel):
+    """Public profile shape returned by /users/search, /users/{user_id},
+    /users/{user_id}/following, and /users/{user_id}/followers.
+    Mirrors _public_users_batch() in routers/social.py field-for-field."""
+
+    id: int
+    username: str
+    avatar: str | None = None
+    # premium flair (from users/premium.py's flair())
+    badge: str | None = None
+    ring_color: str | None = None
+    name_color: str | None = None
+    background: str | None = None
+    is_reviewer: bool = False
+    created_at: datetime
+    followers: int = 0
+    following: int = 0
+    items: int = 0
+    total_watch_minutes: int = 0
+    is_following: bool = False
+    is_me: bool = False
+
+
+class FeedEntryOut(BaseModel):
+    """One activity-feed item — shape returned by GET /feed.
+    Mirrors the dict literal inside activity_feed() in routers/social.py."""
+
+    user_id: int
+    username: str
+    # premium flair (from users/premium.py's flair())
+    badge: str | None = None
+    ring_color: str | None = None
+    name_color: str | None = None
+    background: str | None = None
+    is_reviewer: bool = False
+    item_id: int
+    media_type: str
+    title: str
+    year: int | None = None
+    poster_url: str | None = None
+    status: str
+    rating: int | None = None
+    tmdb_id: int | None = None
+    episodes_watched: int = 0
+    total_episodes: int | None = None
+    updated_at: datetime
+
+
+# ---------- tmdb ----------
+
+
+class TmdbResultOut(BaseModel):
+    """One search/trending/popular result — shape returned by /tmdb/search,
+    /tmdb/trending, and /tmdb/popular. Mirrors _map_results() and
+    _map_local_titles() (the TMDB-down fallback) in routers/tmdb.py."""
+
+    tmdb_id: int
+    title: str
+    year: int | None = None
+    poster_url: str | None = None
+    overview: str = ""
+    # None in the local-catalog fallback (_map_local_titles) when TMDB is down;
+    # always an int from the live TMDB path (_map_results, which sets 0 for no data)
+    vote_average: int | None = None
+    vote_count: int = 0
+
+
+class TmdbSeasonSummaryOut(BaseModel):
+    """Season header inside TmdbDetailsOut.seasons — one entry per non-special
+    season. Mirrors the inner dict in _map_details()."""
+
+    season: int
+    name: str
+    episode_count: int = 0
+    air_date: str | None = None
+
+
+class TmdbDetailsOut(BaseModel):
+    """Full title detail page — shape returned by GET /tmdb/details.
+    Mirrors _map_details() in routers/tmdb.py field-for-field."""
+
+    tmdb_id: int
+    title: str | None = None
+    original_title: str | None = None
+    year: int | None = None
+    runtime_minutes: int | None = None
+    total_episodes: int | None = None
+    total_seasons: int | None = None
+    genres: list[str] = []
+    poster_url: str | None = None
+    backdrop_url: str | None = None
+    overview: str | None = None
+    tagline: str | None = None
+    vote_average: int | None = None
+    vote_count: int = 0
+    show_status: str | None = None
+    last_air_year: int | None = None
+    # None for films (they have no season structure)
+    seasons: list[TmdbSeasonSummaryOut] | None = None
+    # Raw TMDB "YYYY-MM-DD" release/first-air date; distinct from `year` —
+    # used by the frontend to badge a not-yet-released title.
+    release_date: str | None = None
+
+
+class TmdbImageOut(BaseModel):
+    """One alternate poster/backdrop/episode-still entry — shape returned by
+    /tmdb/posters, /tmdb/backdrops, and /tmdb/episode-stills."""
+
+    preview_url: str
+    url: str
+
+
+class TmdbPersonOut(BaseModel):
+    """Director / creator entry inside TmdbCreditsOut.directors."""
+
+    name: str
+    profile_url: str | None = None
+
+
+class TmdbCastMemberOut(BaseModel):
+    """One cast member in TmdbCreditsOut.cast."""
+
+    name: str
+    character: str = ""
+    profile_url: str | None = None
+
+
+class TmdbCrewMemberOut(BaseModel):
+    """One crew member in TmdbCreditsOut.crew (excludes the director/creator,
+    who surfaces in TmdbCreditsOut.directors instead)."""
+
+    name: str
+    # job title (e.g. "Screenplay", "Director of Photography")
+    character: str = ""
+    department: str = ""
+    profile_url: str | None = None
+
+
+class TmdbGuestStarOut(BaseModel):
+    """Guest star on one episode, nested inside TmdbEpisodeOut.guest_stars."""
+
+    name: str
+    character: str = ""
+    profile_url: str | None = None
+
+
+class TmdbCreditsOut(BaseModel):
+    """Full credits bundle — shape returned by GET /tmdb/credits.
+    Mirrors the return dict of credits_tmdb() in routers/tmdb.py."""
+
+    cast: list[TmdbCastMemberOut] = []
+    crew: list[TmdbCrewMemberOut] = []
+    directors: list[TmdbPersonOut] = []
+    director_role: str = ""
+
+
+class TmdbEpisodeOut(BaseModel):
+    """One episode in a season listing — shape returned by GET /tmdb/season.
+    Mirrors the inner dict of season_tmdb() in routers/tmdb.py."""
+
+    season: int
+    episode: int
+    name: str
+    air_date: str | None = None
+    runtime: int | None = None
+    overview: str = ""
+    still_url: str | None = None
+    vote_average: int | None = None
+    vote_count: int = 0
+    guest_stars: list[TmdbGuestStarOut] = []
+
+
 # ---------- reviews ----------
 
 
 class ReviewCreate(BaseModel):
-    text: str = Field(min_length=1, max_length=10000)
+    text: SafeStr = Field(min_length=1, max_length=10000)
     rating: int = Field(ge=1, le=100)
 
 
 class ReviewUpdate(BaseModel):
-    text: str = Field(min_length=1, max_length=10000)
+    text: SafeStr = Field(min_length=1, max_length=10000)
     rating: int = Field(ge=1, le=100)
+
+
+class ReviewOut(BaseModel):
+    """Public shape returned by every /media/reviews endpoint that produces a
+    body — list, create (201), and update. Mirrors _review_out() in
+    routers/reviews.py field-for-field so FastAPI's response_model= doesn't
+    silently drop any field the frontend consumes."""
+
+    id: int
+    title_id: int
+    user_id: int
+    username: str
+    avatar: str | None = None
+    # premium flair fields (from users/premium.py's flair())
+    badge: str | None = None
+    ring_color: str | None = None
+    name_color: str | None = None
+    background: str | None = None
+    is_reviewer: bool = False
+    text: str
+    rating: int
+    created_at: datetime
+    updated_at: datetime
+    mine: bool
 
 
 # ---------- comments ----------
@@ -498,23 +758,80 @@ class ReviewUpdate(BaseModel):
 class CommentCreate(BaseModel):
     media_type: MediaType
     tmdb_id: int | None = None
-    title: str | None = Field(default=None, max_length=300)
+    title: SafeStr | None = Field(default=None, max_length=300)
     season: int | None = Field(default=None, ge=0)
     episode: int | None = Field(default=None, ge=0)
     parent_id: int | None = Field(default=None, ge=1)  # reply target; must be in the same thread
-    text: str = Field(min_length=1, max_length=2000)
+    text: SafeStr = Field(min_length=1, max_length=2000)
 
 
 class CommentReportCreate(BaseModel):
-    reason: str = Field(default="", max_length=500)
+    reason: SafeStr = Field(default="", max_length=500)
+
+
+class CommentOut(BaseModel):
+    """Public shape returned by GET /comments and POST /comments. Mirrors
+    _comment_out() in routers/comments.py field-for-field — see that
+    function for the per-field semantics. Replies are nested recursively;
+    model_rebuild() below resolves the forward reference."""
+
+    id: int
+    user_id: int
+    parent_id: int | None = None
+    username: str
+    avatar: str | None = None
+    # premium flair fields (from users/premium.py's flair())
+    badge: str | None = None
+    ring_color: str | None = None
+    name_color: str | None = None
+    background: str | None = None
+    is_reviewer: bool = False
+    text: str
+    created_at: datetime
+    likes: int
+    dislikes: int
+    liked_by_me: bool
+    disliked_by_me: bool
+    mine: bool
+    reported_by_me: bool
+    seen_by_author: bool
+    author_rating: int | None = None
+    replies: list["CommentOut"] = []  # noqa: UP037 — self-reference; removing quotes causes NameError at class body eval
+
+
+CommentOut.model_rebuild()
+
+
+# ---------- notifications ----------
+
+
+class NotificationOut(BaseModel):
+    """Public shape returned by GET /notifications. Mirrors _out() in
+    routers/notifications.py field-for-field."""
+
+    id: int
+    kind: str
+    title: str
+    body: str
+    media_item_id: int | None = None
+    season: int | None = None
+    episode: int | None = None
+    read: bool
+    created_at: datetime
+
+
+class UnreadCountOut(BaseModel):
+    """Shape returned by GET /notifications/unread_count."""
+
+    count: int
 
 
 # ---------- rewatch ----------
 
 
 class RewatchCreate(BaseModel):
-    season: int | None = Field(default=None, ge=0)
-    episode: int | None = Field(default=None, ge=0)
+    season: int | None = Field(default=None, ge=0, le=PG_INT32_MAX)
+    episode: int | None = Field(default=None, ge=0, le=PG_INT32_MAX)
 
 
 class WatchEventRatingUpdate(BaseModel):
@@ -535,3 +852,102 @@ class WatchEventRatingUpdate(BaseModel):
 class RatingsBatchRequest(BaseModel):
     media_type: MediaType
     tmdb_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+# ---------- import ----------
+
+
+class ImportSourceOut(BaseModel):
+    """One importable origin — shape returned by GET /import/sources."""
+
+    kind: str
+    label: str
+
+
+class ImportStartedOut(BaseModel):
+    """Shape returned by POST /import (202 Accepted)."""
+
+    status: str
+    kind: str
+
+
+class ImportStatusOut(BaseModel):
+    """Live-or-persisted import progress — shape returned by GET /import/status.
+
+    ``summary`` is a free-form dict whose keys depend on the importer kind
+    (renar vs. tvtime); ``None`` while an import has never run or is still
+    in-flight.
+    """
+
+    stage: str
+    finished: bool
+    error: str | None = None
+    summary: dict | None = None
+    done: int
+    total: int
+    kind: str | None = None
+
+
+# ---------- export ----------
+
+
+class ExportRequestedOut(BaseModel):
+    """Shape returned by POST /export/data (202 Accepted)."""
+
+    status: str
+
+
+class ExportStatusOut(BaseModel):
+    """Shape returned by GET /export/data/status.
+
+    ``error`` is only present when ``state`` is ``"failed"``; omitting it
+    for every other state avoids a spurious ``null`` in the JSON body.
+    """
+
+    state: str
+    error: str | None = None
+
+
+# ---------- upcoming ----------
+
+
+class UpcomingItemOut(BaseModel):
+    """One upcoming release (TV episode or film) — shape returned by
+    GET /upcoming and GET /upcoming/history."""
+
+    item_id: int
+    media_type: str
+    title: str
+    tmdb_id: int | None = None
+    poster_url: str | None = None
+    date: str
+    days_until: int
+    season: int | None = None
+    episode: int | None = None
+    episode_name: str | None = None
+
+
+# ---------- svc ----------
+
+
+class BansOut(BaseModel):
+    """Shape returned by GET /svc/bans.
+
+    ``ips`` is the list of permanently banned IPs; ``temp_bans`` maps each
+    active temp-banned IP to its Unix-timestamp expiry (float)."""
+
+    ips: list[str]
+    temp_bans: dict[str, float]
+
+
+class SvcStatusOut(BaseModel):
+    """Simple acknowledgement returned by POST /svc/bans."""
+
+    status: str
+
+
+class StrikeResultOut(BaseModel):
+    """Shape returned by POST /svc/strikes."""
+
+    permanent: bool
+    banned_until: float | None = None

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:36:14.018888
-Revised: 2026/09/02 10:57:10.784995
+Revised: 2026/09/03 08:33:31.134009
 
 Custom lists: user-made collections of titles, independent of LibraryEntry's
 own tracking status. See models.py's List/ListItem docstrings.
@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
 from ..models import List, ListItem, User
-from ..schemas import ListCreate, ListItemCreate, ListItemReorder, ListUpdate
+from ..schemas import ListCreate, ListDetailOut, ListItemCreate, ListItemOut, ListItemReorder, ListOut, ListUpdate
 from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/lists", tags=["lists"])
@@ -68,7 +68,7 @@ def _get_owned_list(db: Session, list_id: int, me: User, *, with_items: bool = F
     return lst
 
 
-@router.get("")
+@router.get("", response_model=list[ListOut])
 def list_lists(db: Session = Depends(get_db), me: User = Depends(get_current_user)):
     lists = (
         db.query(List)
@@ -80,7 +80,7 @@ def list_lists(db: Session = Depends(get_db), me: User = Depends(get_current_use
     return [_list_out(lst) for lst in lists]
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED, response_model=ListOut)
 def create_list(data: ListCreate, db: Session = Depends(get_db), me: User = Depends(get_current_user)):
     lst = List(user_id=me.id, name=data.name.strip())
     db.add(lst)
@@ -89,13 +89,13 @@ def create_list(data: ListCreate, db: Session = Depends(get_db), me: User = Depe
     return _list_out(lst)
 
 
-@router.get("/{list_id}")
+@router.get("/{list_id}", response_model=ListDetailOut)
 def get_list(list_id: int, db: Session = Depends(get_db), me: User = Depends(get_current_user)):
     lst = _get_owned_list(db, list_id, me, with_items=True)
     return _list_out(lst, with_items=True)
 
 
-@router.patch("/{list_id}")
+@router.patch("/{list_id}", response_model=ListOut)
 def rename_list(list_id: int, data: ListUpdate, db: Session = Depends(get_db), me: User = Depends(get_current_user)):
     lst = _get_owned_list(db, list_id, me)
     lst.name = data.name.strip()
@@ -111,7 +111,7 @@ def delete_list(list_id: int, db: Session = Depends(get_db), me: User = Depends(
     db.commit()
 
 
-@router.post("/{list_id}/items", status_code=status.HTTP_201_CREATED)
+@router.post("/{list_id}/items", status_code=status.HTTP_201_CREATED, response_model=ListItemOut)
 def add_list_item(
     list_id: int,
     data: ListItemCreate,
@@ -160,7 +160,7 @@ def remove_list_item(
     db.commit()
 
 
-@router.put("/{list_id}/items/reorder")
+@router.put("/{list_id}/items/reorder", response_model=ListDetailOut)
 def reorder_list_items(
     list_id: int,
     data: ListItemReorder,

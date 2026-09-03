@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/09/02 10:57:10.695196
+Revised: 2026/09/03 08:54:41.214667
 
 One upload endpoint, many import origins: POST /import takes whatever file
 the user picked, auto-detects which registered importer it belongs to (by
@@ -52,6 +52,7 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
 from ..models import ImportJob, User
+from ..schemas import ImportSourceOut, ImportStartedOut, ImportStatusOut
 from ..users import renar_import, tvtime_import
 from ..users.auth import get_current_user
 
@@ -80,12 +81,12 @@ def _detect(data: bytes):
     return None
 
 
-@router.get("/sources")
+@router.get("/sources", response_model=list[ImportSourceOut])
 def import_sources():
     return [{"kind": importer.KIND, "label": importer.LABEL} for importer in IMPORTERS]
 
 
-@router.post("", status_code=status.HTTP_202_ACCEPTED)
+@router.post("", status_code=status.HTTP_202_ACCEPTED, response_model=ImportStartedOut)
 async def import_data(
     file: UploadFile,
     claimed_kind: str | None = Form(None),
@@ -140,7 +141,7 @@ async def import_data(
     return {"status": "started", "kind": importer.KIND}
 
 
-@router.get("/status")
+@router.get("/status", response_model=ImportStatusOut)
 def import_status(user: User = Depends(get_current_user)):
     for importer in IMPORTERS:
         live = importer.progress(user.id)

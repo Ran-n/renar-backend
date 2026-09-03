@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/09/02 10:57:11.048396
+Revised: 2026/09/03 08:33:31.219074
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -18,7 +18,7 @@ from ..catalog.titles import WITH_TITLE_GENRES
 from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import Follow, LibraryEntry, MediaType, Title, User, WatchStatus
-from ..schemas import LibraryEntryOut
+from ..schemas import FeedEntryOut, LibraryEntryOut, PublicUserOut
 from ..users.auth import get_current_user
 from ..users.premium import flair
 from .reviews import reviewer_ids
@@ -153,7 +153,7 @@ def _public_user(target: User, me: User, db: Session) -> dict:
     return _public_users_batch([target], me, db)[0]
 
 
-@router.get("/users/search")
+@router.get("/users/search", response_model=list[PublicUserOut])
 def search_users(
     q: str = Query(min_length=1, max_length=50),
     db: Session = Depends(get_db),
@@ -163,7 +163,7 @@ def search_users(
     return _public_users_batch(users, me, db)
 
 
-@router.get("/users/{user_id}")
+@router.get("/users/{user_id}", response_model=PublicUserOut)
 def get_user(
     user_id: int,
     db: Session = Depends(get_db),
@@ -201,7 +201,7 @@ def unfollow_user(
         db.commit()
 
 
-@router.get("/users/{user_id}/following")
+@router.get("/users/{user_id}/following", response_model=list[PublicUserOut])
 def list_following(
     user_id: int,
     limit: int | None = None,
@@ -218,7 +218,7 @@ def list_following(
     return _public_users_batch([users_by_id[f.followed_id] for f in follows], me, db)
 
 
-@router.get("/users/{user_id}/followers")
+@router.get("/users/{user_id}/followers", response_model=list[PublicUserOut])
 def list_followers(
     user_id: int,
     limit: int | None = None,
@@ -252,7 +252,7 @@ def user_media(
     )
 
 
-@router.get("/feed")
+@router.get("/feed", response_model=list[FeedEntryOut])
 def activity_feed(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),

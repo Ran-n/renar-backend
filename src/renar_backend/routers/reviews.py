@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:36:40.138297
-Revised: 2026/09/02 10:57:10.961341
+Revised: 2026/09/02 16:41:42.184866
 
 Reviews: longer, considered write-ups on a title, distinct from the casual
 Comments thread — restricted to a hand-picked whitelist of reviewers (see
@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, selectinload
 from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
 from ..models import MediaType, Review, ReviewWhitelist, User
-from ..schemas import ReviewCreate, ReviewUpdate
+from ..schemas import ReviewCreate, ReviewOut, ReviewUpdate
 from ..users.auth import get_current_user
 from ..users.premium import flair
 
@@ -81,7 +81,7 @@ def _resolve_target(db: Session, media_type: MediaType, tmdb_id: int | None, tit
     return find_or_create_title(db, media_type, tmdb_id, title)
 
 
-@router.get("/reviews")
+@router.get("/reviews", response_model=list[ReviewOut])
 def list_reviews(
     media_type: MediaType,
     tmdb_id: int | None = None,
@@ -104,7 +104,7 @@ def list_reviews(
     return [_review_out(r, me, r.user_id in rev_ids) for r in reviews]
 
 
-@router.post("/reviews", status_code=status.HTTP_201_CREATED)
+@router.post("/reviews", status_code=status.HTTP_201_CREATED, response_model=ReviewOut)
 def create_review(
     data: ReviewCreate,
     media_type: MediaType,
@@ -139,7 +139,7 @@ def create_review(
     return _review_out(review, me, True)
 
 
-@router.patch("/reviews/{review_id}")
+@router.patch("/reviews/{review_id}", response_model=ReviewOut)
 def update_review(
     review_id: int,
     data: ReviewUpdate,

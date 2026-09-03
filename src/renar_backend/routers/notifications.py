@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.426784
-Revised: 2026/07/16 09:54:31.122846
+Revised: 2026/09/02 16:41:42.296149
 
 Notification center endpoints.
 """
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Notification, User
+from ..schemas import NotificationOut, UnreadCountOut
 from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -34,7 +35,7 @@ def _out(n: Notification) -> dict:
     }
 
 
-@router.get("")
+@router.get("", response_model=list[NotificationOut])
 def list_notifications(
     unread_only: bool = False,
     db: Session = Depends(get_db),
@@ -46,7 +47,7 @@ def list_notifications(
     return [_out(n) for n in query.order_by(Notification.created_at.desc()).limit(50)]
 
 
-@router.get("/unread_count")
+@router.get("/unread_count", response_model=UnreadCountOut)
 def unread_count(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),

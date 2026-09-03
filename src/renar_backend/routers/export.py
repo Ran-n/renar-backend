@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/21 00:00:00.000000
-Revised: 2026/07/27 17:29:18.049719
+Revised: 2026/09/03 08:54:41.314533
 
 Personal-data export (GDPR Art. 20): request a build, poll its status,
 download the result once ready. Available to every authenticated user
@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal, get_db
 from ..models import ExportJob, User, utcnow
+from ..schemas import ExportRequestedOut, ExportStatusOut
 from ..users import export_queue
 from ..users.auth import get_current_user
 from ..users.export import export_expiry_days, export_is_ready, export_path
@@ -43,7 +44,7 @@ def _format_retry_at(retry_at: datetime) -> str:
     return f"in {', '.join(parts)} ({retry_at:%Y-%m-%d %H:%M} UTC)"
 
 
-@router.post("/data", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/data", status_code=status.HTTP_202_ACCEPTED, response_model=ExportRequestedOut)
 def request_export(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     live = export_queue.status(user.id)
     if live and live["state"] in ("queued", "processing"):
@@ -73,7 +74,7 @@ def request_export(user: User = Depends(get_current_user), db: Session = Depends
     return {"status": "queued"}
 
 
-@router.get("/data/status")
+@router.get("/data/status", response_model=ExportStatusOut, response_model_exclude_none=True)
 def export_status(user: User = Depends(get_current_user)):
     live = export_queue.status(user.id)
     if live is not None and live["state"] in ("queued", "processing"):

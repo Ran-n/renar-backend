@@ -137,6 +137,7 @@ def permaban(ip: str, reason: str) -> None:
             db.commit()
     except Exception:
         _log.exception("could not persist permaban for %s (in-memory ban still active)", ip)
+        raise
     _log.warning("PERMABANNED %s: %s", ip, reason)
 
 

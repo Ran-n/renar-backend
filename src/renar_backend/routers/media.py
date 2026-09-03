@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/09/02 10:57:10.872908
+Revised: 2026/09/03 13:39:31.636982
 """
 
 import logging
@@ -1431,8 +1431,14 @@ def bulk_episodes(
     user: User = Depends(get_current_user),
 ):
     item = _get_owned_item(item_id, user, db)
+    # Dedupe: a repeated episode number in the same request would otherwise
+    # attempt two INSERTs against the same (media_item_id, season, episode)
+    # unique constraint below (`existing` is snapshotted once, before the
+    # loop, so it never reflects an earlier iteration's own uncommitted add)
+    # — fuzz-discovered.
+    episodes = list(dict.fromkeys(data.episodes))
     if data.watched:
-        _assert_no_future_episodes(item, data.season, data.episodes, db)
+        _assert_no_future_episodes(item, data.season, episodes, db)
     existing = {
         w.episode: w
         for w in db.query(EpisodeWatch).filter(
@@ -1440,7 +1446,7 @@ def bulk_episodes(
         )
     }
     unmarked_episodes = []
-    for ep in data.episodes:
+    for ep in episodes:
         if data.watched and ep not in existing:
             db.add(EpisodeWatch(media_item_id=item.id, season=data.season, episode=ep))
             # Same rule as set_episode's single-toggle path: a newly-watched

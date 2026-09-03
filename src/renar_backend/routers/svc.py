@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 17:00:30.032438
-Revised: 2026/08/20 10:39:54.344580
+Revised: 2026/09/03 08:54:41.530967
 
 Machine-to-machine endpoints so the renar-frontend web server's own
 anti-abuse guard (renar-frontend/src/renar_frontend/anti_abuse.py) can
@@ -33,6 +33,7 @@ from .. import site_settings
 from ..config import settings
 from ..database import get_db
 from ..models import BannedIP
+from ..schemas import BansOut, SafeStr, StrikeResultOut, SvcStatusOut
 from ..users.security import client_ip, load_active_temp_bans, permaban, strike_and_maybe_ban
 
 router = APIRouter(prefix="/svc", tags=["svc"])
@@ -81,16 +82,16 @@ def _require_internal_secret(request: Request, x_internal_secret: str | None = H
 
 
 class BanRequest(BaseModel):
-    ip: str
-    reason: str
+    ip: SafeStr
+    reason: SafeStr
 
 
 class StrikeRequest(BaseModel):
-    ip: str
-    reason: str
+    ip: SafeStr
+    reason: SafeStr
 
 
-@router.get("/bans", dependencies=[Depends(_require_internal_secret)])
+@router.get("/bans", dependencies=[Depends(_require_internal_secret)], response_model=BansOut)
 def list_banned_ips(db: Session = Depends(get_db)):
     return {
         "ips": [ip for (ip,) in db.query(BannedIP.ip).all()],
@@ -98,13 +99,13 @@ def list_banned_ips(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/bans", dependencies=[Depends(_require_internal_secret)])
+@router.post("/bans", dependencies=[Depends(_require_internal_secret)], response_model=SvcStatusOut)
 def add_banned_ip(body: BanRequest):
     permaban(body.ip, body.reason)
     return {"status": "ok"}
 
 
-@router.post("/strikes", dependencies=[Depends(_require_internal_secret)])
+@router.post("/strikes", dependencies=[Depends(_require_internal_secret)], response_model=StrikeResultOut)
 def add_strike(body: StrikeRequest):
     """For non-honeypot bans (floods) — goes through the same persisted,
     escalating strike/temp-ban logic used for this server's own offenders,

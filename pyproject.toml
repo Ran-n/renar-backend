@@ -1,6 +1,6 @@
 [project]
 name = "renar-backend"
-version = "0.19.2"
+version = "0.19.3"
 description = "FastAPI backend for Renar — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]

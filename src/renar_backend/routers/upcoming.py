@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.990684
-Revised: 2026/08/26 20:43:27.619479
+Revised: 2026/09/03 08:54:41.423427
 
 Upcoming releases for tracked titles: next episodes and film premieres.
 """
@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, aliased
 from ..catalog.titles import WITH_TITLE_GENRES
 from ..database import get_db
 from ..models import Episode, LibraryEntry, MediaType, Title, User, WatchStatus
+from ..schemas import UpcomingItemOut
 from ..tmdb.tmdb_store import sync_show_episodes
 from ..users.auth import get_current_user
 
@@ -60,7 +61,7 @@ def _film_entry(entry: LibraryEntry, title: Title, today: date) -> dict | None:
     }
 
 
-@router.get("")
+@router.get("", response_model=list[UpcomingItemOut])
 def get_upcoming(
     status_filter: WatchStatus | None = None,
     media_type: MediaType | None = None,
@@ -109,7 +110,7 @@ def get_upcoming(
     return out
 
 
-@router.get("/history")
+@router.get("/history", response_model=list[UpcomingItemOut])
 def get_upcoming_history(
     status_filter: WatchStatus | None = None,
     media_type: MediaType | None = None,
