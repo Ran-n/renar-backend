@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/09/02 10:57:10.338921 )
+[//]: # (+ Revised: 	2026/09/03 20:03:13.653108 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -2098,24 +2098,36 @@ fast:
   before trusting its results, and widen `paths_to_mutate` deliberately
   from there.
 - **fuzz** (`tests/test_fuzz.py`) — hypothesis feeding malformed/random
-  input (including NUL bytes and other control characters) at
-  `/auth/register`, `/auth/login`, `POST /media`, and
-  `/auth/confirm-email-session` through a real `TestClient`, asserting no
-  500 ever comes back.
+  input (including NUL bytes and other control characters) at endpoints
+  across `/auth`, `/media`, `/comments`, `/notifications`, `/premium`,
+  `/media/reviews`, `/lists`, `/auth/profile`, and more through a real
+  `TestClient`, asserting no 500 ever comes back. Six deterministic
+  NUL-byte regression tests sit alongside the hypothesis-based tests for
+  fast, guaranteed regression coverage of the specific crash inputs.
 
-**This one earned its keep immediately:** the fuzz suite found a real bug
-on its first real run — `POST /auth/login` with a NUL byte in `username`
-crashed with an unhandled `sqlalchemy.exc.DataError` (Postgres text columns
-reject `0x00` outright), a genuine 500 a malicious or just-malformed client
-could trigger. Fixed by rejecting NUL bytes in `UserCreate.username`
-(`schemas.py`'s `_no_nul_bytes` validator — `EmailStr` already rejects NUL
-on its own) and by an explicit guard in `login()` (`routers/auth.py`),
-since the login form bypasses that schema entirely (`OAuth2PasswordRequestForm`
-has no pydantic validators of its own). See `test_login_username_with_nul_byte_unauthorized_not_500`/
-`test_register_username_with_nul_byte_rejected_not_500` in `tests/test_auth.py`
-for the fast, deterministic regression coverage (the fuzz test itself
-depends on hypothesis's random search, which isn't guaranteed to hit this
-exact case on every run).
+**This one earned its keep immediately — twice.** The fuzz suite found two
+separate real NUL-byte bugs:
+
+1. First run: `POST /auth/login` with a NUL byte in `username` crashed with
+   an unhandled `sqlalchemy.exc.DataError` (Postgres text columns reject
+   `0x00` outright). Fixed by rejecting NUL bytes in `UserCreate.username`
+   (`schemas.py`'s `_no_nul_bytes` validator) and by an explicit guard in
+   `login()` (`routers/auth.py`), since the login form bypasses that schema
+   entirely (`OAuth2PasswordRequestForm` has no pydantic validators of its
+   own). Fast regression tests in `tests/test_auth.py` cover this.
+
+2. Expanded fuzz suite run (2026-09-03): `POST /lists` with a NUL byte in
+   `name` crashed the same way — Pydantic's `min_length`/`max_length`
+   validators accepted NUL as a valid character while Postgres rejected it
+   at the driver layer. Fixed globally via a shared annotated type:
+   `SafeStr = Annotated[str, AfterValidator(_no_nul_bytes)]` in `schemas.py`.
+   Applied to every free-text field that reaches a Postgres text column
+   (`ListCreate.name`, `ListUpdate.name`, `CommentCreate.text`/`title`,
+   `CommentReportCreate.reason`, `ReviewCreate.text`, `ReviewUpdate.text`,
+   `LibraryEntryCreate.title`/`notes`/`url`, `LibraryEntryUpdate.notes`/`url`,
+   `ListItemCreate.title`, `ProfileUpdate.username`, and `UserCreate.username`
+   refactored to the shared type). Six deterministic 422-assertion regression
+   tests added to `tests/test_fuzz.py`.
 
 ---
 

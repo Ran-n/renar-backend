@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.875365
-Revised: 2026/09/02 10:57:10.606896
+Revised: 2026/09/02 16:41:42.055667
 
 Comments on titles (global across users), with likes, nested replies and
 user reports.
@@ -18,7 +18,7 @@ from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
 from ..events import publish as publish_event
 from ..models import Comment, CommentLike, CommentReport, EpisodeWatch, LibraryEntry, MediaType, User
-from ..schemas import CommentCreate, CommentReportCreate
+from ..schemas import CommentCreate, CommentOut, CommentReportCreate
 from ..social.comment_threads import ancestor_depth, load_thread, resolve_root_scope
 from ..users.auth import get_current_user
 from ..users.premium import flair
@@ -112,7 +112,7 @@ def _require_target(tmdb_id: int | None, title: str | None) -> None:
         )
 
 
-@router.get("")
+@router.get("", response_model=list[CommentOut])
 def list_comments(
     media_type: MediaType,
     tmdb_id: int | None = Query(default=None, ge=1),
@@ -148,7 +148,7 @@ def list_comments(
     return [_comment_out(by_id[cid], me, children_by_parent, watch_info, rev_ids) for cid in root_ids]
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED, response_model=CommentOut)
 def create_comment(
     data: CommentCreate,
     db: Session = Depends(get_db),

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/09/02 10:58:12.005083
+Revised: 2026/09/03 14:06:02.207669
 
 AbuseGuardMiddleware + login backoff: what gets stopped, and — just as
 important for a commercial deployment — what must never be flagged.
@@ -478,13 +478,18 @@ def test_load_permabans_db_exception_is_swallowed(monkeypatch):
     assert not security._permabans_loaded  # stays False on error
 
 
-def test_permaban_db_exception_still_adds_to_memory(monkeypatch):
-    """permaban adds to the in-memory set even when DB write fails (lines 138-139)."""
+def test_permaban_db_exception_still_adds_to_memory_but_raises(monkeypatch):
+    """permaban adds to the in-memory set (effective immediately, line 129)
+    even when the DB write fails — but the DB failure itself now propagates
+    rather than being silently swallowed (see the fuzz-discovered "no silent
+    failure" fix: a caller like POST /svc/bans must be able to tell a ban
+    didn't actually persist, instead of always getting back {"status": "ok"})."""
     from renar_backend.users import security
 
     monkeypatch.setattr(security, "SessionLocal", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
     security._permabanned.discard("9.8.7.6")
-    security.permaban("9.8.7.6", "test")
+    with pytest.raises(RuntimeError, match="db down"):
+        security.permaban("9.8.7.6", "test")
     assert "9.8.7.6" in security._permabanned  # memory set updated despite DB error
 
 

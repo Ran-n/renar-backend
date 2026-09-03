@@ -199,3 +199,34 @@ def test_repeated_wrong_secret_from_non_exempt_ip_triggers_permaban(client, monk
         client.get("/svc/bans", headers={"X-Internal-Secret": "wrong"})
 
     assert "testclient" in security._permabanned
+
+
+def test_permaban_db_failure_surfaces_as_500(client, monkeypatch):
+    """A DB failure in permaban() must propagate rather than be silently swallowed.
+
+    Before the fix, permaban() caught all exceptions and only logged them,
+    returning normally — so POST /svc/bans always replied 200 "ok" even when
+    the ban was never persisted. After the fix, the exception is re-raised.
+
+    Starlette's TestClient default (raise_server_exceptions=True) propagates
+    the unhandled exception as a Python exception rather than capturing it as an
+    HTTP 500 response; pytest.raises is the correct way to assert this.  In a
+    real uvicorn deployment the same uncaught exception becomes HTTP 500.
+
+    The in-memory ban is still applied before the DB attempt (that line runs
+    unconditionally), so the ban is effective for the life of the process even
+    though the DB write failed.
+    """
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("simulated DB failure")
+
+    monkeypatch.setattr(security, "SessionLocal", _explode)
+    with pytest.raises(RuntimeError, match="simulated DB failure"):
+        client.post(
+            "/svc/bans",
+            json={"ip": "10.255.0.1", "reason": "db-failure-test"},
+            headers={"X-Internal-Secret": SECRET},
+        )
+    # In-memory ban was applied before the DB attempt — enforcement still works.
+    assert "10.255.0.1" in security._permabanned

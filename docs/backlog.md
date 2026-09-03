@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/09/02 10:57:10.248802 )
+[//]: # (+ Revised: 	2026/09/03 20:03:13.341634 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -21,21 +21,56 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
   commonly-recognized *category* of test set up (unit, integration, smoke,
   regression, contract, property, snapshot, security, load, mutation
   (config only — unverified, no WSL on the dev machine), fuzz), but having
-  the category doesn't mean coverage is complete within it:
-  - **Contract**: renar-frontend's `test_contract.py` only checks that
-    every `ApiClient` call site's `(METHOD, path)` exists in this
-    backend's OpenAPI schema. It says nothing about request body shape,
-    response body shape, query parameters, or status codes — a renamed
-    response field, a changed enum value, or a backend route the frontend
-    never calls at all all sail through untouched. Not 100%; closer to a
-    routing smoke check.
-  - **Property/fuzz**: covers `schemas.py`'s validators, `models.py`'s
-    `normalize_title_key`, and a handful of endpoints (`/auth/register`,
-    `/auth/login`, `POST /media`, `/auth/confirm-email-session`,
-    `POST /comments`, `DELETE /comments/{id}`, `POST /notifications/{id}/read`,
-    `DELETE /notifications/{id}`). Every other router (`premium.py`,
-    `upcoming.py`, `stats.py`, `imports.py`, `export.py`, `social.py`,
-    `admin.py`, ...) still has no property or fuzz coverage at all.
+  the category doesn't mean coverage is complete within it. Updated
+  2026-09-03 after a coverage push across response_model/contract,
+  property/fuzz, and load, plus four real bugs the fuzzing turned up:
+  - **Contract / response_model**: `response_model=` coverage went from
+    26/149 to **63/149** endpoints (`comments.py`, `reviews.py`,
+    `notifications.py`, `lists.py`, `social.py`, `tmdb.py`, `imports.py`,
+    `export.py`, `upcoming.py`, `svc.py` — all now fully modelled, each
+    batch verified against the full backend suite with zero regressions).
+    The 8 `admin/*` router files were audited and found to need **no**
+    `response_model` at all: every one of their 38 routes returns
+    server-rendered HTML or a redirect (`include_in_schema=False`), never
+    JSON, and none are called from renar-frontend's `ApiClient` — confirmed
+    by grep, zero matches. Remaining gap: `media.py` still has 15/24
+    endpoints uncovered (the bulk of what's left), plus the
+    `CustomPosterSet`-based endpoints on other routers. renar-frontend's
+    `test_contract.py` now does real response-body schema validation
+    (not just route existence) against ~20 of the newly-modelled
+    endpoints — see renar-frontend's `docs/backlog.md`.
+  - **Property/fuzz**: grew from 8 to **38 tests**. Newly covered:
+    `premium/style` (validator-branch-dense), `reviews` (create + update,
+    rating boundaries), `profile` update, all 4 `lists.py` endpoints,
+    `import` upload (`st.binary()` fuzzing), `svc/bans` + `svc/strikes`,
+    and 7 `media.py` endpoints (patch, ratings-batch, rewatch
+    post/delete, rewatch-event rating, set-episode, bulk-episodes).
+    Confirmed still-empty: `media.py`'s `CustomPosterSet`-based endpoints
+    (poster/backdrop/still — base64 image content is a meaningfully
+    different fuzz shape, wants its own focused pass) and the admin
+    sub-router bodies (not audited this round).
+    **Four real production bugs found and fixed** in the process, each
+    fuzz-discovered, each with a regression test: (1) any free-text field
+    reaching Postgres with a NUL byte crashed with an unhandled 500
+    (Pydantic's length validators accept NUL as "1 character"; Postgres
+    text columns reject it outright) — fixed globally via a shared
+    `SafeStr` annotated type across 11 fields; (2) `permaban()` swallowed
+    DB write failures in a bare `except Exception: log`, so a failed ban
+    still returned `{"status": "ok"}` to the caller — fixed to re-raise
+    (in-memory ban still applies immediately, matching the existing
+    contract); (3) `PATCH /media/{id}` with an explicit `null` on
+    `status`, `is_favorite`, or `episodes_watched` reached
+    `setattr(item, field, None)` on a NOT NULL column — fixed with a field
+    validator rejecting explicit null on all three (they're Optional only
+    to support partial-update omission, never meant to be nullable); (4)
+    `RewatchCreate.season`/`episode` and `EpisodeBulk`'s fields had no
+    upper bound, so a value like `2**31` passed Pydantic's `ge=0` and then
+    overflowed Postgres's `INTEGER` column — fixed with a shared
+    `PG_INT32_MAX` bound; found alongside it, a duplicate episode number
+    in one `EpisodeBulk` request (`episodes: [0, 0]`) hit a unique-
+    constraint violation because the "already exists" check was
+    snapshotted once before the loop — fixed by deduping the incoming
+    list first. See `docs/design-decisions.md` for the full writeups.
   - **Unit/integration**: coverage exists per-router (`tests/test_*.py`).
     First real baseline measured (`pytest --cov`, default marker set): 82%
     branch coverage. Raised to **96%** in the 2026-09-02 pass, targeting
@@ -56,22 +91,26 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
     `_test_server.py` (0%, invoked only as a subprocess by
     `tests/integration/`, never measured by this instrumented run).
   - **Mutation**: config exists (`pyproject.toml`'s `[tool.mutmut]`) but
-    has never actually run (no WSL on the dev machine) and is scoped to
-    just `models.py` + `schemas.py`.
-  - **Load**: one locust profile (`tests/load/locustfile.py`) covering
-    health/me/library/stats/registration-status. No coverage of
-    write-heavy paths (comments, ratings, imports) under concurrent load.
+    has never actually run (no WSL on the dev machine, and the owner
+    declined installing it 2026-09-03) and is scoped to just `models.py`
+    + `schemas.py`.
+  - **Load**: `tests/load/locustfile.py` now also covers comment posting,
+    rating, and adding to library as weighted write tasks (~27% of
+    simulated traffic), alongside the existing health/me/library/stats/
+    registration-status reads. Import writes were deliberately not added —
+    they need real multipart file bytes that pass content-based detection,
+    better exercised by integration tests than a locust task.
 
   Getting to "full coverage, all test types, 100%" means, in rough order:
-  extend property/fuzz to every router with a pydantic-validated request body; turn the contract
-  test into real schema validation (response body against the OpenAPI
-  response model, not just route existence — `schemathesis` or hand-rolled
-  `jsonschema` validation against `app.openapi()` are the two realistic
-  options); verify the mutmut config under WSL/Linux CI and widen
-  `paths_to_mutate` to the whole `src/` tree; extend the locust profile to
-  cover every write endpoint. See renar-frontend's `docs/backlog.md` for
-  the matching frontend-side gaps (E2E journeys beyond the one that
-  exists, visual coverage beyond the boot screen).
+  add `response_model` to the remaining `media.py` endpoints and the
+  `CustomPosterSet`-based ones (same router-by-router, verify-against-
+  full-suite discipline as the batches above — response_model changes
+  carry real regression risk); fuzz the `CustomPosterSet` endpoints with a
+  dedicated binary-content pass; audit the admin sub-router bodies for
+  fuzz coverage; verify the mutmut config under WSL/Linux CI and widen
+  `paths_to_mutate` to the whole `src/` tree. See renar-frontend's
+  `docs/backlog.md` for the matching frontend-side gaps (E2E journeys
+  beyond what now exists, visual coverage beyond the four screens added).
 
 - **[Future] Set up WSL on the dev machine and actually run mutmut.**
   `mutmut` refuses to run at all on native Windows — not a project

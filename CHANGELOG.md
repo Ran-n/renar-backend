@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/09/02 10:57:10.160089 )
+[//]: # (+ Revised: 	2026/09/03 20:03:13.031232 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.19.3] - 2026-09-03
+
+### Fixed
+
+- `schemas.py`: fuzz-discovered production bug — any free-text field reaching
+  Postgres with a NUL (`\x00`) byte crashed with an unhandled `psycopg.DataError`
+  (500) because Pydantic's length validators accepted NUL as a valid character
+  while Postgres text columns reject it. Fixed globally via a shared annotated
+  type `SafeStr = Annotated[str, AfterValidator(_no_nul_bytes)]` that rejects NUL
+  with a clean 422. Applied to all free-text write paths: `ListCreate.name`,
+  `ListUpdate.name`, `CommentCreate.text`/`title`, `CommentReportCreate.reason`,
+  `ReviewCreate.text`, `ReviewUpdate.text`, `LibraryEntryCreate.title`/`notes`/`url`,
+  `LibraryEntryUpdate.notes`/`url`, `ListItemCreate.title`,
+  `ProfileUpdate.username`, and `UserCreate.username` (refactored from per-field
+  `field_validator` to the shared type). Added six deterministic regression tests
+  in `tests/test_fuzz.py`.
+- `users/security.py`'s `permaban()`: a failed DB persist was only logged, not
+  re-raised, so a caller had no way to know the ban didn't actually stick beyond
+  the in-memory guard. Now re-raises after logging.
+- `routers/media.py`'s `PATCH /media/{id}`: an explicit `null` on `status`,
+  `is_favorite`, or `episodes_watched` reached `setattr(item, field, None)`
+  on a NOT NULL column — fuzz-discovered. Those fields are `Optional` only to
+  support partial-update omission, never meant to accept a real `null`; added
+  a field validator rejecting it on all three.
+- `schemas.py`'s `RewatchCreate.season`/`episode` and `EpisodeBulk`'s episode
+  list had no upper bound, so a value like `2**31` passed `ge=0` and then
+  overflowed Postgres's `INTEGER` column — fuzz-discovered. Fixed with a
+  shared `PG_INT32_MAX` bound. Found alongside it: a duplicate episode number
+  in one `EpisodeBulk` request (`episodes: [0, 0]`) hit the unique-constraint
+  check because `existing` was snapshotted once before the loop — fixed by
+  deduping the incoming list first (`routers/media.py`'s `bulk_episodes`).
+
+### Changed
+
+- `response_model` coverage grown from 26/149 to 63/149 endpoints across
+  `comments.py`, `export.py`, `imports.py`, `lists.py`, `media.py`,
+  `notifications.py`, `reviews.py`, `social.py`, `svc.py`, `tmdb.py`, and
+  `upcoming.py`, backed by ~25 new response schemas in `schemas.py`
+  (`ListOut`/`ListDetailOut`, `TmdbResultOut` and friends, `ReviewOut`,
+  `CommentOut`, `NotificationOut`, `ImportStatusOut`, `ExportStatusOut`,
+  `UpcomingItemOut`, `BansOut`, `SvcStatusOut`, etc.) — no behaviour change,
+  documents real response shapes for OpenAPI consumers and the frontend's
+  contract test.
 
 ## [0.19.2] - 2026-09-02
 
