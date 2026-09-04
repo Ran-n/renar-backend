@@ -142,6 +142,20 @@ def test_list_default_limit(client, alice):
     assert len(page2) == 5
 
 
+def test_list_limit_bounds(client, alice):
+    """limit must be 1..2000; out-of-range values are rejected with 422."""
+    _, headers = alice
+    # zero is below ge=1
+    assert client.get("/media", params={"limit": 0}, headers=headers).status_code == 422
+    # 2001 is above le=2000
+    assert client.get("/media", params={"limit": 2001}, headers=headers).status_code == 422
+    # negative offset is below ge=0
+    assert client.get("/media", params={"offset": -1}, headers=headers).status_code == 422
+    # boundary values are accepted
+    assert client.get("/media", params={"limit": 1}, headers=headers).status_code == 200
+    assert client.get("/media", params={"limit": 2000}, headers=headers).status_code == 200
+
+
 def test_list_keys(client, alice, bob):
     _, headers = alice
     _, bob_headers = bob
@@ -922,3 +936,34 @@ def test_bulk_episodes_remark_already_watched_is_noop(client, alice):
     )
     assert r.status_code == 200
     assert r.json()["item_episodes_watched"] == 2
+
+
+# ---------- list_rewatch_events boundary (pass 2 audit) ----------
+
+
+def test_list_rewatch_events_limit_rejects_out_of_range(client, alice):
+    """limit must be 1-200; out-of-range values are rejected with 422."""
+    _, headers = alice
+    film = _create(client, headers, title="Heat", status="completed")
+    r = client.get(f"/media/{film['id']}/rewatch-events", params={"limit": 0}, headers=headers)
+    assert r.status_code == 422
+    r = client.get(f"/media/{film['id']}/rewatch-events", params={"limit": 201}, headers=headers)
+    assert r.status_code == 422
+
+
+def test_list_rewatch_events_offset_pagination(client, alice):
+    """offset>0 skips that many events; combined with limit the caller can
+    page through a long history without receiving an unbounded response."""
+    _, headers = alice
+    film = _create(client, headers, title="Heat", status="completed")
+    # 3 rewatches on top of the initial watch event = 4 total
+    for _ in range(3):
+        client.post(f"/media/{film['id']}/rewatch", json={}, headers=headers)
+
+    all_events = client.get(f"/media/{film['id']}/rewatch-events", headers=headers).json()
+    assert len(all_events) == 4
+
+    # offset=1 should skip the newest event (newest-first ordering)
+    page = client.get(f"/media/{film['id']}/rewatch-events", params={"limit": 2, "offset": 1}, headers=headers).json()
+    assert len(page) == 2
+    assert page[0]["id"] == all_events[1]["id"]

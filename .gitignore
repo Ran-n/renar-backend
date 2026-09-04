@@ -10,3 +10,7 @@ venv/
 /certs/
 t3.py
 .coverage
+.pytest_cache/
+htmlcov/
+dist/
+*.egg-info/

@@ -29,7 +29,7 @@ import multiprocessing
 import os
 import signal
 import socket
-import subprocess
+import subprocess  # dev-only tooling — excluded from bandit via [tool.bandit] exclude_dirs in pyproject.toml
 import sys
 import threading
 import time

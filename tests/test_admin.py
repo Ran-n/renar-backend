@@ -1577,3 +1577,22 @@ def test_admin_premium_toggle_unknown_feature_redirects(client, admin_enabled):
         follow_redirects=False,
     )
     assert r.status_code == 303
+
+
+# ---------- admin comments scoped like/report counts (pass 2 audit) ----------
+
+
+def test_admin_comments_like_and_report_counts_scoped_to_shown(client, admin_enabled, alice, bob):
+    """like_counts/report_counts must be scoped to the comments shown, not a
+    full-table GROUP BY — regression guard for the pass-2 performance fix in
+    routers/admin/moderation.py."""
+    _, alice_headers = alice
+    _, bob_headers = bob
+    comment = _post_comment(client, alice_headers, "scoped count test")
+    client.post(f"/comments/{comment['id']}/like", headers=bob_headers)
+    client.post(f"/comments/{comment['id']}/report", headers=bob_headers)
+
+    r = client.get("/admin/comments", auth=BASIC)
+    assert r.status_code == 200
+    # Like count icon and report flag icon both rendered correctly
+    assert "&#x2691; 1" in r.text  # report count

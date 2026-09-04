@@ -240,8 +240,30 @@ def list_comments(
         query = query.filter(Comment.user_id == user_id)
     total = query.count()
     comments = query.order_by(Comment.created_at.desc()).limit(500).all()
-    like_counts = dict(db.query(CommentLike.comment_id, func.count()).group_by(CommentLike.comment_id).all())
-    report_counts = dict(db.query(CommentReport.comment_id, func.count()).group_by(CommentReport.comment_id).all())
+    shown_ids = [c.id for c in comments]
+    # Scoped to the 500 comments shown — a full GROUP BY on comment_likes /
+    # comment_reports on every admin page load would scan the entire table as
+    # the corpus grows, not just the rows we're about to render.
+    like_counts = (
+        dict(
+            db.query(CommentLike.comment_id, func.count())
+            .filter(CommentLike.comment_id.in_(shown_ids))
+            .group_by(CommentLike.comment_id)
+            .all()
+        )
+        if shown_ids
+        else {}
+    )
+    report_counts = (
+        dict(
+            db.query(CommentReport.comment_id, func.count())
+            .filter(CommentReport.comment_id.in_(shown_ids))
+            .group_by(CommentReport.comment_id)
+            .all()
+        )
+        if shown_ids
+        else {}
+    )
     return _render_comments(db, comments, like_counts, report_counts, total, filter_user)
 
 

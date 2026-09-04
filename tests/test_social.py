@@ -222,6 +222,30 @@ def test_follow_concurrent_integrity_error_is_swallowed(client, alice, bob, monk
     assert r.status_code == 204  # no error propagated
 
 
+def test_following_list_limit_bounds(client, alice, bob):
+    """limit must be 1..500; out-of-range values are rejected with 422."""
+    alice_user, headers = alice
+    # zero is below ge=1
+    assert client.get(f"/users/{alice_user['id']}/following", params={"limit": 0}, headers=headers).status_code == 422
+    # 501 is above le=500
+    assert client.get(f"/users/{alice_user['id']}/following", params={"limit": 501}, headers=headers).status_code == 422
+    # negative offset is below ge=0
+    assert client.get(f"/users/{alice_user['id']}/following", params={"offset": -1}, headers=headers).status_code == 422
+    # boundary values are accepted
+    assert client.get(f"/users/{alice_user['id']}/following", params={"limit": 1}, headers=headers).status_code == 200
+    assert client.get(f"/users/{alice_user['id']}/following", params={"limit": 500}, headers=headers).status_code == 200
+
+
+def test_followers_list_limit_bounds(client, bob):
+    """limit must be 1..500 for the followers endpoint too."""
+    bob_user, headers = bob
+    assert client.get(f"/users/{bob_user['id']}/followers", params={"limit": 0}, headers=headers).status_code == 422
+    assert client.get(f"/users/{bob_user['id']}/followers", params={"limit": 501}, headers=headers).status_code == 422
+    assert client.get(f"/users/{bob_user['id']}/followers", params={"offset": -1}, headers=headers).status_code == 422
+    assert client.get(f"/users/{bob_user['id']}/followers", params={"limit": 1}, headers=headers).status_code == 200
+    assert client.get(f"/users/{bob_user['id']}/followers", params={"limit": 500}, headers=headers).status_code == 200
+
+
 def test_total_watch_minutes_direct_call(alice):
     """Call _total_watch_minutes() directly to cover lines 77-84 in social.py."""
     from renar_backend.database import SessionLocal
