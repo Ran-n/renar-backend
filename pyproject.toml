@@ -1,6 +1,6 @@
 [project]
 name = "renar-backend"
-version = "0.19.3"
+version = "0.19.4"
 description = "FastAPI backend for Renar — your personal media tracker."
 readme = "README.md"
 authors = [{ name = "Ran#" }]
@@ -82,6 +82,16 @@ skip_empty = true
 # than a per-line suppression. tests/test_security_scan.py re-asserts B608
 # doesn't appear anywhere else.
 skips = ["B608"]
+# _devserver.py is dev-only tooling (never imported by the production app)
+# whose subprocess calls use only hard-coded, fixed-length argument lists —
+# "netstat", "lsof", "taskkill" — with no user input ever interpolated.
+# bandit's B404/B603/B607 findings there are genuine false-positives, and
+# inline `# nosec` comments don't suppress them (bandit counts nosec: 0
+# even when the comment is present, a known parsing quirk for this pattern).
+# Match by bare filename, not a "src/.../_devserver.py" path: bandit compares
+# this against the raw scanned path, which is backslash-separated on
+# Windows — a forward-slash entry silently never matches there.
+exclude_dirs = ["_devserver.py"]
 
 [tool.mutmut]
 # Mutation testing: mutates the listed source, re-runs `runner` per mutant,

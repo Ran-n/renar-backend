@@ -152,8 +152,8 @@ def list_media(
     lang: str | None = None,
     favorites_only: bool = False,
     order_by: str | None = None,
-    limit: int | None = None,
-    offset: int = 0,
+    limit: int | None = Query(default=None, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1120,12 +1120,15 @@ def list_rewatch_events(
     item_id: int,
     season: int | None = Query(default=None, ge=0),
     episode: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Per-event detail behind the aggregate rewatch_count — newest first —
     so the frontend can show a removable history instead of only
-    undo-the-latest."""
+    undo-the-latest. Bounded at 200 per scope (far beyond any realistic
+    rewatch count) so a pathological account can't cause an unbounded read."""
     item = _get_owned_item(item_id, user, db)
     if (season is None) != (episode is None):
         raise HTTPException(
@@ -1136,6 +1139,8 @@ def list_rewatch_events(
         db.query(WatchEvent)
         .filter(WatchEvent.media_item_id == item.id, WatchEvent.season == season, WatchEvent.episode == episode)
         .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
     return [

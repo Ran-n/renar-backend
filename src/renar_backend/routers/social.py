@@ -204,8 +204,8 @@ def unfollow_user(
 @router.get("/users/{user_id}/following", response_model=list[PublicUserOut])
 def list_following(
     user_id: int,
-    limit: int | None = None,
-    offset: int = 0,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
@@ -221,8 +221,8 @@ def list_following(
 @router.get("/users/{user_id}/followers", response_model=list[PublicUserOut])
 def list_followers(
     user_id: int,
-    limit: int | None = None,
-    offset: int = 0,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):

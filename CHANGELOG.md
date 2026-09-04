@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/09/03 20:03:13.031232 )
+[//]: # (+ Revised: 	2026/09/04 15:49:26.842425 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.19.4] - 2026-09-04
+
+### Fixed
+
+- `routers/admin/moderation.py`'s `list_comments()`: `like_counts`/
+  `report_counts` ran an unscoped `GROUP BY` over the entire
+  `comment_likes`/`comment_reports` tables on every admin page load instead
+  of only the 500 comments actually rendered — now filtered to the shown
+  comment IDs.
+- `routers/media.py`'s `GET /media` and `GET /media/{id}/rewatch-events`,
+  and `routers/social.py`'s `GET /users/{id}/following`/`followers`, accepted
+  unbounded or negative `limit`/`offset` query params. Now validated via
+  FastAPI `Query(ge=..., le=...)` (media: limit 1-2000; rewatch-events:
+  limit 1-200, default 200; following/followers: limit 1-500) — out-of-range
+  values now get a clean 422 instead of an unbounded read.
+
+### Changed
+
+- `pyproject.toml`'s `[tool.bandit]` gained `exclude_dirs = ["_devserver.py"]`
+  (matched by bare filename — bandit compares against the raw, backslash-separated
+  path on Windows, so a `src/.../_devserver.py`-style entry silently never
+  matches there) to suppress B404/B603/B607 findings on that dev-only tool's
+  hard-coded `subprocess` calls; inline `# nosec` doesn't suppress them due to
+  a bandit nosec-parsing quirk for this pattern.
+- `.gitignore`: added `.pytest_cache/`, `htmlcov/`, `dist/`, `*.egg-info/`.
 
 ## [0.19.3] - 2026-09-03
 
