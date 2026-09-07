@@ -24,7 +24,15 @@ from ..database import SessionLocal, get_db
 from ..media.image_cache import store_external_image, stored_external_image
 from ..models import LibraryEntry, MediaType, Title, User
 from ..schemas import TmdbCreditsOut, TmdbDetailsOut, TmdbEpisodeOut, TmdbImageOut, TmdbResultOut
-from ..tmdb.tmdb_http import BACKDROP_BASE, IMAGE_BASE, POSTER_BASE, TMDB_KIND, http_client, tmdb_get
+from ..tmdb.tmdb_http import (
+    BACKDROP_BASE,
+    IMAGE_BASE,
+    POSTER_BASE,
+    TMDB_KIND,
+    http_client,
+    image_http_client,
+    tmdb_get,
+)
 from ..tmdb.tmdb_store import TMDB_LOCALE, cached_tmdb
 from ..users.auth import get_current_user
 
@@ -301,7 +309,7 @@ def image_proxy(size: str, filename: str):
         return FileResponse(cached, media_type=ctype, headers=_IMMUTABLE)
 
     try:
-        resp = http_client.get(f"{IMAGE_BASE}/{size}/{filename}")
+        resp = image_http_client.get(f"{IMAGE_BASE}/{size}/{filename}")
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB images") from exc
     if resp.status_code != 200:

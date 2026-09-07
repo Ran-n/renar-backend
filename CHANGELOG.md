@@ -12,6 +12,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.19.6] - 2026-09-07
+
+### Fixed
+
+- `image_proxy` now uses its own `httpx.Client` (`image_http_client`, 100
+  max/30 keepalive connections) instead of sharing `http_client`'s
+  20-connection pool with TMDB's JSON endpoints. A single Explore/home
+  screen render can fire off dozens of poster/backdrop/still fetches at
+  once; that burst alone could exhaust the shared pool, queuing requests
+  past the limit until they hit the 15s timeout — surfacing as a poster
+  that never loads until the view is rebuilt. Splitting the pool also stops
+  an image burst from starving unrelated JSON calls (search/trending/
+  details) that shared the same connections.
+
 ## [0.19.5] - 2026-09-07
 
 ### Added

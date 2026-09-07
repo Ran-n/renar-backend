@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.357680
-Revised: 2026/08/18 13:15:02.789152
+Revised: 2026/09/07 13:50:19.914806
 
 HTTP layer for TMDB: pooled client, auth, and the short-lived in-memory
 cache. Lives below the router so the notifier and tmdb_store can call TMDB
@@ -43,6 +43,20 @@ _cache = TTLCache(ttl_seconds=CACHE_TTL_SECONDS, max_entries=CACHE_MAX_ENTRIES)
 http_client = httpx.Client(
     timeout=15,
     limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+)
+
+# Separate, much larger pool for image_proxy (routers/tmdb.py): a single
+# Explore/home screen render can fire off dozens of poster/backdrop/still
+# fetches at once (a grid, several carousels, a cast row). Sharing
+# http_client's 20-connection limit meant that burst alone could exhaust the
+# pool, so requests past the limit queued for a slot and sometimes hit the
+# 15s timeout outright — surfacing as a poster that never loads until the
+# view is rebuilt (Flet's Image doesn't retry a failed fetch on its own).
+# Splitting the pool also stops an image burst from starving unrelated JSON
+# calls (search/trending/details) that shared the same 20 connections.
+image_http_client = httpx.Client(
+    timeout=15,
+    limits=httpx.Limits(max_connections=100, max_keepalive_connections=30),
 )
 
 # A transient TMDB failure (rate limit, blip) used to raise straight away —
