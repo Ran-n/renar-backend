@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.246595
-Revised: 2026/08/20 08:25:22.088305
+Revised: 2026/09/07 16:47:38.833210
 
 TMDB write-through cache: persistence for tracked titles, freshness
 window, offline fallback, typed Title columns, notifier integration and
@@ -221,7 +221,7 @@ def test_image_proxy_stores_in_image_store(client, monkeypatch, db):
         status_code = 200
         content = payload
 
-    monkeypatch.setattr(tmdb_http.http_client, "get", lambda url, **kw: FakeResponse())
+    monkeypatch.setattr(tmdb_http.image_http_client, "get", lambda url, **kw: FakeResponse())
     r = client.get("/tmdb/image/w342/poster.jpg")
     assert r.status_code == 200
     assert r.content == payload
@@ -234,7 +234,7 @@ def test_image_proxy_stores_in_image_store(client, monkeypatch, db):
     def _forbidden(url, **kw):
         raise AssertionError("image must be served from the store")
 
-    monkeypatch.setattr(tmdb_http.http_client, "get", _forbidden)
+    monkeypatch.setattr(tmdb_http.image_http_client, "get", _forbidden)
     r = client.get("/tmdb/image/w342/poster.jpg")
     assert r.status_code == 200
     assert r.content == payload

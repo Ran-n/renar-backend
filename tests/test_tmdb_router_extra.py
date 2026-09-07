@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/09/01
-Revised: 2026/09/02 10:58:43.396505
+Revised: 2026/09/07 16:47:43.657819
 
 routers/tmdb.py coverage gaps: _map_results/skip, _map_local_titles with
 poster_overrides, search/trending/popular success and fallback paths,
@@ -283,7 +283,7 @@ def test_image_proxy_http_error_returns_502(client, monkeypatch):
     def raise_error(url, **kw):
         raise httpx.ConnectError("network down")
 
-    monkeypatch.setattr(tmdb_http.http_client, "get", raise_error)
+    monkeypatch.setattr(tmdb_http.image_http_client, "get", raise_error)
     r = client.get("/tmdb/image/w342/poster.jpg")
     assert r.status_code == 502
 
@@ -293,7 +293,7 @@ def test_image_proxy_non_200_tmdb_response_returns_404(client, monkeypatch):
         status_code = 404
         content = b""
 
-    monkeypatch.setattr(tmdb_http.http_client, "get", lambda url, **kw: FakeNotFound())
+    monkeypatch.setattr(tmdb_http.image_http_client, "get", lambda url, **kw: FakeNotFound())
     r = client.get("/tmdb/image/w342/poster.jpg")
     assert r.status_code == 404
 
