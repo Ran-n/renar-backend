@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/09/03 20:03:13.653108 )
+[//]: # (+ Revised: 	2026/09/07 15:13:02.669596 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -2128,6 +2128,168 @@ separate real NUL-byte bugs:
    `ListItemCreate.title`, `ProfileUpdate.username`, and `UserCreate.username`
    refactored to the shared type). Six deterministic 422-assertion regression
    tests added to `tests/test_fuzz.py`.
+
+### 2026-09-07: `media.py` response models, binary-image fuzzing, and the admin audit
+
+The follow-up pass to 2026-09-03, closing everything that entry left open
+except the mutmut/WSL piece (still blocked on a machine reboot — see
+`docs/backlog.md`).
+
+**`response_model` on the last 14 `media.py` endpoints.** Coverage went
+from 63/151 to **77/151**. Every schema was written by reading the actual
+`return` statements (all branches), never the docstring — several
+docstrings describe intent rather than shape. New schemas in `schemas.py`:
+
+| Endpoint | Schema |
+| --- | --- |
+| `GET /media/keys` | `MediaKeyOut` (list) |
+| `GET /media/ratings` | `TitleRatingOut` |
+| `POST /media/ratings/batch` | `dict[str, TitleRatingOut]` |
+| `GET /media/episode-ratings` | `TitleRatingOut` |
+| `PUT`/`DELETE .../episodes/{s}/{e}/still` | `EpisodeStillOut` |
+| `GET /media/{id}/episodes` | `EpisodeListOut` |
+| `POST /media/{id}/rewatch` | `RatingsSummaryOut` |
+| `DELETE /media/{id}/rewatch` | `UndoRewatchOut` |
+| `GET /media/{id}/rewatch-events` | `WatchEventOut` (list) |
+| `DELETE`/`PATCH .../rewatch-events/{id}` | `RatingsSummaryOut` |
+| `PUT .../episodes/{s}/{e}` | `RatingsSummaryOut` |
+| `POST .../episodes/bulk` | `RatingsSummaryOut` |
+
+Two structural choices worth recording. `RatingsSummaryOut` models
+`_ratings_summary()` once and is reused by all six mutation endpoints
+rather than copied per route — the helper is the single source of that
+shape, so the schema mirrors the helper, not the handlers.
+`EpisodeListOut` and `UndoRewatchOut` **inherit** from it instead of
+redeclaring its nine fields, because both handlers literally splice it in
+with `**_ratings_summary(...)`; inheritance is what keeps them from
+drifting when the helper gains a field. `EpisodeStillOut` is shared by the
+still `PUT` and `DELETE` (the delete returns the same two keys, both
+`None`) so a caller can update its own copy from either verb's response
+without branching. `DELETE /media/{item_id}` keeps no `response_model`:
+it is a genuine `204 No Content`.
+
+`CustomPosterSet` turned out to have no users outside `media.py` — a grep
+across `routers/` found only the poster/backdrop/still trio, of which the
+first two already had a `response_model`. The "two `CustomPosterSet`-based
+endpoints on other routers" the previous backlog entry suspected were in
+fact the two still endpoints in `media.py` itself.
+
+**Fuzzing the binary-image endpoints.** The three `CustomPosterSet`
+endpoints were the one fuzz shape 2026-09-03 explicitly deferred: their
+input is image *content*, not field types. The new tests feed `st.binary()`
+through `decode_b64_image` → `normalize_jpeg` → PIL both base64-wrapped
+(the shape a corrupt upload really has) and raw, alongside a real PNG so
+the success path runs among the failures, plus fuzzed `tmdb_url` strings.
+`fetch_poster_bytes` is stubbed per example — otherwise every prefix-valid
+URL hypothesis generated would make a live request to image.tmdb.org, and
+stubbing it is also what lets the fuzzed URL reach the DB as the image
+row's `source_url` instead of dying on a connection error.
+
+**Auditing the admin sub-routers.** These were skipped in the previous
+pass as "server-rendered HTML, no `response_model` needed" — which is true
+of their *responses* and told us nothing about their *inputs*. Their input
+surface turns out to be structurally more exposed than the JSON API's:
+every value arrives as a `Form(...)` or `Query(...)` parameter, so there is
+no Pydantic model, and therefore none of the `SafeStr` / `PG_INT32_MAX`
+guards the 2026-09-03 pass added to the request schemas. The new tests
+fuzz `POST /admin/settings` (its 17 unbounded `int` fields and 4 free-text
+ones), `edit-user`, `set-password`, `grant-premium`, `create-invite`,
+`usage/endpoint`, both toggles, the task-interval form, and — in one
+parameterised test rather than thirteen copies — the integer path
+parameter shared by every no-body admin action. Deliberately skipped as
+low-value: the parameterless dashboards, and the toggles' boolean half
+(`value == "1"`, so every other string simply means "off").
+
+**Five more real bugs, all fuzz-discovered, each with a regression test:**
+
+1. `{"image_b64": ""}` on any of the three poster/backdrop/still endpoints
+   was a 500. `CustomPosterSet`'s exactly-one-source validator decides
+   which source was given with `is None`, but `_resolve_raw_image` branches
+   on plain truthiness — an empty string satisfied the validator ("not
+   `None`, so a source was given") and then fell through to the TMDB
+   branch, calling `fetch_poster_bytes(None)` and raising an unhandled
+   httpx `TypeError`. Fixed with `min_length=1` on both source fields, so
+   validator and branch agree on what counts as a source.
+2. A `tmdb_url` carrying a non-printable ASCII character but still
+   starting with the required `https://image.tmdb.org/t/p/` prefix was a
+   500. httpx refuses to parse such a URL by raising `httpx.InvalidURL` —
+   which derives straight from `Exception`, **not** from `httpx.HTTPError`,
+   so `fetch_poster_bytes`' transport-failure `except` clause never caught
+   it. Fixed in two places: `CustomPosterSet` now rejects control
+   characters up front (mirroring httpx's own rule, so nothing reaches the
+   network), and `fetch_poster_bytes` catches `InvalidURL` as a 422 for any
+   other caller.
+3. `DELETE /media/{item_id}` was a 500 for any entry with a custom episode
+   still. `LibraryEntry` cascades `episode_watches`, `watch_events` and
+   `notifications`, but had no relationship for `episode_custom_stills` and
+   there is no DB-level `ON DELETE CASCADE` either — so the delete died on
+   a `ForeignKeyViolation`. Only `users/accounts.py`'s whole-account purge
+   had ever handled those rows (explicitly, in bulk). Found because the
+   still fuzz test couldn't clean up between hypothesis examples. Fixed by
+   adding `LibraryEntry.episode_custom_stills` with
+   `cascade="all, delete-orphan"`, plus an explicit `gc_image` pass in
+   `delete_media` for the stills' image rows — the cascade removes the
+   rows, but the content-addressed images they referenced would otherwise
+   have leaked, exactly as the poster/backdrop overrides already avoid.
+4. `POST /admin/users/{id}/premium` had two `days` overflows, both plain
+   `datetime` `OverflowError`s raised before any DB write (so the
+   `DataError` handler below cannot help): granting days on top of an
+   *already permanent* subscription (`base` at the `PREMIUM_FOREVER`
+   sentinel, 9999-01-01, so adding even one day leaves `datetime`'s range),
+   and a `days` value so large that `timedelta(days=days)` cannot be
+   constructed at all (`timedelta.max` is ~10**9 days). Fixed by comparing
+   the plain integers against the remaining day count *before* building any
+   `timedelta`, and clamping to permanent when the grant reaches or exceeds
+   it. Deliberately **not** fixed with an upper bound on `days`: an earlier
+   3650-day cap was removed on purpose as an arbitrary sanity limit rather
+   than a real constraint (`test_premium.py`'s
+   `test_admin_grant_premium_large_days_allowed` pins that), and the first
+   attempt at this fix reintroduced one — caught by that test in the
+   verification run, which is exactly what it exists for. The parameter did
+   gain a declarative `ge=1`, which made the handler's own `days < 1` check
+   redundant and it was removed.
+5. The big one — see below.
+
+### A single `DataError` handler, not sixty per-parameter bounds
+
+The admin fuzz pass rediscovered the 2026-09-03 integer-overflow bug
+(`PG_INT32_MAX`), but on a surface that fix couldn't reach: every
+`int = Form(...)` on `POST /admin/settings` writes to an `Integer` column
+with no bound, so `2**31` reached the driver as an unhandled
+`NumericValueOutOfRange` (500). Probing outward showed the same crash
+everywhere an integer path or query parameter meets an `int4` column —
+`GET /media/{item_id}`, `DELETE /comments/{id}`, `GET /lists/{id}`,
+`POST /notifications/{id}/read`, `GET /users/{id}`, `GET /tmdb/details`,
+`GET /admin/comments?user_id=…`, `GET /admin/users/{id}` — plus the string
+half of the same family: a NUL byte or an over-length value in any
+`Form(...)`/`Query(...)` string (`email_sender_name`, `exempt_ips`, the
+admin user-edit `username`/`email` against their `String(50)`/`String(255)`
+columns).
+
+The 2026-09-03 pass fixed this shape field-by-field, which works for
+request *bodies*: a Pydantic model is one obvious place to hang a bound
+off. It does not generalise. Path params, query params and `Form(...)`
+fields have no model, the crash spans roughly 60 parameters across a dozen
+routers, and every future route is free to reintroduce it — a per-field fix
+would have been both a large mechanical diff and permanently incomplete.
+
+So the fix lives at the one layer that always has the answer: an
+`@app.exception_handler(DataError)` in `main.py` returning **422**.
+psycopg raises `DataError` precisely for "this value doesn't fit the column
+it targets" — out-of-range integer, over-length string, NUL byte — which is
+by definition the client's data being wrong for the field, i.e. what 422
+means. Starlette resolves handlers by walking the exception's MRO, so this
+registration takes precedence over the existing `DBAPIError` stale-prepared-
+plan handler without disturbing it (a stale plan raises `ProgrammingError`,
+not `DataError`).
+
+This is **not** a silent swallow: the original driver error is logged at
+WARNING with the request method and path, so a `DataError` caused by a
+*server-side* value rather than a caller's is still visible in the logs
+instead of being quietly relabelled a client error. Per-field bounds stay
+where they already are and keep being added where they're cheap (the admin
+`days` bound above) — they produce better messages and stop the round trip
+earlier. The handler is the floor, not a replacement for them.
 
 ---
 

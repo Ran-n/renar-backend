@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/09/03 13:39:31.636982
+Revised: 2026/09/07 15:13:01.146068
 """
 
 import logging
@@ -36,12 +36,19 @@ from ..models import (
 from ..schemas import (
     CustomPosterSet,
     EpisodeBulk,
+    EpisodeListOut,
     EpisodeSet,
+    EpisodeStillOut,
     LibraryEntryCreate,
     LibraryEntryOut,
     LibraryEntryUpdate,
+    MediaKeyOut,
     RatingsBatchRequest,
+    RatingsSummaryOut,
     RewatchCreate,
+    TitleRatingOut,
+    UndoRewatchOut,
+    WatchEventOut,
     WatchEventRatingUpdate,
 )
 from ..tmdb.tmdb_http import TMDB_KIND
@@ -246,7 +253,7 @@ def list_media(
     return entries
 
 
-@router.get("/keys")
+@router.get("/keys", response_model=list[MediaKeyOut])
 def list_media_keys(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Lightweight identifiers for every entry in the user's library — just
     enough (media_type, tmdb_id, url, title) to build the "already in my
@@ -363,7 +370,7 @@ def create_media(
     return item
 
 
-@router.get("/ratings")
+@router.get("/ratings", response_model=TitleRatingOut)
 def title_ratings(
     media_type: MediaType,
     tmdb_id: int | None = None,
@@ -386,7 +393,7 @@ def title_ratings(
     return {"average": round(title_row.rating_sum / title_row.rating_count), "count": title_row.rating_count}
 
 
-@router.post("/ratings/batch")
+@router.post("/ratings/batch", response_model=dict[str, TitleRatingOut])
 def title_ratings_batch(
     data: RatingsBatchRequest,
     db: Session = Depends(get_db),
@@ -412,7 +419,7 @@ def title_ratings_batch(
     }
 
 
-@router.get("/episode-ratings")
+@router.get("/episode-ratings", response_model=TitleRatingOut)
 def episode_ratings(
     tmdb_id: int = Query(ge=1),
     season: int = Query(ge=0),
@@ -667,10 +674,20 @@ def delete_media(
     item = _get_owned_item(item_id, user, db)
     old_poster_image_id = item.custom_poster_image_id
     old_backdrop_image_id = item.custom_backdrop_image_id
+    # The rows themselves go with the entry (LibraryEntry.episode_custom_stills
+    # cascades), but their images are shared, content-addressed store rows —
+    # they need the same explicit GC pass the poster/backdrop overrides get, or
+    # a deleted entry's stills stay on disk forever with nothing referencing them.
+    old_still_image_ids = {
+        sid
+        for (sid,) in db.query(EpisodeCustomStill.still_image_id).filter(EpisodeCustomStill.media_item_id == item.id)
+    }
     db.delete(item)
     db.flush()
     gc_image(old_poster_image_id, db)
     gc_image(old_backdrop_image_id, db)
+    for still_image_id in old_still_image_ids:
+        gc_image(still_image_id, db)
     db.commit()
     publish_event(user.id, "library_changed")
 
@@ -786,7 +803,7 @@ def _get_custom_still(item: LibraryEntry, season: int, episode: int, db: Session
     )
 
 
-@router.put("/{item_id}/episodes/{season}/{episode}/still")
+@router.put("/{item_id}/episodes/{season}/{episode}/still", response_model=EpisodeStillOut)
 def set_custom_episode_still(
     item_id: int,
     season: int,
@@ -817,7 +834,7 @@ def set_custom_episode_still(
     return {"still_url": f"/images/{img.hash}", "still_source_url": img.source_url}
 
 
-@router.delete("/{item_id}/episodes/{season}/{episode}/still")
+@router.delete("/{item_id}/episodes/{season}/{episode}/still", response_model=EpisodeStillOut)
 def clear_custom_episode_still(
     item_id: int,
     season: int,
@@ -929,7 +946,7 @@ def _ratings_summary(item: LibraryEntry, db: Session) -> dict:
     }
 
 
-@router.get("/{item_id}/episodes")
+@router.get("/{item_id}/episodes", response_model=EpisodeListOut)
 def list_episodes(
     item_id: int,
     db: Session = Depends(get_db),
@@ -990,7 +1007,7 @@ def list_episodes(
     }
 
 
-@router.post("/{item_id}/rewatch")
+@router.post("/{item_id}/rewatch", response_model=RatingsSummaryOut)
 def rewatch(
     item_id: int,
     data: RewatchCreate,
@@ -1039,7 +1056,7 @@ def rewatch(
     return _ratings_summary(item, db)
 
 
-@router.delete("/{item_id}/rewatch")
+@router.delete("/{item_id}/rewatch", response_model=UndoRewatchOut)
 def undo_rewatch(
     item_id: int,
     data: RewatchCreate,
@@ -1115,7 +1132,7 @@ def undo_rewatch(
     return {**_ratings_summary(item, db), "rating_cleared": rating_cleared}
 
 
-@router.get("/{item_id}/rewatch-events")
+@router.get("/{item_id}/rewatch-events", response_model=list[WatchEventOut])
 def list_rewatch_events(
     item_id: int,
     season: int | None = Query(default=None, ge=0),
@@ -1148,7 +1165,7 @@ def list_rewatch_events(
     ]
 
 
-@router.delete("/{item_id}/rewatch-events/{event_id}")
+@router.delete("/{item_id}/rewatch-events/{event_id}", response_model=RatingsSummaryOut)
 def delete_rewatch_event(
     item_id: int,
     event_id: int,
@@ -1207,7 +1224,7 @@ def delete_rewatch_event(
     return _ratings_summary(item, db)
 
 
-@router.patch("/{item_id}/rewatch-events/{event_id}")
+@router.patch("/{item_id}/rewatch-events/{event_id}", response_model=RatingsSummaryOut)
 def update_rewatch_event_rating(
     item_id: int,
     event_id: int,
@@ -1379,7 +1396,7 @@ def _write_rating(
             cache_watch.rating = rating
 
 
-@router.put("/{item_id}/episodes/{season}/{episode}")
+@router.put("/{item_id}/episodes/{season}/{episode}", response_model=RatingsSummaryOut)
 def set_episode(
     item_id: int,
     season: int,
@@ -1428,7 +1445,7 @@ def set_episode(
     return _ratings_summary(item, db)
 
 
-@router.post("/{item_id}/episodes/bulk")
+@router.post("/{item_id}/episodes/bulk", response_model=RatingsSummaryOut)
 def bulk_episodes(
     item_id: int,
     data: EpisodeBulk,
