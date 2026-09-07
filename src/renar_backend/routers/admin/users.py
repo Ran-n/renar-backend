@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/09/02 10:57:10.428481
+Revised: 2026/09/07 15:13:01.660914
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -944,7 +944,7 @@ def unban_user(
 @router.post("/users/{user_id}/premium", include_in_schema=False)
 def grant_premium(
     user_id: int,
-    days: int | None = Form(None),
+    days: int | None = Form(None, ge=1),
     until_date: date | None = Form(None),
     forever: bool = Form(False),
     admin_user: str = Depends(_require_admin),
@@ -962,12 +962,27 @@ def grant_premium(
             raise HTTPException(status_code=422, detail="until_date must be in the future")
         user.premium_until = new_until
     elif days is not None:
-        if days < 1:
-            raise HTTPException(status_code=422, detail="days must be at least 1")
+        # No `days < 1` check in the body: the `ge=1` bound on the parameter
+        # itself rejects that before the handler runs. There is deliberately
+        # no *upper* bound — see test_premium.py's
+        # test_admin_grant_premium_large_days_allowed: the old 3650-day cap
+        # was an arbitrary sanity limit, not a real constraint.
         # extend from whichever is later: an active subscription keeps its
         # remaining time, a lapsed one restarts from now
         base = user.premium_until if user.is_premium else utcnow()
-        user.premium_until = base + timedelta(days=days)
+        # Clamp instead of overflowing. Two ways this used to 500, both
+        # fuzz-discovered and neither reachable by the DataError handler in
+        # main.py (they're plain Python OverflowErrors, raised before any DB
+        # write): `base` already at the PREMIUM_FOREVER sentinel (9999-01-01)
+        # so adding even one day leaves datetime's range, and a `days` value
+        # so large that `timedelta(days=days)` can't be constructed at all
+        # (timedelta.max is ~10**9 days). Comparing the plain integers first
+        # avoids building the timedelta in either case — `remaining_days` is
+        # never more than ~2.9M, so any grant at or beyond it is a permanent
+        # one, and topping up an already-permanent subscription just leaves
+        # it permanent.
+        remaining_days = (PREMIUM_FOREVER - base).days
+        user.premium_until = base + timedelta(days=days) if days < remaining_days else max(base, PREMIUM_FOREVER)
     else:
         raise HTTPException(status_code=422, detail="one of days, until_date, forever is required")
 

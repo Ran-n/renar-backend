@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 03:02:57.798569
-Revised: 2026/08/24 12:39:04.812933
+Revised: 2026/09/07 15:13:01.906343
 
 Account deletion: the one purge path, shared by self-service
 (DELETE /auth/me) and the admin panel's delete-user action.
@@ -100,9 +100,10 @@ def delete_account(user: User, db: Session) -> None:
             LibraryEntry.user_id == user_id, LibraryEntry.custom_backdrop_image_id.isnot(None)
         )
     }
-    # EpisodeCustomStill has no ORM relationship on LibraryEntry (and no DB-level
-    # ON DELETE CASCADE), so it must be deleted explicitly before the cascade
-    # delete below tries to remove media_items rows. Collect image IDs first.
+    # LibraryEntry.episode_custom_stills now cascades, so the explicit delete
+    # below is no longer what keeps the FK from dangling — it stays because
+    # this path has to collect the still image IDs for GC anyway, and doing
+    # both in bulk beats loading every still row into the session per entry.
     item_id_sel = select(LibraryEntry.id).where(LibraryEntry.user_id == user_id)
     still_image_ids = {
         sid

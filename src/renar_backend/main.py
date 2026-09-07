@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/08/27 09:52:21.696368
+Revised: 2026/09/07 15:13:00.878786
 """
 
 import asyncio
@@ -17,7 +17,7 @@ import anyio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DataError, DBAPIError
 
 from ._devserver import exit_when_orphaned
 from .config import settings
@@ -171,6 +171,42 @@ async def _handle_stale_prepared_plan(request: Request, exc: DBAPIError) -> JSON
     _log.warning("stale prepared plan detected (likely post-migration) — disposing connection pool")
     engine.dispose()
     return JSONResponse(status_code=503, content={"detail": "Temporary server error, please retry"})
+
+
+@app.exception_handler(DataError)
+async def _handle_unstorable_value(request: Request, exc: DataError) -> JSONResponse:
+    """Translate "this value doesn't fit the column it targets" into a 422.
+
+    psycopg raises `DataError` (SQLAlchemy wraps it as `sqlalchemy.exc.DataError`)
+    for a whole family of caller-supplied values Postgres refuses outright:
+    an integer beyond `INTEGER`'s ±2**31 range (`NumericValueOutOfRange`), a
+    string longer than a `String(n)` column (`StringDataRightTruncation`), a
+    NUL byte anywhere in a text value. Every one of those is the *client's*
+    data being wrong for the field, i.e. exactly what 422 means — but with no
+    handler they escaped as unhandled 500s.
+
+    Why one handler instead of per-field validators: the 2026-09-03 fuzz pass
+    fixed this shape field-by-field (`SafeStr`, `PG_INT32_MAX`) for request
+    *bodies*, where a Pydantic model gives you one obvious place to put the
+    bound. The same crash reaches the DB through path params, query params
+    and `Form(...)` fields too — `GET /media/{item_id}` with `item_id=2**40`,
+    `GET /admin/comments?user_id=2**40`, every `int = Form(...)` on
+    `POST /admin/settings` — across ~60 parameters on a dozen routers, with
+    every future route free to reintroduce it. Postgres is the authority on
+    what fits its own columns, so the check belongs at the one layer that
+    always sees the answer. Per-field bounds stay where they already are:
+    they give better messages, and they stop the round trip earlier.
+
+    Not a silent swallow: the original driver error is logged at WARNING with
+    the method and path, so a `DataError` caused by a *server-side* value
+    (rather than a caller's) is still visible in the logs rather than being
+    quietly relabelled a client error.
+    """
+    _log.warning("value rejected by the database as unstorable: %s %s: %s", request.method, request.url.path, exc.orig)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "A value in the request is out of range or otherwise unstorable for its field"},
+    )
 
 
 class _ShutdownCancellationSilencer:

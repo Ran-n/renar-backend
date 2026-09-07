@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:42:31.539562
-Revised: 2026/09/03 14:06:02.113977
+Revised: 2026/09/07 15:13:02.152391
 
 Fuzz tests (hypothesis): throw a wide range of malformed/random input at a
 few request-parsing endpoints and assert the server never 500s — a 4xx
@@ -15,14 +15,19 @@ passes schema validation but breaks on the way into Postgres (NUL bytes in
 a text column raise at the driver level, not the validator).
 """
 
+import base64
+import io
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
+from conftest import ADMIN_BASIC
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import ReviewWhitelist, User, utcnow
+from renar_backend.routers.admin.users import PREMIUM_FOREVER
 
 pytestmark = pytest.mark.fuzz
 
@@ -1102,15 +1107,529 @@ def test_bulk_episodes_duplicate_entries_deduped_not_500(client, alice):
         client.delete(f"/media/{item_id}", headers=headers)
 
 
-# ---------- open gap: CustomPosterSet endpoints ----------
-# PUT /media/{item_id}/poster, PUT /media/{item_id}/backdrop, and
-# PUT /media/{item_id}/episodes/{s}/{e}/still are intentionally NOT fuzzed here.
-# All three share the same CustomPosterSet body, which has an exactly-one-source
-# model validator (image_b64 XOR tmdb_url): the interesting fuzz space is
-# base64-encoded binary content with malformed/oversized/wrong-encoding payloads,
-# plus URL strings pointing at unreachable/non-image resources — a meaningfully
-# different shape from the simple-field-type fuzz applied to the endpoints above.
-# They also require premium and involve image-decoding code (decode_b64_image,
-# normalize_jpeg) that benefits from a focused binary-content fuzz pass rather
-# than being squeezed into this general-purpose field-type sweep.
-# Tracked as an open coverage gap for a future dedicated pass.
+# ---------- media.py – CustomPosterSet endpoints (poster / backdrop / still) ----------
+
+# PUT /media/{item_id}/poster, PUT /media/{item_id}/backdrop and
+# PUT /media/{item_id}/episodes/{s}/{e}/still all take the same CustomPosterSet
+# body: image_b64 XOR tmdb_url, enforced by a model validator. Their fuzz space
+# is binary image *content*, not field types — arbitrary bytes travelling
+# through decode_b64_image() → normalize_jpeg() (media/image_utils.py) → PIL,
+# where a malformed/truncated/oversized payload must come back as a clean 422,
+# never a 500 and never a half-written image row.
+#
+# The strategy therefore mixes:
+#   - st.binary() re-encoded as valid base64 (well-formed envelope, garbage
+#     payload — the shape a corrupt upload actually has)
+#   - st.binary() shoved in raw as a latin-1 string (not valid base64 at all,
+#     so decode_b64_image's own error path is exercised too)
+#   - a real, tiny PNG so the success path runs among the failures and the
+#     image store/GC path is genuinely exercised, not just the reject path
+#   - fuzzed tmdb_url strings, with and without the required TMDB prefix
+#   - fully arbitrary dicts (both sources, neither, wrong types)
+#
+# fetch_poster_bytes is stubbed for the duration of each example: the tmdb_url
+# arm would otherwise make a real network call to image.tmdb.org for every
+# prefix-valid string hypothesis generates. Stubbing it with valid image bytes
+# is also what makes the tmdb_url arm *useful* — the fuzzed URL then reaches
+# the DB as the image row's source_url instead of dying on a connection error.
+
+
+def _png_bytes(size: tuple[int, int] = (4, 4)) -> bytes:
+    """A real, minimal PNG — the success-path payload for the fuzz below."""
+    from PIL import Image as PILImage
+
+    buf = io.BytesIO()
+    PILImage.new("RGB", size, (7, 8, 9)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+_VALID_PNG_B64 = base64.b64encode(_png_bytes()).decode()
+
+_fuzz_poster_body = st.one_of(
+    # well-formed base64 envelope, arbitrary (almost never valid image) payload
+    st.binary(min_size=0, max_size=4096).map(lambda b: {"image_b64": base64.b64encode(b).decode()}),
+    # raw bytes as a string: usually not valid base64 either
+    st.binary(min_size=0, max_size=512).map(lambda b: {"image_b64": b.decode("latin-1")}),
+    # the one payload that must actually succeed
+    st.just({"image_b64": _VALID_PNG_B64}),
+    # fuzzed tmdb_url — bare, and with the required prefix prepended
+    st.fixed_dictionaries({
+        "tmdb_url": st.one_of(
+            _fuzzy_text,
+            _fuzzy_text.map(lambda s: f"https://image.tmdb.org/t/p/original/{s}.jpg"),
+        )
+    }),
+    # arbitrary dict: both sources at once, neither, or wrong types
+    st.dictionaries(
+        st.sampled_from(["image_b64", "tmdb_url"]),
+        st.one_of(st.none(), st.booleans(), st.integers(), _fuzzy_text),
+        max_size=2,
+    ),
+)
+
+
+@contextmanager
+def _stubbed_tmdb_fetch():
+    """Replace routers/media.py's fetch_poster_bytes with a stub returning a
+    real PNG, so no fuzz example reaches the network."""
+    from renar_backend.routers import media as media_router
+
+    original = media_router.fetch_poster_bytes
+    media_router.fetch_poster_bytes = lambda url: _png_bytes()
+    try:
+        yield
+    finally:
+        media_router.fetch_poster_bytes = original
+
+
+@_fuzz_settings
+@given(payload=_fuzz_poster_body)
+def test_set_custom_poster_never_500s_on_arbitrary_image_content(client, alice, payload):
+    user, headers = alice
+    _grant_premium(user["id"])
+    setup = client.post("/media", json={"media_type": "film", "title": "Fuzz Poster Film"}, headers=headers)
+    assume(setup.status_code == 201)
+    item_id = setup.json()["id"]
+    try:
+        with _stubbed_tmdb_fetch():
+            r = client.put(f"/media/{item_id}/poster", json=payload, headers=headers)
+        assert r.status_code < 500, f"500 on item_id={item_id} payload keys={sorted(payload)}:\n{r.text}"
+    finally:
+        client.delete(f"/media/{item_id}", headers=headers)
+
+
+@_fuzz_settings
+@given(payload=_fuzz_poster_body)
+def test_set_custom_backdrop_never_500s_on_arbitrary_image_content(client, alice, payload):
+    user, headers = alice
+    _grant_premium(user["id"])
+    setup = client.post("/media", json={"media_type": "film", "title": "Fuzz Backdrop Film"}, headers=headers)
+    assume(setup.status_code == 201)
+    item_id = setup.json()["id"]
+    try:
+        with _stubbed_tmdb_fetch():
+            r = client.put(f"/media/{item_id}/backdrop", json=payload, headers=headers)
+        assert r.status_code < 500, f"500 on item_id={item_id} payload keys={sorted(payload)}:\n{r.text}"
+    finally:
+        client.delete(f"/media/{item_id}", headers=headers)
+
+
+@_fuzz_settings
+@given(
+    payload=_fuzz_poster_body,
+    season=st.one_of(st.just(0), st.just(1), st.just(-1), st.integers(min_value=-5, max_value=50)),
+    episode=st.one_of(st.just(0), st.just(1), st.just(-1), st.integers(min_value=-5, max_value=100)),
+)
+def test_set_custom_episode_still_never_500s_on_arbitrary_image_content(client, alice, payload, season, episode):
+    user, headers = alice
+    _grant_premium(user["id"])
+    setup = client.post("/media", json={"media_type": "tv_show", "title": "Fuzz Still Show"}, headers=headers)
+    assume(setup.status_code == 201)
+    item_id = setup.json()["id"]
+    try:
+        with _stubbed_tmdb_fetch():
+            r = client.put(f"/media/{item_id}/episodes/{season}/{episode}/still", json=payload, headers=headers)
+        assert r.status_code < 500, (
+            f"500 on item_id={item_id} s={season} e={episode} payload keys={sorted(payload)}:\n{r.text}"
+        )
+    finally:
+        client.delete(f"/media/{item_id}", headers=headers)
+
+
+# ---------- regression tests for bugs the CustomPosterSet fuzz pass found ----------
+
+
+def test_empty_image_b64_returns_422_not_500(client, alice):
+    """Was: {"image_b64": ""} passed CustomPosterSet's exactly-one-source
+    validator (which tests `is None`, and "" is not None) but was falsy at
+    _resolve_raw_image's `if data.image_b64` branch, so it fell through to
+    the TMDB path and called fetch_poster_bytes(None) -> unhandled httpx
+    TypeError (500). Now: min_length=1 on both source fields keeps the
+    validator's notion of "a source was given" and the branch's truthiness
+    test in agreement."""
+    user, headers = alice
+    _grant_premium(user["id"])
+    setup = client.post("/media", json={"media_type": "film", "title": "Empty B64 Regression"}, headers=headers)
+    item_id = setup.json()["id"]
+    try:
+        for path in ("poster", "backdrop"):
+            r = client.put(f"/media/{item_id}/{path}", json={"image_b64": ""}, headers=headers)
+            assert r.status_code == 422, f"{path}: expected 422, got {r.status_code}:\n{r.text}"
+        r = client.put(f"/media/{item_id}/episodes/1/1/still", json={"image_b64": ""}, headers=headers)
+        assert r.status_code == 422, r.text
+    finally:
+        client.delete(f"/media/{item_id}", headers=headers)
+
+
+def test_control_character_in_tmdb_url_returns_422_not_500(client, alice):
+    """Was: a tmdb_url carrying a non-printable ASCII character but still
+    starting with the required https://image.tmdb.org/t/p/ prefix passed the
+    schema, then made httpx raise InvalidURL — which does NOT subclass
+    httpx.HTTPError, so fetch_poster_bytes' except clause missed it and it
+    escaped as an unhandled 500. Now: CustomPosterSet rejects control
+    characters up front (and fetch_poster_bytes catches InvalidURL as a
+    second line of defence for any other caller)."""
+    user, headers = alice
+    _grant_premium(user["id"])
+    setup = client.post("/media", json={"media_type": "film", "title": "Control Char URL Regression"}, headers=headers)
+    item_id = setup.json()["id"]
+    try:
+        for bad in ("https://image.tmdb.org/t/p/a\x00b.jpg", "https://image.tmdb.org/t/p/a\nb.jpg"):
+            r = client.put(f"/media/{item_id}/poster", json={"tmdb_url": bad}, headers=headers)
+            assert r.status_code == 422, f"expected 422 for {bad!r}, got {r.status_code}:\n{r.text}"
+    finally:
+        client.delete(f"/media/{item_id}", headers=headers)
+
+
+def test_delete_entry_with_custom_episode_still_succeeds(client, alice):
+    """Was: DELETE /media/{item_id} died with an unhandled ForeignKeyViolation
+    (500) whenever the entry had a custom episode still — episode_custom_stills
+    had no ORM relationship on LibraryEntry and no DB-level ON DELETE CASCADE,
+    so nothing ever removed those rows on a single-entry delete (only
+    users/accounts.py's whole-account purge handled them). Found because the
+    still fuzz test above could not clean up between hypothesis examples. Now:
+    LibraryEntry.episode_custom_stills cascades, and delete_media GCs the
+    stills' image rows the same way it already did for poster/backdrop."""
+    user, headers = alice
+    _grant_premium(user["id"])
+    setup = client.post("/media", json={"media_type": "tv_show", "title": "Still Delete Regression"}, headers=headers)
+    item_id = setup.json()["id"]
+    put = client.put(f"/media/{item_id}/episodes/1/1/still", json={"image_b64": _VALID_PNG_B64}, headers=headers)
+    assert put.status_code == 200, put.text
+    r = client.delete(f"/media/{item_id}", headers=headers)
+    assert r.status_code == 204, r.text
+    assert client.get(f"/media/{item_id}", headers=headers).status_code == 404
+
+
+def test_valid_png_upload_still_succeeds(client, alice):
+    """Guard for the two regression fixes above: tightening CustomPosterSet
+    must not have broken the ordinary upload path."""
+    user, headers = alice
+    _grant_premium(user["id"])
+    setup = client.post("/media", json={"media_type": "film", "title": "Valid Poster Upload"}, headers=headers)
+    item_id = setup.json()["id"]
+    try:
+        r = client.put(f"/media/{item_id}/poster", json={"image_b64": _VALID_PNG_B64}, headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["custom_poster_url"], r.text
+    finally:
+        client.delete(f"/media/{item_id}", headers=headers)
+
+
+# ---------- routers/admin/* (previously not audited for fuzz — see docs/backlog.md) ----------
+
+# The 8 admin sub-routers render server-side HTML behind HTTP Basic, so they
+# were skipped by the 2026-09-03 pass. Their input surface is real, though, and
+# structurally *more* exposed than the JSON API's: every value arrives as a
+# `Form(...)` or `Query(...)` parameter, which means no Pydantic model — and
+# therefore none of the `SafeStr` / `PG_INT32_MAX` guards that pass added to
+# the request schemas. What follows fuzzes the endpoints that actually take
+# caller-controlled data.
+#
+# Deliberately NOT fuzzed, as low-value rather than missing:
+#   - the pure no-body actions (ban/unban, verify/unverify, whitelist-review,
+#     revoke-premium, cancel-deletion, reset-login-limit, reset-onboarding,
+#     delete-user, invite revoke/restore/reset-uses): their only input is the
+#     integer path parameter, covered once by the generic path-parameter test
+#     below rather than by N copies of it
+#   - the plain GET dashboards with no parameters (/admin, /admin/premium,
+#     /admin/periodic-tasks, /admin/bans, /admin/usage): no input surface
+#   - the checkbox-style toggles' *boolean* half (`value` is compared to "1",
+#     so every other string means "off" and nothing can go wrong) — their
+#     `feature`/`task_key` half IS fuzzed, since it selects an attribute name
+
+_ADMIN_SETTINGS_FORM = {
+    "registration_open": "1",
+    "turnstile_enabled": "1",
+    "turnstile_dev_hostnames": "",
+    "email_confirmation_enabled": "1",
+    "rate_limit_per_minute": "600",
+    "flood_ban_per_minute": "2000",
+    "auth_rate_limit_per_minute": "30",
+    "register_per_hour_per_ip": "20",
+    "login_backoff_threshold": "5",
+    "login_backoff_account_threshold": "30",
+    "login_backoff_minutes": "15",
+    "probe_ban_threshold": "12",
+    "probe_window_minutes": "10",
+    "ban_minutes": "60",
+    "strike_ban_threshold": "5",
+    "exempt_ips": "",
+    "tmdb_db_cache_hours": "24",
+    "email_sender_name": "Renar",
+    "email_sender_address": "noreply@renar.app",
+    "confirmation_code_ttl_minutes": "15",
+    "email_confirmation_grace_days": "7",
+    "unconfirmed_account_cleanup_days": "14",
+    "username_cooldown_days": "30",
+    "deletion_grace_days": "30",
+}
+
+_ADMIN_SETTINGS_INT_FIELDS = sorted(k for k, v in _ADMIN_SETTINGS_FORM.items() if v.isdigit() and len(v) > 1)
+_ADMIN_SETTINGS_TEXT_FIELDS = ["turnstile_dev_hostnames", "exempt_ips", "email_sender_name", "email_sender_address"]
+
+# Straddles Postgres INTEGER's +/-2**31 boundary on purpose: every one of these
+# fields is written to an `Integer` column with no bound of its own.
+_pg_boundary_int = st.one_of(
+    st.integers(min_value=-(2**33), max_value=2**33),
+    st.sampled_from([0, -1, 2**31 - 1, 2**31, -(2**31), -(2**31) - 1, 2**62]),
+)
+
+
+@_fuzz_settings
+@given(
+    int_overrides=st.dictionaries(st.sampled_from(_ADMIN_SETTINGS_INT_FIELDS), _pg_boundary_int, max_size=4),
+    text_overrides=st.dictionaries(st.sampled_from(_ADMIN_SETTINGS_TEXT_FIELDS), _fuzzy_text, max_size=4),
+)
+def test_admin_save_settings_never_500s_on_arbitrary_form(client, admin_enabled, int_overrides, text_overrides):
+    payload = {**_ADMIN_SETTINGS_FORM, **{k: str(v) for k, v in int_overrides.items()}, **text_overrides}
+    r = client.post("/admin/settings", data=payload, auth=ADMIN_BASIC, follow_redirects=False)
+    assert r.status_code < 500, f"500 on ints={int_overrides!r} text={text_overrides!r}:\n{r.text[:400]}"
+
+
+@_fuzz_settings
+@given(username=st.one_of(st.none(), _fuzzy_text), email=st.one_of(st.none(), _fuzzy_text))
+def test_admin_edit_user_never_500s_on_arbitrary_form(client, admin_enabled, alice, username, email):
+    user, _ = alice
+    data = {k: v for k, v in (("username", username), ("email", email)) if v is not None}
+    r = client.post(f"/admin/users/{user['id']}/edit", data=data, auth=ADMIN_BASIC, follow_redirects=False)
+    assert r.status_code < 500, f"500 on username={username!r} email={email!r}:\n{r.text[:400]}"
+
+
+@_fuzz_settings
+@given(new_password=_fuzzy_text)
+def test_admin_set_password_never_500s_on_arbitrary_form(client, admin_enabled, alice, new_password):
+    user, _ = alice
+    r = client.post(
+        f"/admin/users/{user['id']}/password",
+        data={"new_password": new_password},
+        auth=ADMIN_BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code < 500, f"500 on new_password={new_password!r}:\n{r.text[:400]}"
+
+
+# `days` is the interesting one: it feeds `base + timedelta(days=days)`, which
+# overflows `datetime`'s own range (a plain OverflowError, not the DataError
+# family) long before Postgres is ever involved.
+@_fuzz_settings
+@given(
+    payload=st.one_of(
+        st.fixed_dictionaries({
+            "days": st.one_of(
+                st.sampled_from(["0", "1", "-1", "36525", "36526", str(10**12), str(2**63)]),
+                st.integers(min_value=-(10**15), max_value=10**15).map(str),
+            )
+        }),
+        st.fixed_dictionaries({"until_date": st.one_of(_fuzzy_text, st.just("9999-12-31"), st.just("1900-01-01"))}),
+        st.fixed_dictionaries({"forever": st.one_of(st.just("1"), st.just("0"), _fuzzy_text)}),
+        st.just({}),
+    )
+)
+def test_admin_grant_premium_never_500s_on_arbitrary_form(client, admin_enabled, alice, payload):
+    user, _ = alice
+    r = client.post(f"/admin/users/{user['id']}/premium", data=payload, auth=ADMIN_BASIC, follow_redirects=False)
+    assert r.status_code < 500, f"500 on payload={payload!r}:\n{r.text[:400]}"
+
+
+@_fuzz_settings
+@given(
+    max_uses=st.one_of(st.none(), _fuzzy_text, _pg_boundary_int.map(str)),
+    expires_at=st.one_of(st.none(), _fuzzy_text, st.just("2030-01-01"), st.just("99999-01-01")),
+)
+def test_admin_create_invite_never_500s_on_arbitrary_form(client, admin_enabled, max_uses, expires_at):
+    data = {k: v for k, v in (("max_uses", max_uses), ("expires_at", expires_at)) if v is not None}
+    r = client.post("/admin/invites/create", data=data, auth=ADMIN_BASIC, follow_redirects=False)
+    assert r.status_code < 500, f"500 on max_uses={max_uses!r} expires_at={expires_at!r}:\n{r.text[:400]}"
+
+
+@_fuzz_settings
+@given(method=_fuzzy_text, path=_fuzzy_text)
+def test_admin_endpoint_detail_never_500s_on_arbitrary_query(client, admin_enabled, method, path):
+    # method/path go straight into a WHERE comparison against text columns —
+    # max_length=10/200 caps the size, nothing caps the *content*.
+    r = client.get("/admin/usage/endpoint", params={"method": method, "path": path}, auth=ADMIN_BASIC)
+    assert r.status_code < 500, f"500 on method={method!r} path={path!r}:\n{r.text[:400]}"
+
+
+@_fuzz_settings
+@given(feature=_fuzzy_text, task_key=_fuzzy_text, value=_fuzzy_text)
+def test_admin_toggles_never_500s_on_arbitrary_key(client, admin_enabled, feature, task_key, value):
+    # Both handlers use the fuzzed key to pick a SiteSettings attribute name
+    # (`premium_{feature}_enabled`) or a task key — an allowlist miss must
+    # redirect, never raise (or, worse, setattr an arbitrary attribute).
+    r = client.post(
+        "/admin/premium/toggle", data={"feature": feature, "value": value}, auth=ADMIN_BASIC, follow_redirects=False
+    )
+    assert r.status_code < 500, f"500 on feature={feature!r}:\n{r.text[:400]}"
+    r = client.post(
+        "/admin/periodic-tasks/toggle",
+        data={"task_key": task_key, "value": value},
+        auth=ADMIN_BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code < 500, f"500 on task_key={task_key!r}:\n{r.text[:400]}"
+
+
+@_fuzz_settings
+@given(task_key=_fuzzy_text, minutes=_pg_boundary_int)
+def test_admin_task_interval_never_500s_on_arbitrary_form(client, admin_enabled, task_key, minutes):
+    r = client.post(
+        "/admin/periodic-tasks/interval",
+        data={"task_key": task_key, "minutes": str(minutes)},
+        auth=ADMIN_BASIC,
+        follow_redirects=False,
+    )
+    assert r.status_code < 500, f"500 on task_key={task_key!r} minutes={minutes!r}:\n{r.text[:400]}"
+
+
+# One test for the whole family of admin routes whose only caller-controlled
+# input is an integer path parameter. Any value outside Postgres INTEGER's
+# range used to reach the driver as an unhandled DataError (500) — see
+# main.py's `_handle_unstorable_value`.
+_ADMIN_INT_PARAM_ROUTES = [
+    ("get", "/admin/users/{i}"),
+    ("get", "/admin/users/{i}/endpoints"),
+    ("get", "/admin/users/{i}/library"),
+    ("post", "/admin/users/{i}/ban"),
+    ("post", "/admin/users/{i}/unban"),
+    ("post", "/admin/users/{i}/premium/revoke"),
+    ("post", "/admin/users/{i}/whitelist-review"),
+    ("post", "/admin/users/{i}/verify"),
+    ("post", "/admin/users/{i}/delete"),
+    ("post", "/admin/invites/{i}/revoke"),
+    ("post", "/admin/invites/{i}/delete"),
+    ("post", "/admin/comments/{i}/delete"),
+    ("post", "/admin/bans/{i}/delete"),
+]
+
+
+@_fuzz_settings
+@given(
+    route=st.sampled_from(_ADMIN_INT_PARAM_ROUTES),
+    ident=st.one_of(
+        st.integers(min_value=-(2**33), max_value=2**33),
+        st.sampled_from([0, -1, 2**31 - 1, 2**31, -(2**31) - 1, 2**62]),
+    ),
+)
+def test_admin_int_path_params_never_500(client, admin_enabled, route, ident):
+    method, template = route
+    r = getattr(client, method)(template.format(i=ident), auth=ADMIN_BASIC, follow_redirects=False)
+    assert r.status_code < 500, f"500 on {method.upper()} {template} ident={ident}:\n{r.text[:400]}"
+
+
+@_fuzz_settings
+@given(
+    page=st.one_of(st.integers(min_value=-(2**33), max_value=2**33), st.sampled_from([0, 1, 2**31, 2**62])),
+    user_id=st.one_of(st.integers(min_value=-(2**33), max_value=2**33), st.sampled_from([0, 1, 2**31, 2**62])),
+    generated=_fuzzy_text,
+)
+def test_admin_listing_query_params_never_500(client, admin_enabled, page, user_id, generated):
+    r = client.get("/admin/users", params={"page": page}, auth=ADMIN_BASIC)
+    assert r.status_code < 500, f"500 on page={page}:\n{r.text[:400]}"
+    r = client.get("/admin/comments", params={"user_id": user_id}, auth=ADMIN_BASIC)
+    assert r.status_code < 500, f"500 on user_id={user_id}:\n{r.text[:400]}"
+    r = client.get("/admin/invites", params={"generated": generated}, auth=ADMIN_BASIC)
+    assert r.status_code < 500, f"500 on generated={generated!r}:\n{r.text[:400]}"
+
+
+# ---------- regression tests for bugs the admin fuzz pass found ----------
+
+
+def test_admin_settings_integer_overflow_returns_422_not_500(client, admin_enabled):
+    """Was: every `int = Form(...)` field on POST /admin/settings was written
+    straight to an `Integer` column with no upper bound, so 2**31 reached the
+    driver as an unhandled NumericValueOutOfRange (500). Same bug class as the
+    2026-09-03 RewatchCreate one, on the surface that pass never audited."""
+    for field in ("rate_limit_per_minute", "ban_minutes", "deletion_grace_days"):
+        payload = {**_ADMIN_SETTINGS_FORM, field: str(2**31)}
+        r = client.post("/admin/settings", data=payload, auth=ADMIN_BASIC, follow_redirects=False)
+        assert r.status_code == 422, f"{field}: expected 422, got {r.status_code}"
+
+
+def test_admin_settings_nul_byte_in_text_field_returns_422_not_500(client, admin_enabled):
+    """Was: the free-text `Form(...)` fields bypass Pydantic entirely, so none
+    of them carried the SafeStr NUL-byte guard the request schemas got in the
+    2026-09-03 pass — a NUL reached Postgres and 500'd."""
+    for field in ("email_sender_name", "email_sender_address", "turnstile_dev_hostnames", "exempt_ips"):
+        payload = {**_ADMIN_SETTINGS_FORM, field: "bad\x00value"}
+        r = client.post("/admin/settings", data=payload, auth=ADMIN_BASIC, follow_redirects=False)
+        assert r.status_code == 422, f"{field}: expected 422, got {r.status_code}"
+
+
+def test_admin_edit_user_oversized_or_nul_value_returns_422_not_500(client, admin_enabled, alice):
+    """Was: `username` is a String(50) column and `email` a String(255), with
+    no length cap or NUL guard on the admin form — both an over-long value
+    (StringDataRightTruncation) and a NUL byte crashed with a 500."""
+    user, _ = alice
+    for data in (
+        {"username": "bad\x00name"},
+        {"username": "x" * 200},
+        {"email": "x" * 290 + "@example.com"},
+    ):
+        r = client.post(f"/admin/users/{user['id']}/edit", data=data, auth=ADMIN_BASIC, follow_redirects=False)
+        assert r.status_code == 422, f"{data!r}: expected 422, got {r.status_code}"
+
+
+def test_admin_grant_premium_absurd_days_clamps_instead_of_overflowing(client, admin_enabled, alice):
+    """Was two separate 500s, both plain datetime OverflowErrors raised before
+    any DB write (so main.py's DataError handler can't help): (a) a `days`
+    value so large that `timedelta(days=days)` can't even be constructed
+    (timedelta.max is ~10**9 days), and (b) granting any number of days on
+    top of an already-permanent subscription, where `base` is the 9999-01-01
+    PREMIUM_FOREVER sentinel. (b) was found by the grant-premium fuzz test
+    happening to send `forever` and then `days` in the same run. Now both
+    clamp to permanent. No upper bound on `days` was added — see
+    test_premium.py's test_admin_grant_premium_large_days_allowed."""
+    user, _ = alice
+    for days in (10**12, 2**40):
+        r = client.post(
+            f"/admin/users/{user['id']}/premium",
+            data={"days": str(days)},
+            auth=ADMIN_BASIC,
+            follow_redirects=False,
+        )
+        assert r.status_code == 303, f"days={days}: expected 303, got {r.status_code}:\n{r.text[:200]}"
+    db = SessionLocal()
+    try:
+        assert db.get(User, user["id"]).premium_until >= PREMIUM_FOREVER
+    finally:
+        db.close()
+    # topping up an already-permanent grant leaves it permanent, not overflowing
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "1"}, auth=ADMIN_BASIC, follow_redirects=False)
+    assert r.status_code == 303, r.text
+    db = SessionLocal()
+    try:
+        assert db.get(User, user["id"]).premium_until >= PREMIUM_FOREVER
+    finally:
+        db.close()
+    # and an ordinary grant on a lapsed account still behaves normally
+    db = SessionLocal()
+    try:
+        db.get(User, user["id"]).premium_until = None
+        db.commit()
+    finally:
+        db.close()
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=ADMIN_BASIC, follow_redirects=False)
+    assert r.status_code == 303, r.text
+
+
+def test_oversized_int_path_param_returns_422_not_500(client, alice):
+    """Was: any integer path/query parameter beyond Postgres INTEGER's range
+    reached the driver as an unhandled DataError (500) — across the whole
+    public API, not just admin. Now translated to a 422 by main.py's
+    `_handle_unstorable_value`. Kept alongside the admin cases above because
+    the fix is global and these are the routes real users can reach."""
+    _, headers = alice
+    big = 2**40
+    for method, path in (
+        ("get", f"/media/{big}"),
+        ("delete", f"/media/{big}"),
+        ("get", f"/media/{big}/episodes"),
+        ("delete", f"/comments/{big}"),
+        ("get", f"/lists/{big}"),
+        ("post", f"/notifications/{big}/read"),
+        ("get", f"/users/{big}"),
+    ):
+        r = getattr(client, method)(path, headers=headers)
+        assert r.status_code == 422, f"{method.upper()} {path}: expected 422, got {r.status_code}:\n{r.text[:200]}"

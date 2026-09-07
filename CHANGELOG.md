@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/09/04 15:49:26.842425 )
+[//]: # (+ Revised: 	2026/09/07 15:40:17.778977 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.19.5] - 2026-09-07
+
+### Added
+
+- `response_model` coverage for the remaining 14 `media.py` endpoints
+  (63/151 → 77/151), with new schemas `MediaKeyOut`, `TitleRatingOut`,
+  `EpisodeStillOut`, `EpisodeListOut`, `RatingsSummaryOut`, `UndoRewatchOut`,
+  and `WatchEventOut`.
+- 22 new fuzz tests (38 → 60): binary-image fuzzing for the poster/backdrop/
+  episode-still upload endpoints, plus a first fuzz pass over the admin
+  sub-routers' `Form`/`Query` inputs, which had none of the `SafeStr`/
+  `PG_INT32_MAX` guards the rest of the API already carried.
+- `_itest/whitelist_reviewer/{username}` seeding endpoint in `_test_server.py`
+  (mirrors `_set_premium`'s shortcut for the still-unbuilt payment
+  processor), unlocking `POST /media/reviews` for renar-frontend's contract
+  test.
+
+### Fixed
+
+- `CustomPosterSet` with an empty-string `image_b64` reached
+  `fetch_poster_bytes(None)` and raised an unhandled `TypeError` — fixed
+  with `min_length=1` on both source fields.
+- A `tmdb_url` containing a control character raised `httpx.InvalidURL`,
+  which isn't an `httpx.HTTPError` subclass and so escaped the existing
+  `except` as an unhandled 500 — `CustomPosterSet` now rejects non-printable
+  ASCII in the URL, and `fetch_poster_bytes` catches `InvalidURL` as a 422.
+- `DELETE /media/{item_id}` crashed with a `ForeignKeyViolation` for any
+  entry with a custom episode still — `LibraryEntry` had no relationship/
+  cascade for `episode_custom_stills`. Added `cascade="all, delete-orphan"`
+  plus an explicit `gc_image` pass so the still's image row doesn't leak.
+- Granting premium with `days` large enough to overflow `datetime`'s range
+  (including on top of an already-permanent grant) raised an unhandled
+  error — now clamped by comparing against the remaining day count before
+  constructing any `timedelta`.
+- Any out-of-range integer, over-length string, or NUL byte reaching
+  Postgres through a path/query/`Form` parameter (as opposed to a Pydantic
+  request body, already guarded by `SafeStr`/`PG_INT32_MAX` since
+  2026-09-03) escaped as an unhandled 500 across roughly 60 parameters on a
+  dozen routers. Fixed with a single `DataError` exception handler in
+  `main.py` translating it to a 422, rather than sixty per-parameter bounds
+  — see `docs/design-decisions.md`.
 
 ## [0.19.4] - 2026-09-04
 

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/09/03 14:06:02.021190
+Revised: 2026/09/07 15:13:00.384643
 """
 
 import re
@@ -301,15 +301,32 @@ class CustomPosterSet(BaseModel):
     """Exactly one source: an uploaded image, or one of TMDB's alternate
     posters (downloaded server-side into the image store)."""
 
-    image_b64: str | None = Field(default=None, max_length=8_000_000)
-    tmdb_url: str | None = Field(default=None, max_length=500)
+    # min_length=1 on both: the model validator below decides "which source"
+    # with `is None`, but routers/media.py's _resolve_raw_image branches on
+    # plain truthiness. An empty string satisfied the validator (not None =
+    # "a source was given") yet was falsy at the branch, so `{"image_b64": ""}`
+    # fell through to the TMDB path and called fetch_poster_bytes(None) —
+    # an unhandled httpx TypeError (500). Rejecting empty strings here is what
+    # keeps the two agreeing on what counts as a source. Fuzz-discovered.
+    image_b64: str | None = Field(default=None, min_length=1, max_length=8_000_000)
+    tmdb_url: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> CustomPosterSet:
         if (self.image_b64 is None) == (self.tmdb_url is None):
             raise ValueError("Provide exactly one of image_b64 or tmdb_url")
-        if self.tmdb_url is not None and not self.tmdb_url.startswith("https://image.tmdb.org/t/p/"):
-            raise ValueError("tmdb_url must be a TMDB image URL")
+        if self.tmdb_url is not None:
+            if not self.tmdb_url.startswith("https://image.tmdb.org/t/p/"):
+                raise ValueError("tmdb_url must be a TMDB image URL")
+            # httpx refuses any non-printable ASCII character in a URL by
+            # raising httpx.InvalidURL — which does NOT subclass
+            # httpx.HTTPError, so routers/tmdb.py's fetch_poster_bytes never
+            # caught it and a URL like ".../t/p/a\x00b" (prefix-valid, so it
+            # passed the check above) surfaced as an unhandled 500. Mirrors
+            # httpx's own rule so the rejection happens before the network
+            # call. Fuzz-discovered.
+            if any(ch.isascii() and not ch.isprintable() for ch in self.tmdb_url):
+                raise ValueError("tmdb_url must not contain control characters")
         return self
 
 
@@ -464,6 +481,27 @@ class LibraryEntryOut(BaseModel):
     updated_at: datetime
 
 
+class MediaKeyOut(BaseModel):
+    """One row of GET /media/keys — the minimal identity of a library entry,
+    just enough for Explore's "already in my library" membership check.
+    Mirrors the dict literal in routers/media.py's list_media_keys()."""
+
+    media_type: MediaType
+    tmdb_id: int | None = None
+    title: str
+    url: str | None = None
+
+
+class TitleRatingOut(BaseModel):
+    """Renar community average+count for one title or one episode — shape
+    returned by GET /media/ratings and GET /media/episode-ratings, and the
+    per-tmdb_id value inside POST /media/ratings/batch's response map.
+    ``average`` is None exactly when ``count`` is 0 (no ratings yet)."""
+
+    average: int | None = None
+    count: int
+
+
 # ---------- episodes ----------
 
 
@@ -476,6 +514,72 @@ class EpisodeBulk(BaseModel):
     season: int = Field(ge=0, le=PG_INT32_MAX)
     episodes: list[Annotated[int, Field(le=PG_INT32_MAX)]] = Field(min_length=1, max_length=500)
     watched: bool = True
+
+
+class EpisodeStillOut(BaseModel):
+    """Shape returned by both PUT and DELETE
+    /media/{item_id}/episodes/{season}/{episode}/still — the two share one
+    schema deliberately: the PUT returns the newly stored still, the DELETE
+    returns the same two keys with both set to None, so a caller can update
+    its own copy from either response without branching on the verb."""
+
+    still_url: str | None = None
+    still_source_url: str | None = None
+
+
+class RatingsSummaryOut(BaseModel):
+    """The per-item rating/progress rollup returned by every media.py endpoint
+    that mutates watch state — PUT/POST on episodes, POST/DELETE rewatch,
+    DELETE/PATCH on a rewatch event — and embedded (flattened, via `**`) in
+    GET /media/{item_id}/episodes. Mirrors `_ratings_summary()` in
+    routers/media.py field-for-field.
+
+    The `item_*` fields are a deliberate echo of the LibraryEntry columns
+    `_sync_progress()` may have just changed, so a caller can refresh its own
+    copy of the entry without a follow-up GET (see that function's comment).
+    """
+
+    overall_rating: int | None = None
+    episode_avg: int | None = None
+    combined_score: int | None = None
+    rated_episodes: int
+    rewatch_count: int
+    item_status: WatchStatus
+    item_episodes_watched: int
+    item_current_season: int | None = None
+    item_current_episode: int | None = None
+
+
+class EpisodeWatchOut(BaseModel):
+    """One watched episode inside EpisodeListOut.watched."""
+
+    season: int
+    episode: int
+    rating: int | None = None
+    rewatch_count: int
+
+
+class EpisodeCustomStillOut(BaseModel):
+    """One premium custom still inside EpisodeListOut.custom_stills. Distinct
+    from EpisodeStillOut (the single-still PUT/DELETE response) because the
+    listing has to say *which* episode each still belongs to, and a listed
+    still always exists (its URL is never None)."""
+
+    season: int
+    episode: int
+    still_url: str
+    still_source_url: str | None = None
+
+
+class EpisodeListOut(RatingsSummaryOut):
+    """Shape returned by GET /media/{item_id}/episodes: the per-episode watch
+    rows and custom stills, plus the flattened RatingsSummaryOut rollup the
+    handler splices in with `**_ratings_summary(...)`."""
+
+    watched: list[EpisodeWatchOut] = []
+    # empty (not omitted) while the owner isn't premium — stills are kept but
+    # not served once premium lapses, same rule as poster/backdrop overrides
+    custom_stills: list[EpisodeCustomStillOut] = []
 
 
 # ---------- lists ----------
@@ -844,6 +948,28 @@ class WatchEventRatingUpdate(BaseModel):
     """
 
     rating: int | None = Field(default=None, ge=1, le=100)
+
+
+class UndoRewatchOut(RatingsSummaryOut):
+    """Shape returned by DELETE /media/{item_id}/rewatch — the standard
+    RatingsSummaryOut plus one extra flag. `rating_cleared` reports whether
+    undoing the watch-through actually changed the denormalized cache rating
+    (LibraryEntry.rating / EpisodeWatch.rating), so the frontend can tell the
+    user their rating went away instead of silently dropping it."""
+
+    rating_cleared: bool
+
+
+class WatchEventOut(BaseModel):
+    """One watch-through in GET /media/{item_id}/rewatch-events, newest first.
+    `is_initial` marks the first watch rather than a rewatch; it is coerced
+    from a nullable column (NULL on pre-`is_initial` rows counts as a
+    rewatch), so it is always a real bool here, never None."""
+
+    id: int
+    watched_at: datetime
+    rating: int | None = None
+    is_initial: bool
 
 
 # ---------- ratings ----------

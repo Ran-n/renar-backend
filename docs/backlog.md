@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/10 13:55:42.476296 )
-[//]: # (+ Revised: 	2026/09/03 20:03:13.341634 )
+[//]: # (+ Revised: 	2026/09/07 15:13:02.413235 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -17,100 +17,45 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
 ## Testing
 
 - **[Blocking for 1.0] Full test coverage across every test type, not just
-  the modules that happen to have tests today.** The suite now has every
+  the modules that happen to have tests today.** The suite has every
   commonly-recognized *category* of test set up (unit, integration, smoke,
   regression, contract, property, snapshot, security, load, mutation
-  (config only — unverified, no WSL on the dev machine), fuzz), but having
-  the category doesn't mean coverage is complete within it. Updated
-  2026-09-03 after a coverage push across response_model/contract,
-  property/fuzz, and load, plus four real bugs the fuzzing turned up:
-  - **Contract / response_model**: `response_model=` coverage went from
-    26/149 to **63/149** endpoints (`comments.py`, `reviews.py`,
-    `notifications.py`, `lists.py`, `social.py`, `tmdb.py`, `imports.py`,
-    `export.py`, `upcoming.py`, `svc.py` — all now fully modelled, each
-    batch verified against the full backend suite with zero regressions).
-    The 8 `admin/*` router files were audited and found to need **no**
-    `response_model` at all: every one of their 38 routes returns
-    server-rendered HTML or a redirect (`include_in_schema=False`), never
-    JSON, and none are called from renar-frontend's `ApiClient` — confirmed
-    by grep, zero matches. Remaining gap: `media.py` still has 15/24
-    endpoints uncovered (the bulk of what's left), plus the
-    `CustomPosterSet`-based endpoints on other routers. renar-frontend's
-    `test_contract.py` now does real response-body schema validation
-    (not just route existence) against ~20 of the newly-modelled
-    endpoints — see renar-frontend's `docs/backlog.md`.
-  - **Property/fuzz**: grew from 8 to **38 tests**. Newly covered:
-    `premium/style` (validator-branch-dense), `reviews` (create + update,
-    rating boundaries), `profile` update, all 4 `lists.py` endpoints,
-    `import` upload (`st.binary()` fuzzing), `svc/bans` + `svc/strikes`,
-    and 7 `media.py` endpoints (patch, ratings-batch, rewatch
-    post/delete, rewatch-event rating, set-episode, bulk-episodes).
-    Confirmed still-empty: `media.py`'s `CustomPosterSet`-based endpoints
-    (poster/backdrop/still — base64 image content is a meaningfully
-    different fuzz shape, wants its own focused pass) and the admin
-    sub-router bodies (not audited this round).
-    **Four real production bugs found and fixed** in the process, each
-    fuzz-discovered, each with a regression test: (1) any free-text field
-    reaching Postgres with a NUL byte crashed with an unhandled 500
-    (Pydantic's length validators accept NUL as "1 character"; Postgres
-    text columns reject it outright) — fixed globally via a shared
-    `SafeStr` annotated type across 11 fields; (2) `permaban()` swallowed
-    DB write failures in a bare `except Exception: log`, so a failed ban
-    still returned `{"status": "ok"}` to the caller — fixed to re-raise
-    (in-memory ban still applies immediately, matching the existing
-    contract); (3) `PATCH /media/{id}` with an explicit `null` on
-    `status`, `is_favorite`, or `episodes_watched` reached
-    `setattr(item, field, None)` on a NOT NULL column — fixed with a field
-    validator rejecting explicit null on all three (they're Optional only
-    to support partial-update omission, never meant to be nullable); (4)
-    `RewatchCreate.season`/`episode` and `EpisodeBulk`'s fields had no
-    upper bound, so a value like `2**31` passed Pydantic's `ge=0` and then
-    overflowed Postgres's `INTEGER` column — fixed with a shared
-    `PG_INT32_MAX` bound; found alongside it, a duplicate episode number
-    in one `EpisodeBulk` request (`episodes: [0, 0]`) hit a unique-
-    constraint violation because the "already exists" check was
-    snapshotted once before the loop — fixed by deduping the incoming
-    list first. See `docs/design-decisions.md` for the full writeups.
-  - **Unit/integration**: coverage exists per-router (`tests/test_*.py`).
-    First real baseline measured (`pytest --cov`, default marker set): 82%
-    branch coverage. Raised to **96%** in the 2026-09-02 pass, targeting
-    every module below ~95%: `users/tvtime_import.py` 68% → 98% (the
-    largest single file in the codebase), `tmdb/tmdb_store.py` 69% → 96%,
-    `routers/admin/users.py` 77% → 99%, `users/renar_import.py` 76% → 98%,
-    `catalog/titles.py` 73% → 86%, `users/security.py` 83% → 95%, plus
-    every router/media-util file individually below 95%. While writing
-    concurrency-focused tests for that pass, several genuine races
-    surfaced and were fixed (not just tested around) — see
-    `docs/design-decisions.md`'s entries on `strike_and_maybe_ban`/
-    `permaban`'s row locks, the `endpoint_stats`/`request_days` upserts,
-    per-user import locking, and the unhandled-`IntegrityError` guards
-    added to `auth.py`/`social.py`/`comments.py`/`reviews.py`/`lists.py`/
-    `media.py`/`admin/users.py`/`tvdb_store.py`'s concurrent-write paths.
-    Remaining real gaps: `catalog/titles.py` (86%), `_devserver.py` (54%,
-    OS-level/subprocess code not reachable from in-process coverage),
-    `_test_server.py` (0%, invoked only as a subprocess by
-    `tests/integration/`, never measured by this instrumented run).
-  - **Mutation**: config exists (`pyproject.toml`'s `[tool.mutmut]`) but
-    has never actually run (no WSL on the dev machine, and the owner
-    declined installing it 2026-09-03) and is scoped to just `models.py`
-    + `schemas.py`.
-  - **Load**: `tests/load/locustfile.py` now also covers comment posting,
-    rating, and adding to library as weighted write tasks (~27% of
-    simulated traffic), alongside the existing health/me/library/stats/
-    registration-status reads. Import writes were deliberately not added —
-    they need real multipart file bytes that pass content-based detection,
-    better exercised by integration tests than a locust task.
+  (config only — see the WSL entry below), fuzz), but having the category
+  doesn't mean coverage is complete within it. Two coverage pushes
+  (2026-09-03 and 2026-09-07) closed most of it and turned up nine real
+  production bugs along the way — the full writeups live in
+  `docs/design-decisions.md`'s Testing section. What is actually still
+  open:
+  - **Contract / response_model**: now **77/151** endpoints. The 74
+    without one are almost entirely by design — 20 return
+    `204 No Content`, 44 are the admin panel's server-rendered
+    HTML/redirects (`include_in_schema=False`, audited 2026-09-03 and
+    confirmed to need none), and the rest are non-JSON bodies (`/events`'
+    SSE stream, the `/images`, `/tmdb/image` and `/export/data/download`
+    binary responses) or one-line literals (`/`, `/health`). The genuine
+    remaining gap is small and specific: `stats.py`'s three endpoints
+    (`GET /stats`, `/stats/ranking`, `/stats/ranking/metrics`) and
+    `GET /premium/palette`. `stats.py` is the awkward one — its response
+    is assembled dict-by-dict across a long handler, so modelling it is a
+    real shape-extraction job, not a decorator edit.
+  - **Unit/integration**: 96% branch coverage as of the 2026-09-02 pass
+    (up from an 82% first baseline), measured with `pytest --cov` on the
+    default marker set. Remaining real gaps: `catalog/titles.py` (86%),
+    `_devserver.py` (54%, OS-level/subprocess code not reachable from
+    in-process coverage), `_test_server.py` (0%, invoked only as a
+    subprocess by `tests/integration/`, never measured by this
+    instrumented run).
+  - **Mutation**: the one blocked item — `[tool.mutmut]` exists but has
+    never run, and can't on this machine. Tracked separately in the WSL
+    entry directly below, including widening `paths_to_mutate` beyond
+    `models.py` + `schemas.py` once it can actually run.
 
-  Getting to "full coverage, all test types, 100%" means, in rough order:
-  add `response_model` to the remaining `media.py` endpoints and the
-  `CustomPosterSet`-based ones (same router-by-router, verify-against-
-  full-suite discipline as the batches above — response_model changes
-  carry real regression risk); fuzz the `CustomPosterSet` endpoints with a
-  dedicated binary-content pass; audit the admin sub-router bodies for
-  fuzz coverage; verify the mutmut config under WSL/Linux CI and widen
-  `paths_to_mutate` to the whole `src/` tree. See renar-frontend's
-  `docs/backlog.md` for the matching frontend-side gaps (E2E journeys
-  beyond what now exists, visual coverage beyond the four screens added).
+  Property/fuzz and load are done: fuzz now covers every endpoint with a
+  meaningful input surface, including `media.py`'s `CustomPosterSet`
+  binary-image endpoints and the admin sub-routers (2026-09-07), and
+  `tests/load/locustfile.py` covers reads plus weighted write tasks
+  (~27% of simulated traffic). renar-frontend's matching item closed
+  2026-09-07 — see its `docs/design-decisions.md`.
 
 - **[Future] Set up WSL on the dev machine and actually run mutmut.**
   `mutmut` refuses to run at all on native Windows — not a project
@@ -127,7 +72,10 @@ CHANGELOG.md, and `docs/design-decisions.md` instead.
   inside it to actually run `[tool.mutmut]`'s config against this repo.
   Once that's done, the `[tool.mutmut]` config in `pyproject.toml` can be
   verified for real instead of carrying the "unverified" caveat repeated
-  in the Testing item above and in `docs/design-decisions.md`.
+  in the Testing item above and in `docs/design-decisions.md`, and
+  `paths_to_mutate` can be widened from `models.py` + `schemas.py` toward
+  the whole `src/` tree. As of 2026-09-07 this is the *only* remaining
+  blocked piece of that Testing item.
 
 ## Import system (`routers/imports.py`)
 

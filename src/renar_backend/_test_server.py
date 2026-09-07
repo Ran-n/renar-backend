@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 14:33:20.294880
-Revised: 2026/08/21 16:27:43.183689
+Revised: 2026/09/07 12:28:01.330807
 
 Opt-in server for integration tests that need the real app reachable over
 real HTTP, not the in-process ASGI transport TestClient uses: this repo's
@@ -27,6 +27,7 @@ see tests/conftest.py for the same constraint.
 
 import argparse
 import atexit
+import datetime
 import os
 import tempfile
 import uuid
@@ -77,7 +78,7 @@ def main() -> None:
 
     from renar_backend.database import Base, SessionLocal, engine
     from renar_backend.main import app, asgi_app
-    from renar_backend.models import User
+    from renar_backend.models import LibraryEntry, Notification, ReviewWhitelist, User, utcnow
 
     Base.metadata.create_all(engine)
     engine.dispose()  # see tests/conftest.py's _fresh_db: stale prepared plans reference pre-create_all OIDs
@@ -103,6 +104,82 @@ def main() -> None:
                 return {"ok": False}
             user.email_confirmed = True
             db.commit()
+            return {"ok": True}
+        finally:
+            db.close()
+
+    @app.post("/_itest/seed_notification/{username}", include_in_schema=False)
+    def _seed_notification(
+        username: str, title: str = "New episode aired", body: str = "S01E01 is now available."
+    ) -> dict:
+        # Real notifications only come from the new-episode background job
+        # (social/notifier.py's check_new_episodes), which needs a real TMDB
+        # round-trip and a wait for the periodic task — not viable to drive
+        # from a UI test. Inserting the row directly is the same shortcut
+        # _confirm_email takes for email confirmation.
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.username == username).first()
+            if user is None:
+                return {"ok": False}
+            n = Notification(user_id=user.id, kind="new_episode", title=title, body=body, season=1, episode=1)
+            db.add(n)
+            db.commit()
+            return {"ok": True, "id": n.id}
+        finally:
+            db.close()
+
+    @app.post("/_itest/set_next_episode/{item_id}", include_in_schema=False)
+    def _set_next_episode(item_id: int, days_until: int, season: int = 1, episode: int = 1) -> dict:
+        # /upcoming reads next-episode/release-date data straight off Title
+        # (normally synced by a background poller from TMDB) instead of
+        # hitting TMDB on the request path — see renar-backend's own
+        # tests/test_upcoming.py::_set_title_for_entry, which this mirrors.
+        # Writing it directly here is the same TMDB-free shortcut, for E2E
+        # tests driving the real UI instead of the backend test client.
+        db = SessionLocal()
+        try:
+            entry = db.get(LibraryEntry, item_id)
+            if entry is None:
+                return {"ok": False}
+            entry.title_ref.next_episode_air_date = datetime.date.today() + datetime.timedelta(days=days_until)
+            entry.title_ref.next_episode_season = season
+            entry.title_ref.next_episode_number = episode
+            db.commit()
+            return {"ok": True}
+        finally:
+            db.close()
+
+    @app.post("/_itest/set_premium/{username}", include_in_schema=False)
+    def _set_premium(username: str, days: int = 30) -> dict:
+        # No payment processor is wired up yet (Paddle integration is still
+        # backlog — see docs/backlog.md's Monetization section), so this is
+        # the only way to get a premium account for a test run. Mirrors
+        # renar-backend's own tests/test_stats.py::_set_premium.
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.username == username).first()
+            if user is None:
+                return {"ok": False}
+            user.premium_until = utcnow() + datetime.timedelta(days=days)
+            db.commit()
+            return {"ok": True}
+        finally:
+            db.close()
+
+    @app.post("/_itest/whitelist_reviewer/{username}", include_in_schema=False)
+    def _whitelist_reviewer(username: str) -> dict:
+        # POST /media/reviews is gated on a review_whitelist row (no public
+        # reviewer application flow exists yet) — inserting it directly is
+        # the same shortcut _set_premium takes for the payment processor.
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.username == username).first()
+            if user is None:
+                return {"ok": False}
+            if db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user.id).first() is None:
+                db.add(ReviewWhitelist(user_id=user.id))
+                db.commit()
             return {"ok": True}
         finally:
             db.close()

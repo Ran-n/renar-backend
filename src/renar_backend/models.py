@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/08/24 12:39:03.794967
+Revised: 2026/09/07 15:13:00.636447
 """
 
 import enum
@@ -841,6 +841,21 @@ class LibraryEntry(Base):
     episode_watches: Mapped[list[EpisodeWatch]] = relationship(back_populates="item", cascade="all, delete-orphan")
     watch_events: Mapped[list[WatchEvent]] = relationship(cascade="all, delete-orphan")
     notifications: Mapped[list[Notification]] = relationship(cascade="all, delete-orphan")
+    # Quoted forward reference: EpisodeCustomStill is declared further down
+    # this module, so the name doesn't exist yet at class-body evaluation
+    # time — SQLAlchemy's registry resolves the string later.
+    #
+    # This relationship exists purely for the cascade. Without it, an entry
+    # carrying a custom episode still had no path to remove its
+    # episode_custom_stills rows, and there is no DB-level ON DELETE CASCADE
+    # either — so DELETE /media/{item_id} died on a ForeignKeyViolation (500)
+    # for any premium user who had ever set one. Fuzz-discovered.
+    # (users/accounts.py deletes these in bulk before purging an account; that
+    # path predates this relationship and stays as-is because it also has to
+    # collect the still image IDs for GC.)
+    episode_custom_stills: Mapped[list["EpisodeCustomStill"]] = relationship(  # noqa: UP037 — forward ref; removing quotes causes NameError at class body eval
+        cascade="all, delete-orphan"
+    )
 
     # ---- convenience passthroughs so callers can keep reading item.title, item.year, etc. ----
     @property

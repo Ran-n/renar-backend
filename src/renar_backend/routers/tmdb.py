@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/09/03 08:33:31.304026
+Revised: 2026/09/07 15:42:19.693113
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -381,6 +381,16 @@ def fetch_poster_bytes(url: str) -> bytes:
     (the URL prefix is validated by the CustomPosterSet schema)."""
     try:
         resp = http_client.get(url)
+    except httpx.InvalidURL as exc:
+        # Not an httpx.HTTPError subclass (it derives straight from Exception),
+        # so the transport-failure handler below never caught it and a URL
+        # httpx refuses to parse at all — e.g. one carrying a non-printable
+        # ASCII character — escaped as an unhandled 500. CustomPosterSet now
+        # rejects that shape up front; this stays as the guard for any other
+        # caller of this helper. Fuzz-discovered.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Not a usable TMDB image URL"
+        ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB images") from exc
     if resp.status_code != 200:
