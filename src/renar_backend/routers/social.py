@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/09/03 08:33:31.219074
+Revised: 2026/09/17 10:04:40.045106
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -14,7 +14,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..catalog.titles import WITH_TITLE_GENRES
+from ..catalog.titles import WITH_TITLE_GENRES, escape_like
 from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import Follow, LibraryEntry, MediaType, Title, User, WatchStatus
@@ -159,7 +159,9 @@ def search_users(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    users = db.query(User).filter(User.username.ilike(f"%{q}%"), User.id != me.id).limit(20).all()
+    users = (
+        db.query(User).filter(User.username.ilike(f"%{escape_like(q)}%", escape="\\"), User.id != me.id).limit(20).all()
+    )
     return _public_users_batch(users, me, db)
 
 

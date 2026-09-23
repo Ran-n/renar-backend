@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/08/20 08:24:31.428234
+Revised: 2026/09/17 10:04:39.850028
 
 Shared Title resolution: every place that addresses a global title by
 (media_type, tmdb_id-or-title text) — library adds, imports, comments,
@@ -85,13 +85,30 @@ def find_title(
     return None
 
 
+def escape_like(s: str) -> str:
+    """Escape SQL LIKE/ILIKE wildcard characters in a user-supplied search
+    string so they are matched literally rather than as patterns.
+
+    Escapes ``\\``, ``%``, and ``_`` with a leading backslash; callers must
+    pass ``escape="\\"`` to SQLAlchemy's ``like``/``ilike`` so PostgreSQL
+    knows to interpret ``\\`` as the escape prefix.  Without this, a search
+    for ``100%`` matches every title containing "100" followed by anything,
+    and a search for ``_`` matches any single character.
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def search_local_titles(db: Session, media_type: MediaType, query: str, limit: int = 10) -> list[Title]:
     """Fallback for /tmdb/search when TMDB is unreachable: substring match
     against titles Renar already knows about (tmdb_id required — these feed
     the same add/detail flow as live TMDB results, which key off it)."""
     return (
         db.query(Title)
-        .filter(Title.media_type == media_type, Title.tmdb_id.isnot(None), Title.title.ilike(f"%{query}%"))
+        .filter(
+            Title.media_type == media_type,
+            Title.tmdb_id.isnot(None),
+            Title.title.ilike(f"%{escape_like(query)}%", escape="\\"),
+        )
         .order_by(Title.title)
         .limit(limit)
         .all()

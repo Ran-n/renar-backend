@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/09/07 15:40:17.778977 )
+[//]: # (+ Revised: 	2026/09/23 17:31:32.092201 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.19.7] - 2026-09-23
+
+### Fixed
+
+- SQL wildcard injection via ILIKE: user-supplied search queries in
+  `GET /media` (title/TMDB-cache search), `GET /tmdb/search` (local
+  fallback), and `GET /social/users/search` were interpolated directly into
+  `LIKE`/`ILIKE` patterns, letting a caller use `%` or `_` as SQL
+  wildcards. An `escape_like()` helper now escapes `\`, `%`, and `_`
+  before interpolation; all three call sites pass `escape="\\"` to
+  SQLAlchemy so PostgreSQL interprets the escape prefix correctly. Unit
+  tests for `escape_like` and an integration test covering literal `%`
+  and `_` searches are added.
 
 ## [0.19.6] - 2026-09-07
 

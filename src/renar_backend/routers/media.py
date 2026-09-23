@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/09/07 15:13:01.146068
+Revised: 2026/09/17 10:04:39.940799
 """
 
 import logging
@@ -13,7 +13,7 @@ from sqlalchemy import Date, and_, cast, exists, func, inspect, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, find_or_create_title, find_title
+from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, escape_like, find_or_create_title, find_title
 from ..database import get_db
 from ..events import publish as publish_event
 from ..media.image_service import gc_image, image_row_for
@@ -177,17 +177,18 @@ def list_media(
         # original name, or any language's title we've already cached from
         # TMDB (e.g. a Spanish title cached because some user viewed it in
         # Spanish) — so a search in the user's own language finds it too.
+        _safe_search = escape_like(search)
         cached_match = db.query(TmdbCache.title_id).filter(
             TmdbCache.kind == "details",
             or_(
-                TmdbCache.payload["title"].astext.ilike(f"%{search}%"),
-                TmdbCache.payload["name"].astext.ilike(f"%{search}%"),
+                TmdbCache.payload["title"].astext.ilike(f"%{_safe_search}%", escape="\\"),
+                TmdbCache.payload["name"].astext.ilike(f"%{_safe_search}%", escape="\\"),
             ),
         )
         query = query.filter(
             or_(
-                Title.title.ilike(f"%{search}%"),
-                Title.original_title.ilike(f"%{search}%"),
+                Title.title.ilike(f"%{_safe_search}%", escape="\\"),
+                Title.original_title.ilike(f"%{_safe_search}%", escape="\\"),
                 Title.id.in_(cached_match),
             )
         )
