@@ -113,6 +113,32 @@ def test_list_filters(client, alice):
     assert [i["title"] for i in by_search] == ["Dark"]
 
 
+def test_search_wildcard_characters_are_treated_literally(client, alice):
+    """A search containing SQL LIKE wildcards (%, _) must not expand to a pattern.
+
+    Before the escape_like fix, searching '100%' would match any title containing
+    '100' followed by anything; '1_0' would match any three-character string
+    starting with '1' and ending with '0'. Both must now match only literally.
+    """
+    _, headers = alice
+    _create(client, headers, title="100%")
+    _create(client, headers, title="1_0")
+    _create(client, headers, title="Heat")
+
+    # '%' must be treated as a literal character — should only match '100%', not 'Heat'
+    pct = client.get("/media", params={"search": "100%"}, headers=headers).json()
+    assert [i["title"] for i in pct] == ["100%"]
+
+    # '_' must be treated as a literal character — should not match 'Heat' (len-4 no match anyway)
+    # and must not match '100%' (3 chars followed by '%' ≠ literal '1_0')
+    und = client.get("/media", params={"search": "1_0"}, headers=headers).json()
+    assert [i["title"] for i in und] == ["1_0"]
+
+    # A bare '%' must not return every title
+    bare_pct = client.get("/media", params={"search": "%"}, headers=headers).json()
+    assert [i["title"] for i in bare_pct] == ["100%"]
+
+
 def test_list_pagination(client, alice):
     _, headers = alice
     for i in range(5):

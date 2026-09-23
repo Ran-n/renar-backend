@@ -1694,7 +1694,7 @@ wheels = [
 
 [[package]]
 name = "renar-backend"
-version = "0.19.6"
+version = "0.19.7"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

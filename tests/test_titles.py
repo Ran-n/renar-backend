@@ -13,6 +13,7 @@ import pytest
 from renar_backend.catalog.titles import (
     backfill_title_tmdb_id,
     backfill_title_tvdb_id,
+    escape_like,
     find_title,
     merge_titles,
 )
@@ -20,6 +21,34 @@ from renar_backend.database import SessionLocal
 from renar_backend.models import EpisodeRatingAggregate, Genre, MediaType, Title
 
 pytestmark = pytest.mark.regression
+
+
+# ---------------------------------------------------------------------------
+# escape_like — pure-function unit tests (no DB needed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # ordinary text passes through unchanged
+        ("hello", "hello"),
+        # percent wildcard is escaped
+        ("100%", "100\\%"),
+        # underscore wildcard is escaped
+        ("_type", "\\_type"),
+        # backslash (the escape char itself) is doubled first
+        ("a\\b", "a\\\\b"),
+        # all three metacharacters in one string
+        ("100% _done\\ok", "100\\% \\_done\\\\ok"),
+        # empty string
+        ("", ""),
+        # leading/trailing wildcards
+        ("%abc%", "\\%abc\\%"),
+    ],
+)
+def test_escape_like_pure(raw, expected):
+    assert escape_like(raw) == expected
 
 
 def _create(client, headers, **overrides) -> dict:
