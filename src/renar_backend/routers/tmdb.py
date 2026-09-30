@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:18.044778
-Revised: 2026/09/07 15:42:19.693113
+Revised: 2026/09/30 09:38:44.989526
 
 Proxy against TMDB so the API key never reaches clients.
 
@@ -14,6 +14,7 @@ tmdb_store.py, so detail pages survive TMDB outages and server restarts.
 import logging
 from pathlib import Path
 
+import anyio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
@@ -47,6 +48,14 @@ _TMDB_DOWN_STATUSES = {
     status.HTTP_503_SERVICE_UNAVAILABLE,
     status.HTTP_504_GATEWAY_TIMEOUT,
 }
+
+# image_proxy's own thread-pool budget, separate from the app-wide default
+# (see main.py's lifespan). A poster-heavy grid can fire 90+ concurrent
+# image requests in under a second — on the shared default limiter that was
+# enough to starve out unrelated endpoints (e.g. /upcoming) queued behind
+# the burst. Isolating it here means an image storm can only ever delay
+# other images, never the rest of the API.
+_image_limiter = anyio.CapacityLimiter(40)
 
 
 def _locale_params(language: str) -> dict | None:
@@ -277,8 +286,22 @@ _IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
 _CTYPES = {".png": "image/png", ".webp": "image/webp"}
 
 
+def _fetch_and_store_image(size: str, filename: str, key: str) -> bytes:
+    """Blocking body of image_proxy — run through `_image_limiter`, not the
+    app-wide default pool (see its docstring)."""
+    try:
+        resp = image_http_client.get(f"{IMAGE_BASE}/{size}/{filename}")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB images") from exc
+    if resp.status_code != 200:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    with SessionLocal() as db:
+        store_external_image(db, "tmdb", key, resp.content)
+    return resp.content
+
+
 @router.get("/image/{size}/{filename}")
-def image_proxy(size: str, filename: str):
+async def image_proxy(size: str, filename: str):
     """Serve TMDB posters/backdrops from our origin.
 
     Browsers sometimes cannot load image.tmdb.org directly (ISP blocks,
@@ -291,6 +314,11 @@ def image_proxy(size: str, filename: str):
     dozens of never-before-seen posters at once would then be bottlenecked by
     the DB pool size (5 + 10 overflow) rather than actual network/CPU work.
     Each of the two short DB touches below opens and closes its own session.
+
+    `async def` + explicit `anyio.to_thread.run_sync(..., limiter=_image_limiter)`
+    for every blocking step (not just the outbound fetch) so this endpoint's
+    concurrency is capped by its own limiter end to end, never by whichever
+    thread happens to pick up the coroutine from the app-wide pool.
     """
     if (
         size not in ALLOWED_IMAGE_SIZES
@@ -303,21 +331,17 @@ def image_proxy(size: str, filename: str):
 
     ctype = _CTYPES.get(Path(filename).suffix, "image/jpeg")
     key = f"{size}/{filename}"
-    with SessionLocal() as db:
-        cached = stored_external_image(db, "tmdb", key)
+
+    def _read_cache() -> Path | None:
+        with SessionLocal() as db:
+            return stored_external_image(db, "tmdb", key)
+
+    cached = await anyio.to_thread.run_sync(_read_cache, limiter=_image_limiter)
     if cached is not None:
         return FileResponse(cached, media_type=ctype, headers=_IMMUTABLE)
 
-    try:
-        resp = image_http_client.get(f"{IMAGE_BASE}/{size}/{filename}")
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach TMDB images") from exc
-    if resp.status_code != 200:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-
-    with SessionLocal() as db:
-        store_external_image(db, "tmdb", key, resp.content)
-    return Response(resp.content, media_type=ctype, headers=_IMMUTABLE)
+    content = await anyio.to_thread.run_sync(_fetch_and_store_image, size, filename, key, limiter=_image_limiter)
+    return Response(content, media_type=ctype, headers=_IMMUTABLE)
 
 
 @router.get("/posters", response_model=list[TmdbImageOut])
