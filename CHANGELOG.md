@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/09/23 17:31:32.092201 )
+[//]: # (+ Revised: 	2026/09/30 09:42:09.831095 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Fixed
+
+- `GET /upcoming/history` could block for over a minute when it needed to
+  backfill TV episode data for several newly-tracked shows in one request.
+  The TMDB backfill (`sync_show_episodes`) now runs against a 3-second
+  per-request budget; anything left over completes via a background task
+  instead of blocking the response.
+- `GET /tmdb/image/{size}/{filename}` now runs on its own isolated
+  thread-pool limiter (40 slots) instead of the app-wide shared default —
+  a burst of concurrent poster fetches (measured at 90+ in under a
+  second) could previously starve unrelated endpoints (e.g.
+  `GET /upcoming`) queued behind it on the same pool.
+
+### Changed
+
+- Raised the app-wide default thread-pool limiter from anyio's default of
+  40 to 80 for additional headroom.
 
 ## [0.19.7] - 2026-09-23
 

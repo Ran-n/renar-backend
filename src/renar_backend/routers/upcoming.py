@@ -2,20 +2,21 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.990684
-Revised: 2026/09/03 08:54:41.423427
+Revised: 2026/09/30 09:38:45.119542
 
 Upcoming releases for tracked titles: next episodes and film premieres.
 """
 
 import logging
+import time
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, aliased
 
 from ..catalog.titles import WITH_TITLE_GENRES
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..models import Episode, LibraryEntry, MediaType, Title, User, WatchStatus
 from ..schemas import UpcomingItemOut
 from ..tmdb.tmdb_store import sync_show_episodes
@@ -23,6 +24,15 @@ from ..users.auth import get_current_user
 
 router = APIRouter(prefix="/upcoming", tags=["upcoming"])
 _log = logging.getLogger(__name__)
+
+# Cap on how much live TMDB-syncing time /upcoming/history does inline. The
+# common case (already-synced shows, or nothing new) costs nothing but
+# indexed DB reads regardless of this budget — this only bounds the rare
+# case of several newly-tracked/never-synced shows landing in the same
+# request, so one bad batch can't turn into a multi-minute response. Titles
+# that don't get their turn before the budget runs out are still caught up,
+# just via a background task instead of this response.
+_HISTORY_SYNC_BUDGET_S = 3.0
 
 
 def _tv_entry(entry: LibraryEntry, title: Title, today: date) -> dict | None:
@@ -110,8 +120,23 @@ def get_upcoming(
     return out
 
 
+def _sync_episodes_background(title_id: int) -> None:
+    """Runs after the response is sent (see get_upcoming_history's
+    background_tasks.add_task below) — its own DB session, since the
+    request-scoped one is already closed by the time this fires."""
+    with SessionLocal() as db:
+        title = db.get(Title, title_id)
+        if title is None:
+            return
+        try:
+            sync_show_episodes(db, title)
+        except Exception:
+            _log.exception("background episode sync failed for title %s", title_id)
+
+
 @router.get("/history", response_model=list[UpcomingItemOut])
 def get_upcoming_history(
+    background_tasks: BackgroundTasks,
     status_filter: WatchStatus | None = None,
     media_type: MediaType | None = None,
     before: str | None = None,
@@ -154,13 +179,22 @@ def get_upcoming_history(
 
         tv_rows = tv_query.all()
         entry_by_title_id = {title.id: (entry, title) for entry, title in tv_rows}
+        # Backfilled lazily here (through the same persistent TMDB cache
+        # season_tmdb() uses) so a show's history shows up on the first
+        # request rather than waiting for the periodic background job — but
+        # bounded by _HISTORY_SYNC_BUDGET_S: this endpoint's latency used to
+        # scale with TMDB's, for every season of every tracked show, on
+        # every call, and a handful of slow/retrying titles could (and did)
+        # block the whole response for a minute or more. Once the budget's
+        # spent, remaining titles are caught up via background_tasks instead
+        # of this response; sync_show_episodes itself skips seasons already
+        # fully captured, so a synced show still costs only cheap DB reads.
+        sync_deadline = time.monotonic() + _HISTORY_SYNC_BUDGET_S
         for _, title in tv_rows:
-            # Backfilled lazily here (through the same persistent TMDB cache
-            # season_tmdb() uses) so a show's history shows up on the first
-            # request rather than waiting for the periodic background job;
-            # sync_show_episodes skips seasons already fully captured, so a
-            # synced show costs only indexed DB reads.
-            sync_show_episodes(db, title)
+            if time.monotonic() >= sync_deadline:
+                background_tasks.add_task(_sync_episodes_background, title.id)
+                continue
+            sync_show_episodes(db, title, deadline=sync_deadline)
 
         if entry_by_title_id:
             # One query for every tracked show instead of a per-title

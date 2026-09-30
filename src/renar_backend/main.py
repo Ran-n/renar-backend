@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/09/07 15:13:00.878786
+Revised: 2026/09/30 09:38:44.861660
 """
 
 import asyncio
@@ -76,6 +76,16 @@ async def lifespan(app: FastAPI):
     # As a reload worker, die with the reloader instead of becoming a
     # zombie that squats the port with stale code (see _devserver).
     exit_when_orphaned()
+    # Every plain `def` route (most of the API) runs on this shared pool.
+    # anyio's default of 40 was measured saturating during an ordinary grid
+    # load: opening a poster-heavy view alone can fire 90+ concurrent
+    # /tmdb/image requests, each holding a thread for its outbound TMDB/CDN
+    # round trip — enough on its own to queue out other endpoints (e.g.
+    # /upcoming) behind it for the length of that burst. The image proxy now
+    # has its own isolated limiter (see routers/tmdb.py's _image_limiter), so
+    # this pool mainly serves everything else; still raised from the default
+    # for headroom under concurrent users.
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 80
     if settings.secret_key.startswith("dev-only-"):
         _log.warning(
             "SECRET_KEY is the built-in dev default — tokens are forgeable. "

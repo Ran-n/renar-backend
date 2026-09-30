@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.543016
-Revised: 2026/08/19 12:36:30.039794
+Revised: 2026/09/30 09:38:45.242814
 
 Write-through persistence for TMDB data (see TmdbCache in models.py).
 
@@ -16,6 +16,7 @@ upcoming feed and clients read directly.
 """
 
 import logging
+import time
 from datetime import date, datetime, timedelta
 
 from fastapi import HTTPException
@@ -281,7 +282,7 @@ def sync_episodes(db: Session, title: Title, season_number: int, data: dict) -> 
             )
 
 
-def sync_show_episodes(db: Session, title: Title) -> None:
+def sync_show_episodes(db: Session, title: Title, deadline: float | None = None) -> None:
     """Backfill/refresh the episodes table for one tracked show, one season
     at a time, through the same persistent TMDB cache season_tmdb() uses.
 
@@ -289,11 +290,22 @@ def sync_show_episodes(db: Session, title: Title) -> None:
     past) is skipped without contacting TMDB — only seasons that are new,
     unannounced, or still airing get fetched, so a show whose history is
     already synced costs nothing but a few indexed DB reads per request.
+
+    `deadline` (a `time.monotonic()` value) bounds how long a *caller on the
+    request path* lets this run: once past it, remaining seasons are left
+    for the next call/periodic run instead of starting another TMDB round
+    trip. Doesn't interrupt a fetch already in flight — a single stuck
+    season can still run over — but stops one slow/retrying show from also
+    dragging every season after it into the same request. The periodic
+    background job (notifier.py) calls this with no deadline, since it isn't
+    blocking anyone's HTTP response.
     """
     if title.tmdb_id is None or not title.total_seasons:
         return
     today = date.today()
     for season_number in range(1, title.total_seasons + 1):
+        if deadline is not None and time.monotonic() > deadline:
+            break
         latest = (
             db.query(Episode)
             .filter_by(title_id=title.id, season=season_number)

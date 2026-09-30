@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/13 09:21:11.000000
-Revised: 2026/08/03 11:14:16.853661
+Revised: 2026/09/30 09:38:45.364632
 
 /upcoming/history: past aired episodes and released films for tracked
 titles. Episode data is backfilled lazily (through the same TMDB season
@@ -11,12 +11,14 @@ cache season_tmdb() uses) on the first request that needs it.
 
 import base64
 import io
+import time
 from datetime import date, timedelta
 
 from PIL import Image as PILImage
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import Episode, LibraryEntry, User, utcnow
+from renar_backend.routers import upcoming as upcoming_router
 from renar_backend.tmdb import tmdb_store
 
 
@@ -262,3 +264,82 @@ def test_history_rejects_malformed_before_date(client, alice):
     _, headers = alice
     r = client.get("/upcoming/history", params={"before": "not-a-date"}, headers=headers)
     assert r.status_code == 422
+
+
+def test_sync_show_episodes_expired_deadline_skips_tmdb_call(client, alice, monkeypatch):
+    """A deadline that's already passed by the time sync_show_episodes runs
+    must not start a fresh TMDB round trip — this is what stops one
+    slow/retrying show from also delaying every show after it in the same
+    /upcoming/history request (see routers/upcoming.py's sync budget)."""
+    _, headers = alice
+    show = _add(client, headers, media_type="tv_show", title="Dark", tmdb_id=70523, status="watching")
+    _set_title_for_entry(client, headers, show["id"], total_seasons=2)
+
+    def forbidden(path, params=None, cache=True):
+        raise AssertionError("an already-expired deadline must not start a new TMDB fetch")
+
+    monkeypatch.setattr(tmdb_store, "tmdb_get", forbidden)
+
+    db = SessionLocal()
+    try:
+        entry = db.get(LibraryEntry, show["id"])
+        tmdb_store.sync_show_episodes(db, entry.title_ref, deadline=time.monotonic() - 1)
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        assert db.query(Episode).count() == 0
+    finally:
+        db.close()
+
+
+def test_sync_show_episodes_no_deadline_is_unaffected(client, alice, monkeypatch):
+    """The periodic background job (notifier.py) calls sync_show_episodes
+    with no deadline — that path must keep working exactly as before."""
+    _, headers = alice
+    show = _add(client, headers, media_type="tv_show", title="Dark", tmdb_id=70523, status="watching")
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    aired = (date.today() - timedelta(days=3)).isoformat()
+    monkeypatch.setattr(
+        tmdb_store, "tmdb_get", lambda path, params=None, cache=True: _season_payload((1, "Pilot", aired))
+    )
+
+    db = SessionLocal()
+    try:
+        entry = db.get(LibraryEntry, show["id"])
+        tmdb_store.sync_show_episodes(db, entry.title_ref)
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        assert [(r.season, r.episode_number) for r in db.query(Episode).all()] == [(1, 1)]
+    finally:
+        db.close()
+
+
+def test_history_tiny_budget_defers_to_background_then_shows_up_next_call(client, alice, monkeypatch):
+    """When the request-path sync budget is already spent, this response
+    reflects only whatever was already synced (none, here) — the title's
+    episodes are still fetched, just via background_tasks instead of
+    inline, so they're already committed by the time of the *next* call.
+    Trades "shows up on this exact request" for "this request can never be
+    the one that hangs" (see routers/upcoming.py's sync budget)."""
+    _, headers = alice
+    show = _add(client, headers, media_type="tv_show", title="Dark", tmdb_id=70523, status="watching")
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    aired = (date.today() - timedelta(days=3)).isoformat()
+    monkeypatch.setattr(
+        tmdb_store, "tmdb_get", lambda path, params=None, cache=True: _season_payload((1, "Pilot", aired))
+    )
+    monkeypatch.setattr(upcoming_router, "_HISTORY_SYNC_BUDGET_S", -1.0)  # already-expired for every title
+
+    first = client.get("/upcoming/history", headers=headers).json()
+    assert first == []  # budget already spent — nothing synced in time for this response
+
+    # TestClient runs background tasks to completion before returning the
+    # first response, so the episode is already committed by now
+    second = client.get("/upcoming/history", headers=headers).json()
+    assert len(second) == 1
+    assert second[0]["title"] == "Dark"

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/09/07 15:13:02.669596 )
+[//]: # (+ Revised: 	2026/09/30 09:40:29.700327 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -1451,6 +1451,62 @@ collision never surfaces as an error.
 `imdb_id`/`wikidata_id` isn't a data-integrity problem the way it would be
 for `tmdb_id`/`tvdb_id` — these fields don't participate in title
 resolution at all, so nothing depends on uniqueness.
+
+### `/upcoming/history`'s episode backfill runs against a request-local time budget, not unbounded
+
+`get_upcoming_history` (`routers/upcoming.py`) backfills a tracked show's
+episode history lazily, on the first request that needs it, through
+`sync_show_episodes` (`tmdb/tmdb_store.py`) — so history shows up
+immediately instead of waiting for the periodic `episode_history_sync`
+job (every 6h by default). That call used to run unconditionally for
+every tracked TV show in the response, with no bound: `sync_show_episodes`
+itself only skips a season once it's confirmed fully aired, so several
+newly-tracked or never-synced shows landing in the same request meant
+several live TMDB round trips (each already bounded to ~1.5–8s by
+`tmdb_get`'s own retry logic, see above) stacking sequentially in one
+HTTP response — measured taking over a minute in production.
+
+Fixed by giving the loop a 3-second wall-clock budget
+(`_HISTORY_SYNC_BUDGET_S`): `sync_show_episodes` gained an optional
+`deadline` parameter (a `time.monotonic()` value) that it checks before
+starting each season's fetch, so it can bail between seasons without
+interrupting one already in flight. Once the router's budget is spent,
+remaining titles are synced via `BackgroundTasks.add_task` instead of
+inline — the response returns with whatever was already synced, and the
+rest lands before the *next* call. The periodic job still calls
+`sync_show_episodes` with no deadline, since it isn't blocking anyone's
+response.
+
+**Why a budget instead of removing the inline sync entirely:** tried
+that first — it's simpler, but it broke the "history shows up on the
+very first request" behavior the lazy sync exists for (a newly-tracked
+show showed nothing until a second load, since the background task only
+runs *after* the response that triggered it is already built). The
+budget keeps the common case (already-synced shows) exactly as fast as
+before at effectively zero cost, and caps the rare slow-batch case to
+roughly one bad title's worst-case retry chain instead of unbounded
+across the whole library.
+
+### `/tmdb/image/*` runs on its own thread-pool limiter, isolated from the rest of the API
+
+Every plain `def`/`async def` route in this app shares anyio's
+`to_thread` default limiter for its blocking work — 40 threads by
+default, raised to 80 at startup (`main.py`'s `lifespan`) for headroom.
+The image proxy (`routers/tmdb.py`'s `image_proxy`) used to be a sync
+`def` on that same shared pool; a single poster-heavy grid view can fire
+90+ concurrent `/tmdb/image/*` requests in under a second (observed
+directly in production access logs), each holding a thread for its
+outbound TMDB/Bunny-CDN round trip. A burst that size is normally
+harmless (each fetch is tens of milliseconds), but any CDN-side latency
+blip during a burst ties up the *entire* shared pool at once — starving
+out unrelated endpoints (e.g. `/upcoming`) queued behind it for as long
+as the burst lasts, with no priority given to non-image requests.
+
+`image_proxy` is now `async def`, with every blocking step (the DB cache
+read, the outbound fetch, the DB cache write) explicitly run through
+`anyio.to_thread.run_sync(..., limiter=_image_limiter)`, a dedicated
+`anyio.CapacityLimiter(40)` local to `routers/tmdb.py`. An image-request
+storm can now only ever delay other images, never the rest of the API.
 
 ## Premium accounts
 
