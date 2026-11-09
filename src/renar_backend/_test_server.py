@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 14:33:20.294880
-Revised: 2026/09/07 12:28:01.330807
+Revised: 2026/11/09 11:49:59.465340
 
 Opt-in server for integration tests that need the real app reachable over
 real HTTP, not the in-process ASGI transport TestClient uses: this repo's
@@ -153,7 +153,7 @@ def main() -> None:
     @app.post("/_itest/set_premium/{username}", include_in_schema=False)
     def _set_premium(username: str, days: int = 30) -> dict:
         # No payment processor is wired up yet (Paddle integration is still
-        # backlog — see docs/backlog.md's Monetization section), so this is
+        # backlog — see TODO.md's Monetization section), so this is
         # the only way to get a premium account for a test run. Mirrors
         # renar-backend's own tests/test_stats.py::_set_premium.
         db = SessionLocal()

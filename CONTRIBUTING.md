@@ -1,3 +1,9 @@
+[//]: # ( ---------------------------------------------------------------------- )
+[//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
+[//]: # (+ Created: 	2026/11/09 14:05:43.286533 )
+[//]: # (+ Revised: 	2026/11/09 14:05:43.365405 )
+[//]: # ( ---------------------------------------------------------------------- )
+
 # Contributing
 
 Thank you for your interest in contributing.
@@ -7,6 +13,7 @@ Thank you for your interest in contributing.
 - [Code of Conduct](#code-of-conduct)
 - [Reporting Bugs](#reporting-bugs)
 - [Suggesting Features](#suggesting-features)
+- [Backlog](#backlog)
 - [Submitting Changes](#submitting-changes)
 - [Commit Style](#commit-style)
 - [License](#license)
@@ -37,6 +44,14 @@ Open an issue with:
 - The problem you're trying to solve
 - Your proposed solution
 - Any alternatives you considered
+
+---
+
+## Backlog
+
+Planned work lives in [`TODO.md`](TODO.md). Each item is self-contained;
+the first item in the file is the next to do. See the top of that file for
+how to add and implement items.
 
 ---
 

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/09/30 09:38:44.861660
+Revised: 2026/11/09 11:49:59.552589
 """
 
 import asyncio
@@ -167,7 +167,7 @@ def health():
 # `alembic upgrade head`) invalidates plans already cached on this app's own
 # pooled connections from before the migration ran — the next query on one of
 # those connections raises "cached plan must not change result type" (see
-# docs/backlog.md). Rather than requiring a manual app restart after every
+# TODO.md). Rather than requiring a manual app restart after every
 # migration, disposing the pool here self-heals it: only this one in-flight
 # request (which was going to fail either way) gets a 503, and every request
 # after it gets a fresh connection with no stale plan.

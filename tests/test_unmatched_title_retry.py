@@ -2,12 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 00:00:00.000000
-Revised: 2026/09/02 10:58:32.376203
+Revised: 2026/11/09 11:50:01.214419
 
 retry_unmatched_titles is the periodic counterpart to tmdb_get's retry/
 backoff and the raw-name-keyed import reconciliation: it's what heals a
 title that's still unmatched after both of those, without requiring the
-user to ever re-import or manually relink (see docs/backlog.md).
+user to ever re-import or manually relink (see TODO.md).
 """
 
 import time as _time
@@ -185,7 +185,7 @@ def test_retry_merges_into_a_concurrently_claimed_tmdb_id(client, alice, bob):
     *different* Title (e.g. a live import just won that race), the two rows
     are duplicates of the same show — merge_titles folds this one into the
     winner instead of leaving it permanently split off (see catalog/titles.py
-    and docs/backlog.md's "unmergeable Title row" entry)."""
+    and TODO.md's "unmergeable Title row" entry)."""
     _, alice_headers = alice
     _, bob_headers = bob
     client.post("/media", json={"media_type": "film", "title": "Other Title", "tmdb_id": 777}, headers=bob_headers)

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/09/02 10:57:11.408849
+Revised: 2026/11/09 11:50:00.403413
 
 Import a TV Time GDPR export zip: shows, episode history, movies, favorites.
 One of several importers registered in routers/imports.py's dispatch table
@@ -746,7 +746,7 @@ def _process_show(
     # final_title becomes TMDB's own (often translated/differently-
     # punctuated) title, and a title_key built from it would miss that
     # existing row entirely, creating a duplicate instead of reconciling —
-    # this is the exact scenario in docs/backlog.md's "if the re-import's
+    # this is the exact scenario in TODO.md's "if the re-import's
     # title text differs from what's stored, a duplicate entry is still
     # created". `name` is stable across re-imports of the same TV Time
     # account, so keying on it finds the earlier unmatched row reliably;

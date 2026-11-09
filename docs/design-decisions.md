@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/09/30 09:40:29.700327 )
+[//]: # (+ Revised: 	2026/11/09 11:49:59.182159 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -176,7 +176,7 @@ that complexity — the same trade the existing periodic tasks already make.
 unmatched entry and an already-correctly-matched entry for the same show,
 both already in a user's library) — resolving the same `tmdb_id` a second
 time hits `uq_title_tmdb` and is skipped, same as `_relink_tmdb`'s 409 path.
-See `docs/backlog.md`'s note on this. It also skips a movie that now
+See `TODO.md`'s note on this. It also skips a movie that now
 resolves as a TV show (or vice versa) rather than rewriting `media_type` in
 place — a real media-type correction, left for manual relink.
 
@@ -243,7 +243,7 @@ miss a fresh `_search_movie` call creates a `Title`-only row as above.
 ### Manual relink for an unmatched title: `PATCH /media/{id}` with `tmdb_id`
 
 An entry can end up with `tmdb_id = None` (no poster, no episode tracking)
-when an import's TMDB lookup fails at the time — see `docs/backlog.md`'s
+when an import's TMDB lookup fails at the time — see `TODO.md`'s
 "Transient TMDB failures permanently degrade an entry". `PATCH /media/{id}`
 accepts an optional `tmdb_id` to fix this by hand: `_relink_tmdb` in
 `routers/media.py` upgrades the entry's `Title` row in place via the
@@ -962,14 +962,26 @@ writing a TXT record instead of serving a file on port 80, which
 `certbot-dns-cloudflare` automates using the same Cloudflare DNS-edit token
 already used for the `api.renar.app` A record itself.
 
-**Why not the "flip to Cloudflare-proxied + Flexible SSL" alternative**
-considered earlier: that terminates TLS at Cloudflare's edge but leaves
-Cloudflare↔origin traffic (including login POSTs) unencrypted, and makes
-every request appear to originate from Cloudflare's IP — breaking the
-existing per-IP anti-abuse system (`security.py`) unless `TRUST_PROXY_HEADERS`
-and the `CF-Connecting-IP` header are wired in at the same time. A real cert
-on the origin avoids both: genuine end-to-end encryption, and `client_ip()`
-keeps reading `request.client.host` exactly as it does today.
+**Why not "flip to Cloudflare-proxied + Flexible SSL"**: that mode
+terminates TLS at Cloudflare's edge and sends plaintext on to the origin —
+real HTTPS end-to-end (above) avoids that regardless of whether Cloudflare's
+proxy sits in front.
+
+**Update, 2026-11-09 — now proxied, with Full (strict) instead of Flexible:**
+prod moved to a Hetzner VPS (see `renar-hetzner-vps-prod` memory) with this
+same real origin cert, which made the Flexible-SSL objection moot: Cloudflare
+can validate that origin cert directly, so "Full (strict)" mode gives
+genuine end-to-end encryption on *both* legs (client↔Cloudflare and
+Cloudflare↔origin) while still proxying. The IP-spoofing objection is
+handled rather than avoided: `api.renar.app`'s DNS record is now proxied
+(orange cloud), zone SSL mode is Full (strict), and `site_settings.trust_proxy_headers`
+is `true` in prod — `client_ip()` (`users/security.py`) reads the rightmost
+`X-Forwarded-For` entry, which in a direct client→Cloudflare→origin chain
+(nothing else in between) is exactly the real client IP Cloudflare set.
+Traffic to the legacy `:8882` port (baked into already-shipped clients, see
+`renar-dev-prod-domain-split`) still reaches the origin directly — Cloudflare
+only proxies 80/443, so that path gets no WAF/DDoS protection and does
+expose the origin IP; only the `:443` path benefits until old clients age out.
 
 **Windows-specific friction:** `certbot` refuses to run at all without an
 elevated shell on Windows (`raise_for_non_administrative_windows_rights()`,
@@ -1015,7 +1027,7 @@ can't be automated; it's dashboard-only.
 
 **Android's cleartext-traffic manifest patch stays** even now that the
 default deployment has real HTTPS — see the Turnstile entry in
-`docs/backlog.md` and renar-frontend's `docs/design-decisions.md`'s
+`TODO.md` and renar-frontend's `docs/design-decisions.md`'s
 "Android APK manifest..." entry: the register screen's self-hosted-server
 field is a documented first-class `http://` use case independent of this
 deployment's own scheme.
@@ -1115,7 +1127,7 @@ title details) and the TV Time importer's 8-worker matching burst
 traffic pattern that trips a rate limit. Before this, any transient failure
 during import permanently degraded the row — no `tmdb_id`, poster, or
 episode counts, ever, unless a later re-import happened to retry with
-matching title text (see `docs/backlog.md`'s "Transient TMDB failures
+matching title text (see `TODO.md`'s "Transient TMDB failures
 permanently degrade an entry"). Retrying in place fixes the common case
 (a rate-limit blip clears within a second or two) without adding a retry
 queue or background job. It doesn't fully solve the backlog item — a
@@ -1434,7 +1446,7 @@ from TMDB's `external_ids` (fetched via `append_to_response=external_ids`
 on the existing details call, `tmdb/tmdb_store.py`'s `sync_title_details`)
 so other integrations don't need their own title-matching step: `imdb_id`
 for an OMDb ratings lookup (IMDb rating + vote count, Rotten Tomatoes and
-Metacritic scores — see `docs/backlog.md`), `wikidata_id` for a per-language
+Metacritic scores — see `TODO.md`), `wikidata_id` for a per-language
 Wikipedia link via Wikidata's sitelinks.
 
 The same `external_ids` payload also carries `tvdb_id` for TV shows.
@@ -1704,7 +1716,7 @@ Redis pub/sub if the backend ever runs with more than one worker.
 fields explicitly wired to call `publish()` — not watch status, library
 changes, comments, or notifications. Those still rely on each client
 re-fetching on its own (poll on view load), a separate and larger problem
-tracked in `docs/backlog.md`.
+tracked in `TODO.md`.
 
 ### CORS restricted to browser origins; the app itself is unaffected
 
@@ -2026,7 +2038,7 @@ zero new infrastructure — a pure stdlib `logging` change.
 when a new error appears; the error log still has to be opened and checked.
 Revisit Sentry/GlitchTip (self-hosted, Sentry-protocol-compatible) once
 there's a deployed production environment and a decision to actually use a
-hosted or self-hosted error-tracking account — see `docs/backlog.md`'s
+hosted or self-hosted error-tracking account — see `TODO.md`'s
 HTTPS-by-default entry for the matching "needs prod access" pattern.
 
 ---
@@ -2189,7 +2201,7 @@ separate real NUL-byte bugs:
 
 The follow-up pass to 2026-09-03, closing everything that entry left open
 except the mutmut/WSL piece (still blocked on a machine reboot — see
-`docs/backlog.md`).
+`TODO.md`).
 
 **`response_model` on the last 14 `media.py` endpoints.** Coverage went
 from 63/151 to **77/151**. Every schema was written by reading the actual
@@ -2453,7 +2465,7 @@ looking at.
 
 ### Multi-session sync reuses `events.publish` — no new push channel
 
-`docs/backlog.md`'s "general data sync" gap (library/comment/notification
+`TODO.md`'s "general data sync" gap (library/comment/notification
 changes not reaching a user's other open sessions) is closed by adding new
 `event_type` strings (`library_changed`, `comment_changed`,
 `notification_changed`) to the existing `events.publish(user_id,
@@ -2513,7 +2525,7 @@ never swallow a real database error.
 
 ### Email-confirmation toggle-flip race: accepted, not engineered around
 
-`docs/backlog.md`'s email-confirmation design pass flagged a possible race
+`TODO.md`'s email-confirmation design pass flagged a possible race
 between `routers/auth.py`'s `register()` (reads
 `SiteSettings.email_confirmation_enabled` once) and
 `routers/admin/settings.py`'s bulk-confirm-on-disable (a separate, later

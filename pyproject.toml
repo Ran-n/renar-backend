@@ -65,7 +65,7 @@ source = ["src/renar_backend"]
 branch = true
 
 [tool.coverage.report]
-# Baseline measurement per docs/backlog.md's Testing entry — no threshold
+# Baseline measurement per TODO.md's Testing entry — no threshold
 # enforced yet (`pytest --cov` is meant to be read, not gated on, until the
 # missing per-router property/fuzz/unit coverage it names is actually
 # written). Run: `pytest --cov --cov-report=term-missing`.

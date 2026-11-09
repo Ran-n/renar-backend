@@ -4,7 +4,7 @@ Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/27 11:17:50.133869
 
 HTTP layer for TheTVDB v4 (tvdb_http.py) — previously the lowest-coverage
-module in the backend (35%, per docs/backlog.md's Testing entry). Covers
+module in the backend (35%, per TODO.md's Testing entry). Covers
 login caching/forced-refresh, the 401-triggers-relogin-then-retry path, and
 every "TVDB has nothing to offer" fallback (unconfigured, login failure,
 non-200 response, network error) that every caller here treats as a plain

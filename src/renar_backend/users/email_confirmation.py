@@ -2,14 +2,14 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 12:30:00.000000
-Revised: 2026/07/21 09:51:07.781622
+Revised: 2026/11/09 11:50:00.323184
 
 Registration/email-change confirmation codes — see routers/auth.py's
 /auth/confirm-email and /auth/resend-confirmation, and models.py's
 EmailConfirmationCode. Built to close the ranking-inflation gap a captcha
 alone doesn't: a human can still hand-register throwaway accounts past
 Turnstile, but not accounts nobody can receive a real email at (see
-docs/backlog.md's "Real email confirmation on registration" entry and
+TODO.md's "Real email confirmation on registration" entry and
 routers/stats.py._compute_ranking, which only counts email_confirmed users).
 
 Code storage mirrors users/auth.py's password hashing (bcrypt, not

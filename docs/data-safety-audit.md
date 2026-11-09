@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/08/27 09:52:03.159327 )
-[//]: # (+ Revised: 	2026/08/27 09:52:03.159327 )
+[//]: # (+ Revised: 	2026/11/09 11:49:59.068315 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Data Safety Audit
@@ -9,7 +9,7 @@
 Enumerates every user-linked data field Renar's backend stores, why, and how
 long it's kept. Written to be reusable, field-for-field, for both Google
 Play's Data Safety form and Apple's Privacy Nutrition Label at store
-submission time — see `docs/backlog.md`'s Publishing section.
+submission time — see `TODO.md`'s Publishing section.
 
 Scope: `src/renar_backend/models.py`'s user-linked tables only. TMDB/TheTVDB
 catalog data (titles, episodes, genres) isn't user data and is out of scope.
@@ -50,7 +50,7 @@ catalog data (titles, episodes, genres) isn't user data and is out of scope.
 
 | Table | Purpose | Retention |
 |---|---|---|
-| `Notification` | New-episode/new-film alerts, in-app only (no push yet — see `docs/backlog.md`'s push-notifications entry) | Until read/dismissed by the user or account deletion |
+| `Notification` | New-episode/new-film alerts, in-app only (no push yet — see `TODO.md`'s push-notifications entry) | Until read/dismissed by the user or account deletion |
 
 ## Security / abuse prevention
 
@@ -65,11 +65,11 @@ catalog data (titles, episodes, genres) isn't user data and is out of scope.
 
 - Precise device location (no GPS/location permission requested).
 - Payment/card data (premium is currently admin-granted only — see
-  `docs/backlog.md`'s Monetization section; no payment processor is
+  `TODO.md`'s Monetization section; no payment processor is
   integrated yet).
 - Contacts, SMS, call logs, or any other device data beyond what's listed
   above.
-- Advertising identifiers (no ad SDK integrated — see `docs/backlog.md`'s
+- Advertising identifiers (no ad SDK integrated — see `TODO.md`'s
   parked Ads item).
 
 ## Account deletion

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.713668
-Revised: 2026/07/21 09:51:04.050727
+Revised: 2026/11/09 11:49:59.908372
 
 Watch-time and library statistics for the current user.
 """
@@ -241,7 +241,7 @@ def _compute_ranking(db: Session, user: User, ranking_metric: RankingMetric) -> 
     Only email_confirmed users count, on both sides of this fraction — a
     hand-registered throwaway account otherwise pads the "ahead of me" count
     and app_counters.total_users equally (see db_triggers.py's confirmed-only
-    counter and docs/backlog.md's ranking-exploit note). The viewing `user`
+    counter and TODO.md's ranking-exploit note). The viewing `user`
     doesn't have to be confirmed themselves to see their own (likely poor)
     standing — only who counts as competition is filtered."""
     column = getattr(User, ranking_metric.attr)

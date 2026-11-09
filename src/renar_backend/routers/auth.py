@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/09/02 10:57:10.517026
+Revised: 2026/11/09 11:49:59.719632
 """
 
 import html
@@ -576,7 +576,7 @@ def update_profile(
         if new_email != user.email:
             if db.query(User).filter(User.email == new_email).first():
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already taken")
-            # Two-step change (see docs/backlog.md): `email` itself doesn't
+            # Two-step change (see TODO.md): `email` itself doesn't
             # move yet — the OLD address must first authorize the change,
             # then the NEW address must prove it's actually reachable.
             user.pending_email = new_email
@@ -705,7 +705,7 @@ def cancel_account_deletion(
 
 # Google Play policy requires an account-deletion request to be reachable
 # *without* installing the app (a plain hosted web page), in addition to the
-# in-app DELETE /auth/me above — see docs/backlog.md's "Account-deletion page
+# in-app DELETE /auth/me above — see TODO.md's "Account-deletion page
 # needs a web-reachable path" entry. This reuses the same grace-period
 # deletion (accounts.request_deletion) and the same credential-check/
 # rate-limit helper /confirm-email already relies on, rather than a second

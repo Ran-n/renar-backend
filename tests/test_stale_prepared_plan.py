@@ -5,7 +5,7 @@ Created: 2026/08/27 09:52:03.254888
 
 Covers main.py's `_handle_stale_prepared_plan` — the self-healing fix for
 psycopg3's "cached plan must not change result type" error (see
-docs/backlog.md's psycopg3 entry): a migration's DDL invalidates prepared
+TODO.md's psycopg3 entry): a migration's DDL invalidates prepared
 plans already cached on this app's own pooled connections, and this handler
 disposes the pool instead of requiring a manual app restart.
 """

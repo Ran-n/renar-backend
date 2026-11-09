@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:42:31.539562
-Revised: 2026/09/07 15:13:02.152391
+Revised: 2026/11/09 11:50:00.567839
 
 Fuzz tests (hypothesis): throw a wide range of malformed/random input at a
 few request-parsing endpoints and assert the server never 500s — a 4xx
@@ -90,7 +90,7 @@ def test_confirm_email_never_500s_on_malformed_code(client, alice, code):
     assert r.status_code < 500, f"500 on code={code!r}:\n{r.text}"
 
 
-# ---------- comments.py (previously no fuzz coverage — see docs/backlog.md) ----------
+# ---------- comments.py (previously no fuzz coverage — see TODO.md) ----------
 
 
 @_fuzz_settings
@@ -117,7 +117,7 @@ def test_delete_comment_never_500s_on_arbitrary_comment_id(client, alice, commen
     assert r.status_code < 500, f"500 on comment_id={comment_id!r}:\n{r.text}"
 
 
-# ---------- notifications.py (previously no fuzz coverage — see docs/backlog.md) ----------
+# ---------- notifications.py (previously no fuzz coverage — see TODO.md) ----------
 
 
 @_fuzz_settings
@@ -160,7 +160,7 @@ def _whitelist_reviewer(user_id: int) -> None:
         db.close()
 
 
-# ---------- premium.py (previously no fuzz coverage — see docs/backlog.md) ----------
+# ---------- premium.py (previously no fuzz coverage — see TODO.md) ----------
 
 # Fuzz the PATCH /premium/style validator branches:
 #   - ring/name/home_season/home_series colors: arbitrary strings (most are
@@ -201,7 +201,7 @@ def test_premium_style_never_500s_on_arbitrary_json(client, alice, payload):
     assert r.status_code < 500, f"500 on payload={payload!r}:\n{r.text}"
 
 
-# ---------- reviews.py (previously no fuzz coverage — see docs/backlog.md) ----------
+# ---------- reviews.py (previously no fuzz coverage — see TODO.md) ----------
 
 # POST /media/reviews body is ReviewCreate: text (str, max=10000) and
 # rating (int, ge=1, le=100).  The fuzz strategy intentionally covers:
@@ -254,7 +254,7 @@ def test_create_review_never_500s_on_arbitrary_inputs(client, alice, payload):
     assert r.status_code < 500, f"500 on payload={payload!r}:\n{r.text}"
 
 
-# ---------- lists.py (previously no fuzz coverage — see docs/backlog.md) ----------
+# ---------- lists.py (previously no fuzz coverage — see TODO.md) ----------
 
 # ListCreate / ListUpdate share the same schema: name (str, min_length=1,
 # max_length=100).  Interesting cases: empty string (fails min_length=1),
@@ -1316,7 +1316,7 @@ def test_valid_png_upload_still_succeeds(client, alice):
         client.delete(f"/media/{item_id}", headers=headers)
 
 
-# ---------- routers/admin/* (previously not audited for fuzz — see docs/backlog.md) ----------
+# ---------- routers/admin/* (previously not audited for fuzz — see TODO.md) ----------
 
 # The 8 admin sub-routers render server-side HTML behind HTTP Basic, so they
 # were skipped by the 2026-09-03 pass. Their input surface is real, though, and

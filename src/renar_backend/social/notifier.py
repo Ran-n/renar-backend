@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/08/27 09:52:21.987998
+Revised: 2026/11/09 11:50:00.148663
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -43,7 +43,7 @@ def _delink_if_dead(db: Session, title: Title, tmdb_id: int, exc: Exception) -> 
     """A 404 means TMDB permanently removed/merged this id — clear it so
     `retry_unmatched_titles` (which only looks at `tmdb_id IS NULL`) picks
     the title back up and re-resolves it, instead of the sync loops logging
-    the same dead id forever (see docs/backlog.md's "A Title whose tmdb_id
+    the same dead id forever (see TODO.md's "A Title whose tmdb_id
     goes permanently dead"). Any other failure (network blip, rate limit) is
     left alone — `tmdb_get` already retries those internally."""
     if isinstance(exc, HTTPException) and exc.status_code == 404:
