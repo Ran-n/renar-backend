@@ -2,10 +2,10 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 00:00:00.000000
-Revised: 2026/08/18 00:00:00.000000
+Revised: 2026/11/09 11:50:00.904445
 
 Retry/backoff behavior of tmdb_get against transient TMDB failures (429s,
-5xx, network errors) — see docs/backlog.md's "Transient TMDB failures
+5xx, network errors) — see TODO.md's "Transient TMDB failures
 permanently degrade an entry" and tmdb_http.py's tmdb_get docstring.
 """
 

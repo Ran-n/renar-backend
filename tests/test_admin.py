@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/09/02 10:57:34.534480
+Revised: 2026/11/09 11:50:00.486676
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -93,7 +93,7 @@ def test_admin_user_list_links_to_detail(client, admin_enabled, alice):
 
 
 def test_admin_user_list_shows_bypassed_confirmation_count(client, admin_enabled, alice):
-    """Answers docs/backlog.md's open question: aggregate visibility into how
+    """Answers TODO.md's open question: aggregate visibility into how
     many accounts never proved email ownership (bypassed) vs. really
     confirmed, without reading each row's tooltip one at a time."""
     user, _ = alice

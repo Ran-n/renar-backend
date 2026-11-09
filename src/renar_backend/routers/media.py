@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/09/17 10:04:39.940799
+Revised: 2026/11/09 11:49:59.802297
 """
 
 import logging
@@ -519,7 +519,7 @@ def _relink_tmdb(item: LibraryEntry, tmdb_id: int, db: Session) -> None:
     """Point an unmatched entry (Title.tmdb_id is None) at a TMDB match the
     user picked via the "Link to catalog" search on the title page — the
     manual fix for entries that came out of an import with no match (see
-    docs/backlog.md's "Transient TMDB failures permanently degrade an
+    TODO.md's "Transient TMDB failures permanently degrade an
     entry"). Only usable while the entry is still unmatched; already-linked
     entries can't be re-pointed through here.
     """

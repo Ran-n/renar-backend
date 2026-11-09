@@ -2,12 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/19 19:11:30.977386
-Revised: 2026/09/02 10:58:18.793037
+Revised: 2026/11/09 11:50:00.811079
 
 merge_titles folds a duplicate, still-unmatched Title into the Title that
 already holds the tmdb_id/tvdb_id it was about to claim (see
 catalog/titles.py's backfill_title_tmdb_id/backfill_title_tvdb_id and
-docs/backlog.md's "unmergeable Title row" entry). test_unmatched_title_retry.py
+TODO.md's "unmergeable Title row" entry). test_unmatched_title_retry.py
 covers the end-to-end retry path that triggers a merge; this file exercises
 merge_titles directly against every table it touches, including the
 per-table collision rules a same-tmdb_id race can produce.

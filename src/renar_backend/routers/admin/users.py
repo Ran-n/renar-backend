@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/09/07 15:13:01.660914
+Revised: 2026/11/09 11:49:59.637335
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -748,7 +748,7 @@ def list_users(
         "active_7d": db.query(func.count(User.id)).filter(User.last_active_at >= now - timedelta(days=7)).scalar() or 0,
         "home_hero_on": db.query(func.count(User.id)).filter(User.home_hero_enabled.is_(True)).scalar() or 0,
         "home_on_launch_on": db.query(func.count(User.id)).filter(User.home_on_launch.is_(True)).scalar() or 0,
-        # Answers docs/backlog.md's open question: no aggregate visibility
+        # Answers TODO.md's open question: no aggregate visibility
         # existed into how many accounts never proved email ownership
         # (bypassed via the email_confirmation_enabled toggle being off at
         # registration time) vs. genuinely confirmed via a real OTP round trip.

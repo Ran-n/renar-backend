@@ -4,7 +4,7 @@ Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/27 11:17:50.226741
 
 Covers social/notifier.py's eight periodic-task loops (`_episode_check_loop`,
-`_episode_history_sync_loop`, ...) — previously untested, per docs/backlog.md's
+`_episode_history_sync_loop`, ...) — previously untested, per TODO.md's
 Testing entry ("mostly the periodic-task loop bodies rather than the testable
 `*_once()` functions the suite already exercises"). All eight share one shape
 (sleep, check task_runs.is_enabled, run the `*_once` function via

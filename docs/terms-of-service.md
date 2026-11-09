@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/08/20 00:00:00.000000 )
-[//]: # (+ Revised: 	2026/08/20 19:03:01.669656 )
+[//]: # (+ Revised: 	2026/11/09 11:49:59.367887 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 [//]: # ( ---------------------------------------------------------------------- )
@@ -15,7 +15,7 @@
 **Status: DRAFT.** Company is set (Breren); domain/contact are scoped under
 the app name (renar.app, legal@renar.app).
 Still open: `[EFFECTIVE DATE]`, `[HOSTING PROVIDER]`, `[JURISDICTION]`,
-`[GOVERNING LAW]` — fill in once hosting is chosen (see `docs/backlog.md`,
+`[GOVERNING LAW]` — fill in once hosting is chosen (see `TODO.md`,
 Infrastructure / Publishing sections). Have a lawyer review before
 publishing or linking this from a store listing.
 

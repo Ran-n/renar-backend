@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 12:20:00.000000
-Revised: 2026/07/21 09:51:07.259541
+Revised: 2026/11/09 11:49:58.976079
 """
 
 """add email confirmation
@@ -14,7 +14,7 @@ exploit gap where unconfirmed, hand-registered throwaway accounts could pad
 /stats/ranking's percentile denominator and "ahead of me" comparison.
 
 No backfill: every existing user starts email_confirmed=False and has to
-re-confirm, same as a brand-new signup (deliberate — see docs/backlog.md's
+re-confirm, same as a brand-new signup (deliberate — see TODO.md's
 "Real email confirmation on registration" entry). That also means
 app_counters.total_users (previously "all users", now "confirmed users
 only" — see db_triggers.py) drops to 0 immediately after this migration;

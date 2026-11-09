@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.357680
-Revised: 2026/09/07 13:50:19.914806
+Revised: 2026/11/09 11:50:00.237159
 
 HTTP layer for TMDB: pooled client, auth, and the short-lived in-memory
 cache. Lives below the router so the notifier and tmdb_store can call TMDB
@@ -61,7 +61,7 @@ image_http_client = httpx.Client(
 
 # A transient TMDB failure (rate limit, blip) used to raise straight away —
 # during an import's 8-worker burst that permanently degraded the row (see
-# docs/backlog.md's "Transient TMDB failures permanently degrade an entry"):
+# TODO.md's "Transient TMDB failures permanently degrade an entry"):
 # no tmdb_id, poster, or episode counts, ever, unless a later re-import
 # happened to retry with matching title text. Retrying here instead means
 # an import worker only gives up after genuinely exhausting attempts.
