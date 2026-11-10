@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/11/10 11:04:48.077398 )
+[//]: # (+ Revised: 	2026/11/10 11:05:30.819877 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.20.0] - 2026-11-10
 
 ### Added
 
