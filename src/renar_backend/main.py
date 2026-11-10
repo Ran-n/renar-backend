@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/11/09 11:49:59.552589
+Revised: 2026/11/09 23:36:39.283957
 """
 
 import asyncio
@@ -16,14 +16,16 @@ from pathlib import Path
 import anyio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.exc import DataError, DBAPIError
 
+from . import update_check
 from ._devserver import exit_when_orphaned
 from .config import settings
 from .database import engine
 from .routers import (
     admin,
+    app_releases,
     auth,
     comments,
     events,
@@ -41,7 +43,9 @@ from .routers import (
     tmdb,
     upcoming,
 )
+from .routers.admin import login as admin_login
 from .social import notifier
+from .users.auth import AdminLoginRequired
 from .users.security import AbuseGuardMiddleware, OriginCheckMiddleware, SecurityHeadersMiddleware
 from .users.usage import UsageTrackingMiddleware
 
@@ -76,6 +80,8 @@ async def lifespan(app: FastAPI):
     # As a reload worker, die with the reloader instead of becoming a
     # zombie that squats the port with stale code (see _devserver).
     exit_when_orphaned()
+    # Lets a running self-update tell this fresh worker from the old one.
+    update_check.write_worker_marker()
     # Every plain `def` route (most of the API) runs on this shared pool.
     # anyio's default of 40 was measured saturating during an ordinary grid
     # load: opening a poster-heavy view alone can fire 90+ concurrent
@@ -146,6 +152,7 @@ app.include_router(upcoming.router)
 app.include_router(imports.router)
 app.include_router(export.router)
 app.include_router(premium.router)
+app.include_router(app_releases.router)
 app.include_router(admin.router)
 app.include_router(svc.router)
 
@@ -172,6 +179,16 @@ def health():
 # request (which was going to fail either way) gets a 503, and every request
 # after it gets a fresh connection with no stale plan.
 _STALE_PLAN_MARKER = "cached plan must not change result type"
+
+
+@app.exception_handler(AdminLoginRequired)
+async def _handle_admin_login_required(request: Request, exc: AdminLoginRequired) -> Response:
+    """No admin session: a page view goes to the login page (then back), but
+    a form POST gets a 401 page instead; redirecting would silently drop the
+    submitted form and make the action look done."""
+    if exc.method in ("GET", "HEAD"):
+        return RedirectResponse(admin_login.login_url(exc.path_with_query), status_code=303)
+    return HTMLResponse(admin_login.session_expired_page(), status_code=401)
 
 
 @app.exception_handler(DBAPIError)

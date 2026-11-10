@@ -2,13 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/09 09:40:00.000000
-Revised: 2026/08/24 12:39:05.704520
+Revised: 2026/11/09 23:36:43.309348
 
 Per-endpoint usage tracking middleware and the admin usage dashboard, its
 per-endpoint drill-down, and the per-user library drill-down.
 """
 
-from conftest import ADMIN_BASIC as BASIC
 from conftest import hard_delete, register
 
 from renar_backend.database import SessionLocal
@@ -76,8 +75,8 @@ def test_root_and_health_not_tracked(client):
 
 
 def test_admin_pages_not_tracked(client, admin_enabled):
-    client.get("/admin", auth=BASIC)
-    client.get("/admin/usage", auth=BASIC)
+    client.get("/admin", headers=admin_enabled)
+    client.get("/admin/usage", headers=admin_enabled)
     assert not any(s.path.startswith("/admin") for s in _stats())
 
 
@@ -85,13 +84,13 @@ def test_admin_pages_not_tracked(client, admin_enabled):
 
 
 def test_usage_page_requires_auth(client, admin_enabled):
-    assert client.get("/admin/usage").status_code == 401
+    assert client.get("/admin/usage", follow_redirects=False).status_code == 303  # to the login page
 
 
 def test_usage_overview_shows_endpoint(client, admin_enabled, alice):
     _, headers = alice
     client.get("/auth/me", headers=headers)
-    r = client.get("/admin/usage", auth=BASIC)
+    r = client.get("/admin/usage", headers=admin_enabled)
     assert r.status_code == 200
     assert "Requests by endpoint" in r.text
     # method + path render in separate elements; the path keeps its true case
@@ -103,7 +102,7 @@ def test_usage_overview_shows_endpoint(client, admin_enabled, alice):
 
 
 def test_usage_appears_in_dashboard(client, admin_enabled):
-    r = client.get("/admin", auth=BASIC)
+    r = client.get("/admin", headers=admin_enabled)
     assert 'href="/admin/usage"' in r.text
 
 
@@ -111,13 +110,15 @@ def test_usage_appears_in_dashboard(client, admin_enabled):
 
 
 def test_endpoint_detail_requires_auth(client, admin_enabled):
-    assert client.get("/admin/usage/endpoint?method=GET&path=/media").status_code == 401
+    assert (
+        client.get("/admin/usage/endpoint?method=GET&path=/media", follow_redirects=False).status_code == 303
+    )  # to the login page
 
 
 def test_endpoint_detail_lists_callers(client, admin_enabled, alice):
     user, headers = alice
     client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers)
-    r = client.get("/admin/usage/endpoint?method=POST&path=/media", auth=BASIC)
+    r = client.get("/admin/usage/endpoint?method=POST&path=/media", headers=admin_enabled)
     assert r.status_code == 200
     assert user["username"] in r.text
     assert f'href="/admin/users/{user["id"]}"' in r.text  # links back to the user
@@ -130,7 +131,7 @@ def test_user_library_filters_by_type(client, admin_enabled, alice):
     user, headers = alice
     client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers)
     client.post("/media", json={"media_type": "tv_show", "title": "Dune: Prophecy"}, headers=headers)
-    r = client.get(f"/admin/users/{user['id']}/library?media_type=film", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}/library?media_type=film", headers=admin_enabled)
     assert r.status_code == 200
     assert "Heat" in r.text
     assert "Dune: Prophecy" not in r.text
@@ -140,20 +141,20 @@ def test_user_library_filters_by_status(client, admin_enabled, alice):
     user, headers = alice
     client.post("/media", json={"media_type": "film", "title": "Heat", "status": "completed"}, headers=headers)
     client.post("/media", json={"media_type": "film", "title": "Dark", "status": "watching"}, headers=headers)
-    r = client.get(f"/admin/users/{user['id']}/library?status=completed", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}/library?status=completed", headers=admin_enabled)
     assert r.status_code == 200
     assert "Heat" in r.text
     assert "Dark" not in r.text
 
 
 def test_user_library_unknown_user_not_found(client, admin_enabled):
-    assert client.get("/admin/users/9999/library", auth=BASIC).status_code == 404
+    assert client.get("/admin/users/9999/library", headers=admin_enabled).status_code == 404
 
 
 def test_user_detail_links_to_library(client, admin_enabled, alice):
     user, headers = alice
     client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers)
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert f"/admin/users/{user['id']}/library?media_type=film" in r.text
 
 
@@ -164,7 +165,7 @@ def test_user_detail_shows_requests_per_day_chart(client, admin_enabled, alice):
     user, headers = alice
     for _ in range(3):
         client.get("/auth/me", headers=headers)
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert r.status_code == 200
     assert "Requests per day" in r.text
     assert f"/admin/users/{user['id']}/endpoints" in r.text  # link into the full breakdown
@@ -198,7 +199,7 @@ def test_user_endpoints_full_page_lists_all(client, admin_enabled, alice):
     client.get("/auth/me", headers=headers)
     item = client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers).json()
     client.get(f"/media/{item['id']}", headers=headers)
-    r = client.get(f"/admin/users/{user['id']}/endpoints", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}/endpoints", headers=admin_enabled)
     assert r.status_code == 200
     assert ">/auth/me<" in r.text
     assert ">/media/{item_id}<" in r.text
@@ -206,17 +207,19 @@ def test_user_endpoints_full_page_lists_all(client, admin_enabled, alice):
 
 def test_user_endpoints_full_page_requires_auth(client, admin_enabled, alice):
     user, _ = alice
-    assert client.get(f"/admin/users/{user['id']}/endpoints").status_code == 401
+    assert (
+        client.get(f"/admin/users/{user['id']}/endpoints", follow_redirects=False).status_code == 303
+    )  # to the login page
 
 
 def test_user_endpoints_unknown_user_not_found(client, admin_enabled):
-    assert client.get("/admin/users/9999/endpoints", auth=BASIC).status_code == 404
+    assert client.get("/admin/users/9999/endpoints", headers=admin_enabled).status_code == 404
 
 
 def test_chart_bars_expose_hover_value(client, admin_enabled, alice):
     user, headers = alice
     client.get("/auth/me", headers=headers)
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC).text
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled).text
     # bars carry the value in data-tip, and the floating tooltip is wired up
     assert 'data-tip="' in r
     assert 'id="chart-tip"' in r
@@ -231,7 +234,10 @@ def test_admin_delete_user_removes_endpoint_stats(client, admin_enabled, alice):
     client.get("/auth/me", headers=headers)
     assert _count("GET", "/auth/me", user["id"]) >= 1
 
-    assert client.post(f"/admin/users/{user['id']}/delete", auth=BASIC, follow_redirects=False).status_code == 303
+    assert (
+        client.post(f"/admin/users/{user['id']}/delete", headers=admin_enabled, follow_redirects=False).status_code
+        == 303
+    )
 
     db = SessionLocal()
     try:

@@ -2,44 +2,72 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.008319
-Revised: 2026/08/15 17:44:49.248016
+Revised: 2026/11/09 23:36:40.975282
 """
 
 import logging
-import secrets
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
 from ..models import User, utcnow
+from . import admin_session
 
 _log = logging.getLogger(__name__)
 
 ALGORITHM = "HS256"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-_basic = HTTPBasic()
 
 
-def require_admin(credentials: HTTPBasicCredentials = Depends(_basic)) -> str:
-    if not settings.admin_username or not settings.admin_password:
-        raise HTTPException(status_code=503, detail="ADMIN_USERNAME or ADMIN_PASSWORD not configured")
-    user_ok = secrets.compare_digest(credentials.username.encode(), settings.admin_username.encode())
-    pw_ok = secrets.compare_digest(credentials.password.encode(), settings.admin_password.encode())
-    if not user_ok or not pw_ok:
-        _log.warning("admin authentication failed for username=%r", credentials.username)
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": 'Basic realm="Admin"'},
-        )
-    return credentials.username
+class AdminLoginRequired(Exception):
+    """Raised by require_admin when there is no valid admin session; main.py
+    answers a GET with a redirect to the login page and anything else with a
+    401 page (a redirect would silently drop the submitted form)."""
+
+    def __init__(self, method: str, path_with_query: str):
+        super().__init__(f"admin login required for {method} {path_with_query}")
+        self.method = method
+        self.path_with_query = path_with_query
+
+
+def _not_configured() -> HTTPException:
+    return HTTPException(
+        status_code=503, detail="Admin panel not configured (ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_TOTP_SECRET)"
+    )
+
+
+def _path_with_query(request: Request) -> str:
+    query = request.url.query
+    return f"{request.url.path}?{query}" if query else request.url.path
+
+
+def require_admin(request: Request) -> str:
+    """The signed-in admin's username, from the session cookie (see admin_session)."""
+    if not admin_session.admin_configured():
+        raise _not_configured()
+    username = admin_session.read_session(request.cookies.get(admin_session.COOKIE_NAME))
+    if username is None:
+        raise AdminLoginRequired(request.method, _path_with_query(request))
+    return username
+
+
+def require_admin_or_api_token(request: Request) -> str:
+    """require_admin, or ``Authorization: Bearer <ADMIN_API_TOKEN>`` for the
+    routes a script calls (it can't type an authenticator code). Returns the
+    admin username, or ``"api-token"`` for the token, for audit logging."""
+    if admin_session.api_token_ok(request.headers.get("authorization")):
+        return "api-token"
+    if request.headers.get("authorization"):
+        _log.warning("admin API token rejected for %s %s", request.method, request.url.path)
+        raise HTTPException(status_code=401, detail="Invalid admin API token")
+    return require_admin(request)
 
 
 # bcrypt only reads the first 72 bytes of a password; since 5.x it raises

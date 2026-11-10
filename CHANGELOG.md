@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/11/09 14:06:09.178225 )
+[//]: # (+ Revised: 	2026/11/10 11:04:48.077398 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -12,11 +12,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- App-release hosting for in-app updates: `GET /app-releases/latest`, the
+  APK download, the admin upload route, and an App Releases admin page (and
+  dashboard tile) to list and delete uploaded builds.
+- Admin panel: classic sign-in page with authenticator-app (TOTP) codes,
+  session cookie and Log out button, replacing the HTTP Basic popup. Failed
+  sign-ins count as abuse strikes (Exempt IPs skipped). New `.env` settings
+  `ADMIN_TOTP_SECRET` (required for the panel) and `ADMIN_API_TOKEN` (for
+  the APK upload script).
+- One-click server update from the admin panel's new Server Update page:
+  fast-forward to `origin/master`, sync dependencies, migrate and reload,
+  with automatic rollback if anything fails.
+- `uv run admin-totp` generates an authenticator secret with a terminal QR
+  code; `uv run admin-unban <ip>` lifts every ban on an IP.
+
 ### Changed
+
+- `GET /stats` reads only the watch timestamps it needs instead of whole
+  watch rows, about 3–5× faster on that query for large libraries.
+
+- A still-airing show you're up to date on now stays "watching" instead of
+  being auto-completed. It becomes "completed" once the show ends, and goes
+  back to "watching" if an ended show is revived. Setting an airing show
+  to "completed" marks every aired episode watched and leaves it
+  "watching". The same rule applies to TV Time and Renar imports, and a
+  migration moves existing completed entries on airing shows back to
+  "watching".
 
 - The backlog moved from `docs/backlog.md` to `TODO.md`, with an index,
   a numbered item template, and a `[Blocking for 1.0]` or `[Future]` tag on
   every item. `CONTRIBUTING.md` links to it.
+
+### Security
+
+- Admin panel form posts now accept only the panel's own `Origin`, not the
+  CORS allowlist, since its session is a cookie that every `*.renar.app`
+  host shares a site with.
+- Upgraded anyio, brotli, certifi, dnspython, filelock, msgpack, pillow,
+  pyjwt, urllib3 and werkzeug past their published vulnerabilities
 
 ## [0.19.8] - 2026-09-30
 

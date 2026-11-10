@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/11/09 11:49:59.802297
+Revised: 2026/11/09 15:59:24.804352
 """
 
 import logging
@@ -13,6 +13,7 @@ from sqlalchemy import Date, and_, cast, exists, func, inspect, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from ..catalog.progress import resolve_status
 from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, escape_like, find_or_create_title, find_title
 from ..database import get_db
 from ..events import publish as publish_event
@@ -486,8 +487,9 @@ def _mark_all_aired_watched(item: LibraryEntry, db: Session) -> None:
     without per-episode tracking. Only episodes with a known air_date in the
     past are touched, so a still-airing show never gets future/unannounced
     episodes marked watched out from under it. _sync_progress (called at the
-    end) uses the same aired-only count as its completion threshold, so it
-    won't demote the "completed" status the caller just set."""
+    end) uses the same aired-only count as its completion threshold, so an
+    ended show keeps the "completed" status the caller just set, while a
+    still-airing one settles on "watching" (catalog/progress.py)."""
     if item.title_ref is None:
         return
     sync_show_episodes(db, item.title_ref)
@@ -859,53 +861,16 @@ def clear_custom_episode_still(
 # ---------- per-episode tracking ----------
 
 
-def _aired_episode_total(item: LibraryEntry, db: Session) -> int | None:
-    """How many episodes have actually aired, per the synced Episode
-    catalog — None when nothing's synced yet for this title (caller falls
-    back to the flat Title.total_episodes count).
-
-    Title.total_episodes comes straight from TMDB's number_of_episodes,
-    which can already include an episode announced with a future air_date
-    that hasn't aired. Without this, a still-airing show the user has fully
-    caught up on would never cross that flat threshold, and so would never
-    promote to "completed" (shown as "Caught up" for a non-ended show) until
-    the show itself wrapped."""
-    known = db.query(func.count(Episode.id)).filter(Episode.title_id == item.title_id).scalar()
-    if not known:
-        return None
-    return (
-        db.query(func.count(Episode.id))
-        .filter(Episode.title_id == item.title_id, Episode.air_date.isnot(None), Episode.air_date <= date.today())
-        .scalar()
-    )
-
-
 def _sync_progress(item: LibraryEntry, db: Session) -> None:
-    """Recompute counters/status from the episode_watches rows."""
+    """Recompute counters/status from the episode_watches rows (status rules:
+    catalog/progress.py's resolve_status)."""
     watches = db.query(EpisodeWatch).filter(EpisodeWatch.media_item_id == item.id).all()
     item.episodes_watched = len(watches)
     if watches:
         last = max(watches, key=lambda w: (w.season, w.episode))
         item.current_season, item.current_episode = last.season, last.episode
         item.last_watched_at = utcnow()
-    total = _aired_episode_total(item, db)
-    if total is None:
-        total = item.total_episodes
-    if total and item.episodes_watched >= total:
-        item.status = WatchStatus.completed
-    elif total and item.status == WatchStatus.completed:
-        # no longer every episode is watched — completed doesn't hold up
-        # anymore, so this undoes the auto-promotion above the same way an
-        # unwatch undoes want_to_watch -> watching below. Without this, an
-        # unwatch after finishing a show left the status stuck on
-        # "completed" forever, since nothing ever demoted it back down.
-        # Guarded on `total`: a film has no episode concept, so `total` is
-        # always None and `episodes_watched` always 0 — without this guard,
-        # every rewatch of a completed film fell into this branch and got
-        # wrongly demoted all the way to want_to_watch.
-        item.status = WatchStatus.watching if item.episodes_watched > 0 else WatchStatus.want_to_watch
-    elif item.episodes_watched > 0 and item.status == WatchStatus.want_to_watch:
-        item.status = WatchStatus.watching
+    resolve_status(item, db)
     db.commit()
 
 

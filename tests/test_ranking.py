@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 09:55:31.503656
-Revised: 2026/08/24 12:39:05.574243
+Revised: 2026/11/09 23:36:42.821328
 
 Watch-time leaderboard (/stats/ranking): the users.total_watch_minutes
 column maintained by a Postgres trigger (migration a7c2e9f4b816, mirrored
@@ -12,7 +12,6 @@ for tests by models.py registering the same DDL against LibraryEntry's
 
 from datetime import timedelta
 
-from conftest import ADMIN_BASIC as BASIC
 from conftest import hard_delete
 from sqlalchemy.exc import IntegrityError
 
@@ -608,7 +607,10 @@ def test_ranking_disabled_by_admin_toggle(client, admin_enabled, alice):
     assert client.get("/stats/ranking", headers=headers).status_code == 200
 
     r = client.post(
-        "/admin/premium/toggle", data={"feature": "ranking", "value": "0"}, auth=BASIC, follow_redirects=False
+        "/admin/premium/toggle",
+        data={"feature": "ranking", "value": "0"},
+        headers=admin_enabled,
+        follow_redirects=False,
     )
     assert r.status_code == 303
     assert client.get("/stats/ranking", headers=headers).status_code == 403
@@ -638,8 +640,18 @@ def test_ranking_re_enabled_by_admin_toggle_honors_existing_subscription(client,
     whose premium_until never lapsed — no re-grant needed."""
     user, headers = alice
     _set_premium(user["id"])
-    client.post("/admin/premium/toggle", data={"feature": "ranking", "value": "0"}, auth=BASIC, follow_redirects=False)
+    client.post(
+        "/admin/premium/toggle",
+        data={"feature": "ranking", "value": "0"},
+        headers=admin_enabled,
+        follow_redirects=False,
+    )
     assert client.get("/stats/ranking", headers=headers).status_code == 403
 
-    client.post("/admin/premium/toggle", data={"feature": "ranking", "value": "1"}, auth=BASIC, follow_redirects=False)
+    client.post(
+        "/admin/premium/toggle",
+        data={"feature": "ranking", "value": "1"},
+        headers=admin_enabled,
+        follow_redirects=False,
+    )
     assert client.get("/stats/ranking", headers=headers).status_code == 200

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 14:33:20.294880
-Revised: 2026/11/09 11:49:59.465340
+Revised: 2026/11/10 11:04:48.190435
 
 Opt-in server for integration tests that need the real app reachable over
 real HTTP, not the in-process ASGI transport TestClient uses: this repo's
@@ -58,8 +58,15 @@ def main() -> None:
     os.environ["PROD_TURNSTILE_SECRET_KEY"] = ""  # nosec B105 -- empty, disables Turnstile for the test run
     os.environ["DEV_TURNSTILE_SITE_KEY"] = ""
     os.environ["DEV_TURNSTILE_SECRET_KEY"] = ""  # nosec B105 -- empty, disables Turnstile for the test run
+    # The admin panel's sign-in stays disabled; only the script-facing
+    # ADMIN_API_TOKEN is set, and only when the caller opts in with a
+    # throwaway ITEST_ADMIN_API_TOKEN (tests of the app-release upload
+    # renar-frontend's build command uses). Never the real ADMIN_* values
+    # from a developer's shell or .env.
     os.environ["ADMIN_USERNAME"] = ""
-    os.environ["ADMIN_PASSWORD"] = ""  # nosec B105 -- empty, disables the admin panel for the test run
+    os.environ["ADMIN_PASSWORD"] = ""  # nosec B105 -- empty, disables the panel sign-in
+    os.environ["ADMIN_TOTP_SECRET"] = ""  # nosec B105 -- empty, disables the panel sign-in
+    os.environ["ADMIN_API_TOKEN"] = os.environ.get("ITEST_ADMIN_API_TOKEN", "")
     os.environ["ADMIN_PATH"] = "/admin"
     # Single-IP traffic from the frontend test process would otherwise trip
     # the guard partway through a run, same reasoning as tests/conftest.py.

@@ -21,10 +21,14 @@ dependencies = [
     "blake3>=1.0",
     "psycopg[binary]>=3.2",
     "py7zr>=0.22",
+    "pyotp>=2.9",
+    "segno>=1.6",
 ]
 
 [project.scripts]
 be = "renar_backend.__main__:run"
+admin-totp = "renar_backend.admin_cli:totp"
+admin-unban = "renar_backend.admin_cli:unban"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6.100", "bandit>=1.7", "pip-audit>=2.7", "locust>=2.31", "mutmut>=3.2"]

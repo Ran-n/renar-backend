@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:16:06.552872
-Revised: 2026/08/18 17:16:06.552872
+Revised: 2026/11/09 16:20:37.574737
 
 Property-based tests (hypothesis) for pure validation/normalization
 functions: instead of a handful of hand-picked examples, these assert an
@@ -17,6 +17,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from renar_backend.app_releases import version_key
 from renar_backend.models import normalize_title_key
 from renar_backend.routers.auth import _normalize_email
 from renar_backend.schemas import _HEX_COLOR_RE, BCRYPT_MAX_PASSWORD_BYTES, _password_fits_bcrypt
@@ -111,3 +112,16 @@ def test_username_and_password_within_bounds_never_raise_on_length(username: str
         # here so it can't fire) — not about the length bounds themselves.
         for err in exc.errors():
             assert err["loc"][0] not in ("username", "password") or "length" not in err["type"]
+
+
+# ---------- app_releases.version_key ----------
+
+_versions = st.tuples(*[st.integers(min_value=0, max_value=999)] * 3).map(lambda t: ".".join(map(str, t)))
+
+
+@given(st.lists(_versions, min_size=1, max_size=20, unique=True))
+def test_latest_version_is_the_integer_tuple_max(versions: list[str]):
+    """``latest`` picks by version_key; that must equal the numeric max,
+    never the string max (which would rank 0.9.9 above 0.10.0)."""
+    expected = max(versions, key=lambda v: tuple(int(p) for p in v.split(".")))
+    assert max(versions, key=version_key) == expected

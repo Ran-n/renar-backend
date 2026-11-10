@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:13.871671
-Revised: 2026/08/21 08:33:49.466180
+Revised: 2026/11/09 23:36:38.787424
 """
 
 import logging
@@ -13,6 +13,7 @@ from pathlib import Path
 import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 
+from renar_backend import update_check
 from renar_backend._devserver import ensure_port_free
 
 # Absolute, not "src": a relative reload dir resolves against wherever `be`
@@ -112,6 +113,16 @@ def run():
     ssl_kwargs = {}
     if _SSL_CERTFILE.exists() and _SSL_KEYFILE.exists():
         ssl_kwargs = {"ssl_certfile": str(_SSL_CERTFILE), "ssl_keyfile": str(_SSL_KEYFILE)}
+    # The admin panel's self-update needs to know a reloader is running
+    # (it restarts the worker by changing files) and where to probe it.
+    update_check.write_server_pid(_PORT, "https" if ssl_kwargs else "http")
+    try:
+        _serve(ssl_kwargs)
+    finally:
+        update_check.remove_server_pid()
+
+
+def _serve(ssl_kwargs: dict) -> None:
     uvicorn.run(
         "renar_backend.main:asgi_app",
         host=_HOST,

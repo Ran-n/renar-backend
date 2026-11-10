@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/18 00:26:58.941010
+Revised: 2026/11/09 23:36:40.123777
 
 Admin moderation: comment review/deletion and banned-IP management.
 """
@@ -27,6 +27,7 @@ from ._html import (
     _PAGE_CSS,
     _RESPONSIVE_CSS,
     _fmt_ts,
+    _logout_button,
 )
 
 router = APIRouter()
@@ -117,6 +118,7 @@ def _render_comments(
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{_P}">Admin</a>
+    {_logout_button()}
   </header>
 
   <div class="page">
@@ -200,6 +202,7 @@ def _render_bans(bans: list[BannedIP]) -> str:
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{_P}">Admin</a>
+    {_logout_button()}
   </header>
 
   <div class="page">

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/11/09 11:49:59.182159 )
+[//]: # (+ Revised: 	2026/11/09 23:36:38.426827 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -25,6 +25,25 @@ naturally community-scoped (per title), not per-tracking-row. Keeping
 catalog metadata on the entry would mean N duplicate copies of the same
 poster URL for N users, and updating a title's metadata would require a
 bulk update across every user's row instead of one write.
+
+### An airing show is never completed
+
+`catalog/progress.py` owns the watch-status rules every progress path
+shares (per-episode toggles, `PATCH status=completed`, TV Time and Renar
+imports). An entry whose every aired episode is watched becomes
+`completed` only when its show has ended (`show_status` in
+`constants.ENDED_STATUSES`), or when the status is unknown. A still-airing
+show stays `watching`. When a TMDB refresh changes `show_status`
+(`tmdb_store.sync_title_details`), `refresh_title_entries` re-resolves
+that title's `watching`/`completed` entries: a show that ends completes
+its caught-up entries, and a revived one reopens them. Migration
+`c4e8a1d07f52` moved existing completed entries on airing shows back to
+`watching`.
+
+**Why:** "completed" means nothing left to watch, which an airing show
+can't promise. Auto-completing it (formerly labelled "Caught up") dropped
+it out of every "In progress" filter until the notifier happened to catch a
+new episode within 7 days of airing.
 
 ### Rating scale: 1-100
 
@@ -889,7 +908,7 @@ list `AbuseGuardMiddleware` itself honors) and skipped entirely for a match
 local deployment retrying with a wrong secret must never end up banning the
 machine it's running on.
 
-### Admin panel: server-rendered HTML behind HTTP Basic, not a JSON API + SPA
+### Admin panel: server-rendered HTML behind a login form + TOTP, not a JSON API + SPA
 
 `/admin` renders HTML directly from FastAPI rather than exposing admin data
 as JSON for a separate frontend to consume.
@@ -899,6 +918,31 @@ only the operator uses, and keeps the public JSON API free of
 admin-only routes that would otherwise need their own auth scheme layered
 onto the JWT system. The tradeoff (no rich client-side interactivity) is
 acceptable for an infrequently used internal tool.
+
+### Admin session: stateless JWT cookie bound to a credential fingerprint
+
+Signing in (username + password + a TOTP code, ±1 step, a used step never
+accepted again) sets `renar_admin`: an HS256 JWT with audience
+`renar-admin`, 8 h expiry, and `cred`, a BLAKE3 fingerprint of the admin
+username, password and TOTP secret, recomputed on every request. The cookie
+is HttpOnly, SameSite=Strict, `Path=<ADMIN_PATH>`, Secure on https. Logged
+out, a page view redirects to the login page (then back); a form POST gets
+a 401 page instead. Every failed sign-in is an abuse strike unless the IP
+is in Exempt IPs. Scripts use `ADMIN_API_TOKEN` as a Bearer token, accepted
+only on the routes that need it (the APK upload and delete).
+
+**Why:** HTTP Basic had no logout, no second factor and a browser popup.
+A stateless cookie needs no session table, and the fingerprint means
+changing any admin credential in `.env` revokes every session at once.
+The audience keeps an app access token from passing as an admin session
+and the reverse. TOTP over an emailed code: it works when email is down
+and needs no mail round-trip. Striking every failure is safe because
+nobody but the operator should ever reach the page, and Exempt IPs (plus
+`uv run admin-unban <ip>` over SSH) keeps the operator from locking
+themselves out. Admin paths accept only the panel's own `Origin` on POST,
+not the CORS allowlist: SameSite treats every `*.renar.app` host as the
+same site, so it alone doesn't stop the web app's origin from riding the
+cookie.
 
 ### Admin panel colors mirror the app's Gruvbox palette
 
@@ -915,10 +959,36 @@ visually consistent with the app, and pinning to the named values in
 ### `ADMIN_PATH` is configurable, and the default becomes a honeypot
 
 Moving the admin panel off `/admin` is the primary defense for that
-endpoint (HTTP Basic alone doesn't rate-limit password guesses the way the
-login endpoint does). Once moved, the *original* `/admin` path is added to
+endpoint (it hides the login page from scanners altogether; the sign-in's
+strikes then only ever see someone who already knew the path). Once moved, the *original* `/admin` path is added to
 the honeypot list automatically — nothing legitimate should ever request it
 again, so any request there is unambiguously a scanner.
+
+### Self-update reloads in place; the helper runs outside the venv
+
+The admin panel's Update button starts `self_update.py` detached, with the
+base interpreter in isolated mode (`python -I`), and never stops the server:
+it stages the new `pyproject.toml`/`uv.lock`/`alembic/` (paths the reloader
+doesn't watch), syncs, migrates, then fast-forwards `src/`, and uvicorn's
+reloader swaps the worker. Each worker writes `logs/be-worker.json` at
+startup, so the helper knows the new one is up, not the old one.
+
+**Why:** stopping and restarting the server would mean a different
+mechanism per OS and per supervisor (systemd on the Hetzner VPS, a console
+on the dev PC); changing files is the same everywhere. Staging the lock and
+migrations first keeps the running code consistent: the new code never
+starts before its dependencies and schema exist. The helper imports only
+the standard library and runs outside the venv so `uv sync` can replace
+any package while it runs.
+
+### Self-update: fast-forward only, clean tree only
+
+Updates are refused on a branch other than `master`, with uncommitted
+changes, or with local commits not on `origin/master`.
+
+**Why:** the rollback is `git reset --hard <old commit>`, which would
+silently destroy uncommitted work (a second editor often has some in this
+checkout), and an update must never create a merge commit on the server.
 
 ### No reverse proxy in front of uvicorn
 
@@ -1665,6 +1735,30 @@ frontend's tap-to-zoom backdrop dialog, which requires a size larger than
 w780.
 
 ## API design
+
+### App updates are served by the backend
+
+`app_releases` (one row per uploaded APK, unique on `(platform, version)`,
+`blake3` and `sha256`) plus content-addressed files under
+`<MEDIA_DIR>/app-releases/<blake3>.apk` back `GET /app-releases/latest` and
+`/download`, which sideloaded Android installs use to update themselves.
+Re-uploading identical bytes is idempotent; different bytes for a stored
+version is a 409. The release-notes column is named `changelog` (exposed as
+`notes`) so test_normalization's plural-name rule doesn't read it as a list.
+
+**Why:** renar-frontend's repo is private and has no releases, so an
+unauthenticated phone can't fetch builds from a forge; the backend is the one
+server every installed app already reaches. Replacing a version's bytes in
+place is refused because installed apps compare versions and would never
+fetch the replacement.
+
+### Phones verify SHA-256, storage is keyed by BLAKE3
+
+Each release stores both hashes, computed in one streaming pass on upload.
+
+**Why:** BLAKE3 is the project's canonical hash (media store, `.b3` files),
+but the phone verifies with Python's stdlib `hashlib`: there is no blake3
+wheel for Android.
 
 ### `GET /events`: Server-Sent Events push for account settings, in-memory single-worker pub/sub
 

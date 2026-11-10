@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:42:31.539562
-Revised: 2026/11/09 11:50:00.567839
+Revised: 2026/11/09 23:36:42.464166
 
 Fuzz tests (hypothesis): throw a wide range of malformed/random input at a
 few request-parsing endpoints and assert the server never 500s — a 4xx
@@ -21,7 +21,6 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
-from conftest import ADMIN_BASIC
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
@@ -1383,7 +1382,7 @@ _pg_boundary_int = st.one_of(
 )
 def test_admin_save_settings_never_500s_on_arbitrary_form(client, admin_enabled, int_overrides, text_overrides):
     payload = {**_ADMIN_SETTINGS_FORM, **{k: str(v) for k, v in int_overrides.items()}, **text_overrides}
-    r = client.post("/admin/settings", data=payload, auth=ADMIN_BASIC, follow_redirects=False)
+    r = client.post("/admin/settings", data=payload, headers=admin_enabled, follow_redirects=False)
     assert r.status_code < 500, f"500 on ints={int_overrides!r} text={text_overrides!r}:\n{r.text[:400]}"
 
 
@@ -1392,7 +1391,7 @@ def test_admin_save_settings_never_500s_on_arbitrary_form(client, admin_enabled,
 def test_admin_edit_user_never_500s_on_arbitrary_form(client, admin_enabled, alice, username, email):
     user, _ = alice
     data = {k: v for k, v in (("username", username), ("email", email)) if v is not None}
-    r = client.post(f"/admin/users/{user['id']}/edit", data=data, auth=ADMIN_BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/edit", data=data, headers=admin_enabled, follow_redirects=False)
     assert r.status_code < 500, f"500 on username={username!r} email={email!r}:\n{r.text[:400]}"
 
 
@@ -1403,7 +1402,7 @@ def test_admin_set_password_never_500s_on_arbitrary_form(client, admin_enabled, 
     r = client.post(
         f"/admin/users/{user['id']}/password",
         data={"new_password": new_password},
-        auth=ADMIN_BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code < 500, f"500 on new_password={new_password!r}:\n{r.text[:400]}"
@@ -1428,7 +1427,7 @@ def test_admin_set_password_never_500s_on_arbitrary_form(client, admin_enabled, 
 )
 def test_admin_grant_premium_never_500s_on_arbitrary_form(client, admin_enabled, alice, payload):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/premium", data=payload, auth=ADMIN_BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/premium", data=payload, headers=admin_enabled, follow_redirects=False)
     assert r.status_code < 500, f"500 on payload={payload!r}:\n{r.text[:400]}"
 
 
@@ -1439,7 +1438,7 @@ def test_admin_grant_premium_never_500s_on_arbitrary_form(client, admin_enabled,
 )
 def test_admin_create_invite_never_500s_on_arbitrary_form(client, admin_enabled, max_uses, expires_at):
     data = {k: v for k, v in (("max_uses", max_uses), ("expires_at", expires_at)) if v is not None}
-    r = client.post("/admin/invites/create", data=data, auth=ADMIN_BASIC, follow_redirects=False)
+    r = client.post("/admin/invites/create", data=data, headers=admin_enabled, follow_redirects=False)
     assert r.status_code < 500, f"500 on max_uses={max_uses!r} expires_at={expires_at!r}:\n{r.text[:400]}"
 
 
@@ -1448,7 +1447,7 @@ def test_admin_create_invite_never_500s_on_arbitrary_form(client, admin_enabled,
 def test_admin_endpoint_detail_never_500s_on_arbitrary_query(client, admin_enabled, method, path):
     # method/path go straight into a WHERE comparison against text columns —
     # max_length=10/200 caps the size, nothing caps the *content*.
-    r = client.get("/admin/usage/endpoint", params={"method": method, "path": path}, auth=ADMIN_BASIC)
+    r = client.get("/admin/usage/endpoint", params={"method": method, "path": path}, headers=admin_enabled)
     assert r.status_code < 500, f"500 on method={method!r} path={path!r}:\n{r.text[:400]}"
 
 
@@ -1459,13 +1458,16 @@ def test_admin_toggles_never_500s_on_arbitrary_key(client, admin_enabled, featur
     # (`premium_{feature}_enabled`) or a task key — an allowlist miss must
     # redirect, never raise (or, worse, setattr an arbitrary attribute).
     r = client.post(
-        "/admin/premium/toggle", data={"feature": feature, "value": value}, auth=ADMIN_BASIC, follow_redirects=False
+        "/admin/premium/toggle",
+        data={"feature": feature, "value": value},
+        headers=admin_enabled,
+        follow_redirects=False,
     )
     assert r.status_code < 500, f"500 on feature={feature!r}:\n{r.text[:400]}"
     r = client.post(
         "/admin/periodic-tasks/toggle",
         data={"task_key": task_key, "value": value},
-        auth=ADMIN_BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code < 500, f"500 on task_key={task_key!r}:\n{r.text[:400]}"
@@ -1477,7 +1479,7 @@ def test_admin_task_interval_never_500s_on_arbitrary_form(client, admin_enabled,
     r = client.post(
         "/admin/periodic-tasks/interval",
         data={"task_key": task_key, "minutes": str(minutes)},
-        auth=ADMIN_BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code < 500, f"500 on task_key={task_key!r} minutes={minutes!r}:\n{r.text[:400]}"
@@ -1514,7 +1516,7 @@ _ADMIN_INT_PARAM_ROUTES = [
 )
 def test_admin_int_path_params_never_500(client, admin_enabled, route, ident):
     method, template = route
-    r = getattr(client, method)(template.format(i=ident), auth=ADMIN_BASIC, follow_redirects=False)
+    r = getattr(client, method)(template.format(i=ident), headers=admin_enabled, follow_redirects=False)
     assert r.status_code < 500, f"500 on {method.upper()} {template} ident={ident}:\n{r.text[:400]}"
 
 
@@ -1525,11 +1527,11 @@ def test_admin_int_path_params_never_500(client, admin_enabled, route, ident):
     generated=_fuzzy_text,
 )
 def test_admin_listing_query_params_never_500(client, admin_enabled, page, user_id, generated):
-    r = client.get("/admin/users", params={"page": page}, auth=ADMIN_BASIC)
+    r = client.get("/admin/users", params={"page": page}, headers=admin_enabled)
     assert r.status_code < 500, f"500 on page={page}:\n{r.text[:400]}"
-    r = client.get("/admin/comments", params={"user_id": user_id}, auth=ADMIN_BASIC)
+    r = client.get("/admin/comments", params={"user_id": user_id}, headers=admin_enabled)
     assert r.status_code < 500, f"500 on user_id={user_id}:\n{r.text[:400]}"
-    r = client.get("/admin/invites", params={"generated": generated}, auth=ADMIN_BASIC)
+    r = client.get("/admin/invites", params={"generated": generated}, headers=admin_enabled)
     assert r.status_code < 500, f"500 on generated={generated!r}:\n{r.text[:400]}"
 
 
@@ -1543,7 +1545,7 @@ def test_admin_settings_integer_overflow_returns_422_not_500(client, admin_enabl
     2026-09-03 RewatchCreate one, on the surface that pass never audited."""
     for field in ("rate_limit_per_minute", "ban_minutes", "deletion_grace_days"):
         payload = {**_ADMIN_SETTINGS_FORM, field: str(2**31)}
-        r = client.post("/admin/settings", data=payload, auth=ADMIN_BASIC, follow_redirects=False)
+        r = client.post("/admin/settings", data=payload, headers=admin_enabled, follow_redirects=False)
         assert r.status_code == 422, f"{field}: expected 422, got {r.status_code}"
 
 
@@ -1553,7 +1555,7 @@ def test_admin_settings_nul_byte_in_text_field_returns_422_not_500(client, admin
     2026-09-03 pass — a NUL reached Postgres and 500'd."""
     for field in ("email_sender_name", "email_sender_address", "turnstile_dev_hostnames", "exempt_ips"):
         payload = {**_ADMIN_SETTINGS_FORM, field: "bad\x00value"}
-        r = client.post("/admin/settings", data=payload, auth=ADMIN_BASIC, follow_redirects=False)
+        r = client.post("/admin/settings", data=payload, headers=admin_enabled, follow_redirects=False)
         assert r.status_code == 422, f"{field}: expected 422, got {r.status_code}"
 
 
@@ -1567,7 +1569,7 @@ def test_admin_edit_user_oversized_or_nul_value_returns_422_not_500(client, admi
         {"username": "x" * 200},
         {"email": "x" * 290 + "@example.com"},
     ):
-        r = client.post(f"/admin/users/{user['id']}/edit", data=data, auth=ADMIN_BASIC, follow_redirects=False)
+        r = client.post(f"/admin/users/{user['id']}/edit", data=data, headers=admin_enabled, follow_redirects=False)
         assert r.status_code == 422, f"{data!r}: expected 422, got {r.status_code}"
 
 
@@ -1586,7 +1588,7 @@ def test_admin_grant_premium_absurd_days_clamps_instead_of_overflowing(client, a
         r = client.post(
             f"/admin/users/{user['id']}/premium",
             data={"days": str(days)},
-            auth=ADMIN_BASIC,
+            headers=admin_enabled,
             follow_redirects=False,
         )
         assert r.status_code == 303, f"days={days}: expected 303, got {r.status_code}:\n{r.text[:200]}"
@@ -1596,7 +1598,9 @@ def test_admin_grant_premium_absurd_days_clamps_instead_of_overflowing(client, a
     finally:
         db.close()
     # topping up an already-permanent grant leaves it permanent, not overflowing
-    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "1"}, auth=ADMIN_BASIC, follow_redirects=False)
+    r = client.post(
+        f"/admin/users/{user['id']}/premium", data={"days": "1"}, headers=admin_enabled, follow_redirects=False
+    )
     assert r.status_code == 303, r.text
     db = SessionLocal()
     try:
@@ -1610,7 +1614,9 @@ def test_admin_grant_premium_absurd_days_clamps_instead_of_overflowing(client, a
         db.commit()
     finally:
         db.close()
-    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=ADMIN_BASIC, follow_redirects=False)
+    r = client.post(
+        f"/admin/users/{user['id']}/premium", data={"days": "30"}, headers=admin_enabled, follow_redirects=False
+    )
     assert r.status_code == 303, r.text
 
 
@@ -1633,3 +1639,15 @@ def test_oversized_int_path_param_returns_422_not_500(client, alice):
     ):
         r = getattr(client, method)(path, headers=headers)
         assert r.status_code == 422, f"{method.upper()} {path}: expected 422, got {r.status_code}:\n{r.text[:200]}"
+
+
+@_fuzz_settings
+@given(platform=_fuzzy_text, version=_fuzzy_text, notes=_fuzzy_text, payload=st.binary(max_size=300))
+def test_app_release_upload_never_500s_on_malformed_form(client, admin_enabled, platform, version, notes, payload):
+    r = client.post(
+        "/admin/app-releases",
+        data={"platform": platform, "version": version, "notes": notes},
+        files={"file": ("x.apk", payload)},
+        headers=admin_enabled,
+    )
+    assert r.status_code < 500, f"500 on platform={platform!r} version={version!r} notes={notes!r}:\n{r.text}"

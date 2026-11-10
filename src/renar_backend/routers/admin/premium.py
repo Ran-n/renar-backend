@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 00:00:00.000000
-Revised: 2026/08/02 18:29:48.881541
+Revised: 2026/11/09 23:36:40.464070
 
 Admin premium-features page: one card per premium perk, each with its own
 instant on/off switch (SiteSettings.premium_<feature>_enabled). Independent
@@ -23,7 +23,7 @@ from ...models import SiteSettings
 from ...site_settings import get_site_settings
 from ...users.auth import require_admin as _require_admin
 from ...users.premium import PREMIUM_FEATURES
-from ._html import _BASE_CSS, _FAVICON, _P, _PAGE_CSS, _RESPONSIVE_CSS
+from ._html import _BASE_CSS, _FAVICON, _P, _PAGE_CSS, _RESPONSIVE_CSS, _logout_button
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -232,6 +232,7 @@ def _render_premium_page(ss: SiteSettings) -> str:
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{_P}">Admin</a>
+    {_logout_button()}
   </header>
 
   <div class="page">

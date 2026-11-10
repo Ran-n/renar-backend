@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.543016
-Revised: 2026/09/30 09:38:45.242814
+Revised: 2026/11/09 15:59:25.015048
 
 Write-through persistence for TMDB data (see TmdbCache in models.py).
 
@@ -24,16 +24,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import site_settings as _site_settings_mod
+from ..catalog.progress import refresh_title_entries
 from ..catalog.titles import find_title, resolve_genres
 from ..models import Episode, MediaType, Title, TmdbCache, utcnow
 from .tmdb_http import BACKDROP_BASE, POSTER_BASE, TMDB_KIND, tmdb_get
 
 _log = logging.getLogger(__name__)
-
-# TMDB `status` values for shows that will not air new episodes; the
-# notifier stops polling these (a detail-page visit still refreshes them,
-# so a revived show recovers on its own).
-ENDED_STATUSES = ("Ended", "Canceled")
 
 NO_SEASON = -1  # TmdbCache.season for the non-season kinds (details/credits)
 
@@ -191,7 +187,12 @@ def sync_title_details(db: Session, title: Title, data: dict) -> None:
         title.runtime_minutes = data["last_episode_to_air"]["runtime"]
     title.total_episodes = data.get("number_of_episodes") or title.total_episodes
     title.total_seasons = data.get("number_of_seasons") or title.total_seasons
+    old_show_status = title.show_status
     title.show_status = (data.get("status") or "").strip()[:30] or None
+    if title.show_status != old_show_status and title.id is not None:
+        # ending (or reviving) changes what "caught up" means for everyone
+        # tracking it — see catalog/progress.py
+        refresh_title_entries(db, title)
     # Cached here so /upcoming can read a tracked show's next-episode info
     # straight off the Title row instead of hitting TMDB per title per request.
     nxt = data.get("next_episode_to_air") or {}

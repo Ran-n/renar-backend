@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/08/24 12:39:04.942885
+Revised: 2026/11/10 00:05:40.447155
 
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
@@ -37,6 +37,8 @@ os.environ["DEV_TURNSTILE_SITE_KEY"] = ""
 os.environ["DEV_TURNSTILE_SECRET_KEY"] = ""
 os.environ["ADMIN_USERNAME"] = ""
 os.environ["ADMIN_PASSWORD"] = ""
+os.environ["ADMIN_TOTP_SECRET"] = ""
+os.environ["ADMIN_API_TOKEN"] = ""
 os.environ["ADMIN_PATH"] = "/admin"
 # All test traffic comes from one fake IP; the guard would ban it.
 # test_security.py builds its own app to exercise the middleware.
@@ -63,16 +65,39 @@ def _drop_schema() -> None:
 atexit.register(_drop_schema)
 
 PASSWORD = "password123"
-ADMIN_BASIC = ("root", "hunter2secret")
+ADMIN_CREDS = ("root", "hunter2secret")
+ADMIN_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+ADMIN_API_TOKEN = "test-admin-api-token-0123456789"
+
+
+def admin_headers() -> dict[str, str]:
+    """Headers carrying a valid admin session cookie for the current settings
+    (for helpers that can't take the admin_enabled fixture)."""
+    from renar_backend.users import admin_session
+
+    return {"Cookie": f"{admin_session.COOKIE_NAME}={admin_session.issue_session(ADMIN_CREDS[0])}"}
 
 
 @pytest.fixture
 def admin_enabled():
-    """Temporarily configure admin credentials (unset by the conftest env)."""
-    settings.admin_username, settings.admin_password = ADMIN_BASIC
-    yield
+    """Temporarily configure the admin panel (unset by the conftest env).
+
+    Yields request headers carrying a valid admin session cookie, so a test
+    calls the panel with ``headers=admin_enabled``. The sign-in flow itself
+    (password + TOTP, strikes, logout) is covered by test_admin_login.py.
+    """
+    from renar_backend.users import admin_session
+
+    settings.admin_username, settings.admin_password = ADMIN_CREDS
+    settings.admin_totp_secret = ADMIN_TOTP_SECRET
+    settings.admin_api_token = ADMIN_API_TOKEN
+    admin_session.reset_replay_guard()
+    yield admin_headers()
     settings.admin_username = ""
     settings.admin_password = ""
+    settings.admin_totp_secret = ""
+    settings.admin_api_token = ""
+    admin_session.reset_replay_guard()
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +130,12 @@ def _fresh_db():
     renar_import._progress.clear()
     tvtime_import._progress.clear()
     svc._auth_failures.clear()
+    # Temp bans queued by a failed admin sign-in (users/security.py) wait in a
+    # module-level dict for the next AbuseGuardMiddleware to pick up; a test
+    # building its own guarded app would inherit an earlier test's ban.
+    from renar_backend.users import security
+
+    security._external_temp_bans.clear()
     yield
 
 

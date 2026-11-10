@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/11/09 11:50:00.148663
+Revised: 2026/11/09 15:59:24.906011
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -20,11 +20,12 @@ from sqlalchemy.orm import Session
 
 from .. import task_runs
 from ..catalog.titles import backfill_title_tmdb_id, find_title
+from ..constants import ENDED_STATUSES
 from ..database import SessionLocal
 from ..events import publish as publish_event
 from ..models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus, utcnow
 from ..tmdb.tmdb_http import tmdb_get
-from ..tmdb.tmdb_store import ENDED_STATUSES, store_details, sync_show_episodes
+from ..tmdb.tmdb_store import store_details, sync_show_episodes
 
 _log = logging.getLogger(__name__)
 

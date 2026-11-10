@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.262466
-Revised: 2026/08/24 11:07:30.470331
+Revised: 2026/11/09 15:59:25.401973
 
 Per-episode tracking: set/unset, bulk, progress sync, rewatches, ratings.
 """
@@ -10,7 +10,7 @@ Per-episode tracking: set/unset, bulk, progress sync, rewatches, ratings.
 from datetime import date, timedelta
 
 from renar_backend.database import SessionLocal
-from renar_backend.models import EpisodeWatch, LibraryEntry, Title, WatchEvent
+from renar_backend.models import EpisodeWatch, LibraryEntry, Title, WatchEvent, WatchStatus
 from renar_backend.tmdb import tmdb_store
 
 
@@ -690,20 +690,15 @@ def test_status_completed_does_not_remark_already_watched_episodes(client, alice
     assert watched_by_ep == {(1, 1): 7, (1, 2): None}
 
 
-# ---------- catching up on a continuing show auto-completes ----------
+# ---------- catching up: airing shows stay in progress, ended ones complete ----------
 
 
-def test_marking_all_aired_episodes_completes_show_even_when_total_episodes_counts_unaired(client, alice, monkeypatch):
+def _two_aired_one_upcoming(client, headers, monkeypatch, show_status):
     # Title.total_episodes (3) reflects TMDB's flat number_of_episodes, which
-    # already counts episode 3 even though it hasn't aired yet — once the
-    # Episode catalog is synced (here: via the app's existing lazy-sync path,
-    # same one /upcoming/history and the notifier job use), a user manually
-    # catching up on the two episodes that HAVE aired should promote the show
-    # to "completed" ("Caught up"), not get stuck waiting for a threshold (3)
-    # that won't be reachable until episode 3 airs.
-    _, headers = alice
+    # already counts episode 3 even though it hasn't aired yet — the aired-only
+    # Episode catalog count (2) is the real "caught up" threshold.
     show = _show(client, headers, media_type="tv_show", tmdb_id=70523, total_episodes=3)
-    _set_title_for_entry(client, headers, show["id"], total_seasons=1)
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1, show_status=show_status)
     aired = date.today() - timedelta(days=3)
     unaired = date.today() + timedelta(days=10)
     monkeypatch.setattr(
@@ -714,17 +709,82 @@ def test_marking_all_aired_episodes_completes_show_even_when_total_episodes_coun
         ),
     )
     # seeds the Episode catalog the same way /upcoming/history does — the
-    # per-episode toggle endpoint itself does NOT sync it (too costly to hit
-    # TMDB on every single checkbox click), so this fix only takes effect
-    # once something else has populated the catalog
+    # per-episode toggle endpoint itself does NOT sync it
     assert client.get("/upcoming/history", headers=headers).status_code == 200
-
     client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True}, headers=headers)
     client.put(f"/media/{show['id']}/episodes/1/2", json={"watched": True}, headers=headers)
+    return show
 
+
+def test_caught_up_on_airing_show_stays_watching(client, alice, monkeypatch):
+    _, headers = alice
+    show = _two_aired_one_upcoming(client, headers, monkeypatch, "Returning Series")
     item = client.get(f"/media/{show['id']}", headers=headers).json()
     assert item["episodes_watched"] == 2
-    assert item["status"] == "completed"
+    assert item["status"] == "watching"
+
+
+def test_caught_up_on_ended_show_completes(client, alice, monkeypatch):
+    _, headers = alice
+    show = _two_aired_one_upcoming(client, headers, monkeypatch, "Ended")
+    assert client.get(f"/media/{show['id']}", headers=headers).json()["status"] == "completed"
+
+
+def test_caught_up_on_show_with_unknown_status_completes(client, alice, monkeypatch):
+    # no TMDB production status (unmatched / never fetched): nothing says it's
+    # still airing, so completion works as before
+    _, headers = alice
+    show = _two_aired_one_upcoming(client, headers, monkeypatch, None)
+    assert client.get(f"/media/{show['id']}", headers=headers).json()["status"] == "completed"
+
+
+def test_setting_airing_show_completed_marks_aired_and_stays_watching(client, alice, monkeypatch):
+    _, headers = alice
+    show = _show(client, headers, media_type="tv_show", tmdb_id=70523, total_episodes=2)
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1, show_status="Returning Series")
+    aired = date.today() - timedelta(days=3)
+    monkeypatch.setattr(
+        tmdb_store,
+        "tmdb_get",
+        lambda path, params=None, cache=True: _season_payload(
+            (1, "Ep1", aired.isoformat()), (2, "Ep2", aired.isoformat())
+        ),
+    )
+    r = client.patch(f"/media/{show['id']}", json={"status": "completed"}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["status"] == "watching"
+    assert r.json()["episodes_watched"] == 2
+
+
+def test_show_ending_completes_caught_up_entries_and_revival_reopens_them(client, alice, monkeypatch):
+    _, headers = alice
+    show = _two_aired_one_upcoming(client, headers, monkeypatch, "Returning Series")
+    db = SessionLocal()
+    try:
+        title = db.get(LibraryEntry, show["id"]).title_ref
+        tmdb_store.sync_title_details(db, title, {"status": "Ended"})
+        db.commit()
+        assert db.get(LibraryEntry, show["id"]).status == WatchStatus.completed
+        tmdb_store.sync_title_details(db, title, {"status": "Returning Series"})
+        db.commit()
+        assert db.get(LibraryEntry, show["id"]).status == WatchStatus.watching
+    finally:
+        db.close()
+
+
+def test_show_ending_leaves_behind_entries_alone(client, alice, monkeypatch):
+    _, headers = alice
+    show = _show(client, headers, media_type="tv_show", tmdb_id=70523, total_episodes=3)
+    _set_title_for_entry(client, headers, show["id"], total_seasons=1, show_status="Returning Series")
+    client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+    db = SessionLocal()
+    try:
+        title = db.get(LibraryEntry, show["id"]).title_ref
+        tmdb_store.sync_title_details(db, title, {"status": "Ended"})
+        db.commit()
+        assert db.get(LibraryEntry, show["id"]).status == WatchStatus.watching
+    finally:
+        db.close()
 
 
 # ---------- community episode ratings ----------

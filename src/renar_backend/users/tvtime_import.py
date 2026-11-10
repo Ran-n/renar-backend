@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/11/09 11:50:00.403413
+Revised: 2026/11/09 15:59:25.298011
 
 Import a TV Time GDPR export zip: shows, episode history, movies, favorites.
 One of several importers registered in routers/imports.py's dispatch table
@@ -54,6 +54,7 @@ from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..catalog.progress import caught_up_status
 from ..catalog.titles import backfill_title_tmdb_id, backfill_title_tvdb_id, find_or_create_title, find_title
 from ..database import SessionLocal
 from ..models import (
@@ -1055,7 +1056,7 @@ def run(user_id: int, zip_bytes: bytes) -> None:
                 and item.episodes_watched >= item.total_episodes
                 and item.status not in (WatchStatus.dropped, WatchStatus.paused)
             ):
-                item.status = WatchStatus.completed
+                item.status = caught_up_status(item)
         db.commit()
 
         # ---------- movies ----------
@@ -1194,7 +1195,7 @@ def run(user_id: int, zip_bytes: bytes) -> None:
                 and item.episodes_watched >= item.total_episodes
                 and item.status not in (WatchStatus.dropped, WatchStatus.paused)
             ):
-                item.status = WatchStatus.completed
+                item.status = caught_up_status(item)
         db.commit()
 
         # ---------- custom lists ----------

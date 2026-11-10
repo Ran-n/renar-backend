@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/08/24 12:39:03.922521
+Revised: 2026/11/09 23:36:40.630390
 
 Admin site-settings page: view and save registration mode, rate limits, and
 abuse thresholds. Periodic-task toggles/intervals live on their own page
@@ -29,6 +29,7 @@ from ._html import (
     _P,
     _PAGE_CSS,
     _RESPONSIVE_CSS,
+    _logout_button,
 )
 
 router = APIRouter()
@@ -205,6 +206,7 @@ def _render_site_settings(ss: SiteSettings, saved: bool = False) -> str:
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{_P}">Admin</a>
+    {_logout_button()}
   </header>
 
   <div class="page">

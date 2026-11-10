@@ -2,9 +2,11 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/08/21 16:27:42.599569
+Revised: 2026/11/09 23:36:39.124638
 """
 
+import base64
+import binascii
 from pathlib import Path
 
 from pydantic import field_validator
@@ -70,8 +72,17 @@ class Settings(BaseSettings):
     email_confirmation_grace_days: int = 7  # days before an unconfirmed account is blocked at login
     unconfirmed_account_cleanup_days: int = 14  # days before an unconfirmed account is deleted
     media_dir: str = "./media"  # root of the content-addressed file store
-    admin_username: str = ""  # admin panel stays 503 until both are set
+    # The admin panel stays 503 until all three are set: username, password
+    # and the base32 TOTP secret for the authenticator-app code (generate one
+    # with `uv run admin-totp`). Changing any of them signs every admin
+    # session out (see users/admin_session.py).
+    admin_username: str = ""
     admin_password: str = ""
+    admin_totp_secret: str = ""
+    # Bearer token for the admin routes scripts call (the APK upload from
+    # renar-frontend's `uv run build apk --split --publish`), which can't type
+    # an authenticator code. Empty disables that way in.
+    admin_api_token: str = ""
     # Where the admin panel lives. Rename it (e.g. /panel-x7k2) and the
     # default /admin location automatically becomes a honeypot.
     admin_path: str = "/admin"
@@ -117,6 +128,19 @@ class Settings(BaseSettings):
     strike_ban_threshold: int = 5  # persisted offenses (see Strike) before an IP is permabanned
     # honeypot hits (/.env, /wp-login.php, ...) are PERMANENT bans stored in
     # the banned_ips table; lift them from the admin panel
+
+    @field_validator("admin_totp_secret")
+    @classmethod
+    def _check_totp_secret(cls, value: str) -> str:
+        """Fail loudly at boot on a mistyped secret, not with a 503 at login."""
+        secret = value.replace(" ", "").upper()
+        if not secret:
+            return ""
+        try:
+            base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=False)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("ADMIN_TOTP_SECRET is not valid base32") from exc
+        return secret
 
     @field_validator("media_dir")
     @classmethod

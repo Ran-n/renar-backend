@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 02:43:36.784037
-Revised: 2026/08/24 08:05:14.847992
+Revised: 2026/11/09 23:36:42.121771
 
 Dev-server guards (_devserver.py): the port-in-use probe and the
 orphaned-reload-worker watchdog, plus the repo-root anchoring of
@@ -181,3 +181,28 @@ def test_absolute_media_dir_untouched(tmp_path):
 def test_env_file_locations_include_repo_root():
     files = Settings.model_config["env_file"]
     assert str(_ROOT / ".env") in files
+
+
+def test_run_writes_and_removes_server_pid(tmp_path, monkeypatch):
+    """`be` records the reloader's pid/port/scheme for the admin self-update
+    while serving, and removes it afterwards, even when serving fails."""
+    import json
+
+    from renar_backend import __main__ as be
+    from renar_backend import update_check
+
+    monkeypatch.setattr(update_check, "REPO", tmp_path)
+    monkeypatch.setattr(be, "ensure_port_free", lambda host, port: None)
+    seen = {}
+
+    def fake_serve(ssl_kwargs):
+        seen["record"] = json.loads((tmp_path / "logs" / "be.pid").read_text(encoding="utf-8"))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(be, "_serve", fake_serve)
+    with pytest.raises(KeyboardInterrupt):
+        be.run()
+    assert seen["record"]["port"] == be._PORT
+    assert seen["record"]["reload"] is True
+    assert seen["record"]["scheme"] in ("http", "https")
+    assert not (tmp_path / "logs" / "be.pid").exists()

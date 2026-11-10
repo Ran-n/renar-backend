@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.607537
-Revised: 2026/09/02 10:58:04.647045
+Revised: 2026/11/09 23:36:42.636280
 
 Premium accounts: badge derivation, style colors, verification requests,
 custom posters (upload + GC) and the admin grant/revoke/verify actions.
@@ -13,7 +13,6 @@ import io
 from datetime import timedelta
 
 import pytest
-from conftest import ADMIN_BASIC as BASIC
 from PIL import Image as PILImage
 
 from renar_backend.database import SessionLocal
@@ -627,11 +626,13 @@ def test_image_valid_hash_but_missing_file_returns_404(client):
 
 def test_admin_grant_and_revoke_premium(client, admin_enabled, alice):
     user, headers = alice
-    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=BASIC, follow_redirects=False)
+    r = client.post(
+        f"/admin/users/{user['id']}/premium", data={"days": "30"}, headers=admin_enabled, follow_redirects=False
+    )
     assert r.status_code == 303
     assert client.get("/auth/me", headers=headers).json()["is_premium"] is True
 
-    r = client.post(f"/admin/users/{user['id']}/premium/revoke", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/premium/revoke", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     me = client.get("/auth/me", headers=headers).json()
     assert me["is_premium"] is False
@@ -640,8 +641,12 @@ def test_admin_grant_and_revoke_premium(client, admin_enabled, alice):
 
 def test_admin_grant_premium_extends_active_subscription(client, admin_enabled, alice):
     user, headers = alice
-    client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=BASIC, follow_redirects=False)
-    client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=BASIC, follow_redirects=False)
+    client.post(
+        f"/admin/users/{user['id']}/premium", data={"days": "30"}, headers=admin_enabled, follow_redirects=False
+    )
+    client.post(
+        f"/admin/users/{user['id']}/premium", data={"days": "30"}, headers=admin_enabled, follow_redirects=False
+    )
     db = SessionLocal()
     try:
         until = db.get(User, user["id"]).premium_until
@@ -652,20 +657,22 @@ def test_admin_grant_premium_extends_active_subscription(client, admin_enabled, 
 
 def test_admin_grant_premium_invalid_days_rejected(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "0"}, auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "0"}, headers=admin_enabled)
     assert r.status_code == 422
 
 
 def test_admin_grant_premium_no_field_rejected(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/premium", data={}, auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/premium", data={}, headers=admin_enabled)
     assert r.status_code == 422
 
 
 def test_admin_grant_premium_large_days_allowed(client, admin_enabled, alice):
     """The old 3650-day cap was an arbitrary sanity limit, not a real constraint."""
     user, headers = alice
-    r = client.post(f"/admin/users/{user['id']}/premium", data={"days": "999999"}, auth=BASIC, follow_redirects=False)
+    r = client.post(
+        f"/admin/users/{user['id']}/premium", data={"days": "999999"}, headers=admin_enabled, follow_redirects=False
+    )
     assert r.status_code == 303
     assert client.get("/auth/me", headers=headers).json()["is_premium"] is True
 
@@ -674,7 +681,7 @@ def test_admin_grant_premium_until_date(client, admin_enabled, alice):
     user, headers = alice
     until = (utcnow() + timedelta(days=10)).date().isoformat()
     r = client.post(
-        f"/admin/users/{user['id']}/premium", data={"until_date": until}, auth=BASIC, follow_redirects=False
+        f"/admin/users/{user['id']}/premium", data={"until_date": until}, headers=admin_enabled, follow_redirects=False
     )
     assert r.status_code == 303
     me = client.get("/auth/me", headers=headers).json()
@@ -685,13 +692,15 @@ def test_admin_grant_premium_until_date(client, admin_enabled, alice):
 def test_admin_grant_premium_until_date_in_past_rejected(client, admin_enabled, alice):
     user, _ = alice
     until = (utcnow() - timedelta(days=1)).date().isoformat()
-    r = client.post(f"/admin/users/{user['id']}/premium", data={"until_date": until}, auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/premium", data={"until_date": until}, headers=admin_enabled)
     assert r.status_code == 422
 
 
 def test_admin_grant_premium_forever(client, admin_enabled, alice):
     user, headers = alice
-    r = client.post(f"/admin/users/{user['id']}/premium", data={"forever": "1"}, auth=BASIC, follow_redirects=False)
+    r = client.post(
+        f"/admin/users/{user['id']}/premium", data={"forever": "1"}, headers=admin_enabled, follow_redirects=False
+    )
     assert r.status_code == 303
     me = client.get("/auth/me", headers=headers).json()
     assert me["is_premium"] is True
@@ -703,20 +712,20 @@ def test_admin_verify_and_unverify(client, admin_enabled, alice):
     _set_premium(user["id"])
     client.post("/premium/verification-request", headers=headers)
 
-    r = client.post(f"/admin/users/{user['id']}/verify", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/verify", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     me = client.get("/auth/me", headers=headers).json()
     assert me["verified"] is True
     assert me["verification_requested"] is False
     assert me["badge"] == "verified"
 
-    client.post(f"/admin/users/{user['id']}/unverify", auth=BASIC, follow_redirects=False)
+    client.post(f"/admin/users/{user['id']}/unverify", headers=admin_enabled, follow_redirects=False)
     assert client.get("/auth/me", headers=headers).json()["verified"] is False
 
 
 def test_admin_premium_actions_missing_user_not_found(client, admin_enabled):
-    assert client.post("/admin/users/9999/premium", data={"days": "30"}, auth=BASIC).status_code == 404
-    assert client.post("/admin/users/9999/verify", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/premium", data={"days": "30"}, headers=admin_enabled).status_code == 404
+    assert client.post("/admin/users/9999/verify", headers=admin_enabled).status_code == 404
 
 
 # ---------- feature-disabled kill-switch paths ----------

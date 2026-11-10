@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.275749 )
-[//]: # (+ Revised: 	2026/08/21 16:27:43.554512 )
+[//]: # (+ Revised: 	2026/11/09 23:36:38.607478 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Environment variables
@@ -62,7 +62,9 @@ onward and are edited from `{ADMIN_PATH}/settings`, not `.env`.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | empty | HTTP Basic credentials for the admin panel. The panel returns 503 until **both** are set — there's no way to accidentally expose it with a blank password. |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | empty | Sign-in for the admin panel's login page (`<ADMIN_PATH>/login`), together with an authenticator code. The panel returns 503 until these **and** `ADMIN_TOTP_SECRET` are set — there's no way to accidentally expose it with a blank password. Changing either signs every admin session out. |
+| `ADMIN_TOTP_SECRET` | empty | Base32 secret for the authenticator-app (TOTP) code the login page asks for. Required for the panel. Generate one with `uv run admin-totp` (prints the secret, a QR code to scan and the `.env` line). Validated at boot: a value that isn't base32 stops the server with `ADMIN_TOTP_SECRET is not valid base32`. Rotating it signs every admin session out. **Stays in `.env`**. |
+| `ADMIN_API_TOKEN` | empty | Bearer token for the admin routes a script calls (the APK upload and delete renar-frontend's `uv run build apk --split --publish` uses), since a script can't type an authenticator code. Empty means no token is accepted. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. **Stays in `.env`**. |
 | `ADMIN_PATH` | `/admin` | URL the admin panel is served at. Renaming it to something unguessable (e.g. `/nimda`, `/panel-x7k2`) is the main defense for this endpoint — see below, the *default* `/admin` path then automatically becomes a honeypot that permabans anyone who requests it. |
 | `INTERNAL_SERVICE_SECRET` | empty | Shared secret for `/svc/bans` (see [anti-abuse.md](anti-abuse.md#sharing-bans-with-the-frontend)), which lets the renar-frontend web server's own anti-abuse guard read and add to this server's `banned_ips` table. Empty means the endpoints stay 404 to everyone, same posture as an unset admin panel. Must match `RENAR_INTERNAL_SECRET` in the frontend's `.env`. |
 

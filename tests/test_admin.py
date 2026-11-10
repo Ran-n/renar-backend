@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/11/09 11:50:00.486676
+Revised: 2026/11/09 23:36:41.962902
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -11,7 +11,6 @@ import base64
 import io
 from datetime import timedelta
 
-from conftest import ADMIN_BASIC as BASIC
 from conftest import PASSWORD
 
 from renar_backend.database import SessionLocal
@@ -32,18 +31,20 @@ from renar_backend.models import (
 
 
 def test_admin_unavailable_until_configured(client):
-    r = client.get("/admin", auth=BASIC)
+    r = client.get("/admin")
     assert r.status_code == 503
 
 
-def test_admin_wrong_credentials_unauthorized(client, admin_enabled):
-    assert client.get("/admin", auth=("root", "wrong")).status_code == 401
-    assert client.get("/admin").status_code == 401
+def test_admin_basic_auth_no_longer_accepted(client, admin_enabled):
+    """The old HTTP Basic credentials are ignored: only the session cookie counts."""
+    r = client.get("/admin", auth=("root", "hunter2secret"), follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/admin/login")
 
 
 def test_admin_dashboard_and_user_list(client, admin_enabled, alice):
-    assert client.get("/admin", auth=BASIC).status_code == 200
-    r = client.get("/admin/users", auth=BASIC)
+    assert client.get("/admin", headers=admin_enabled).status_code == 200
+    r = client.get("/admin/users", headers=admin_enabled)
     assert r.status_code == 200
     assert "alice" in r.text
 
@@ -62,7 +63,7 @@ def test_admin_delete_user_removes_all_data(client, admin_enabled, alice):
     finally:
         db.close()
 
-    r = client.post(f"/admin/users/{user['id']}/delete", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/delete", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -75,12 +76,12 @@ def test_admin_delete_user_removes_all_data(client, admin_enabled, alice):
 
 
 def test_admin_delete_missing_user_not_found(client, admin_enabled):
-    r = client.post("/admin/users/9999/delete", auth=BASIC)
+    r = client.post("/admin/users/9999/delete", headers=admin_enabled)
     assert r.status_code == 404
 
 
 def test_admin_user_list_shows_usage_stats(client, admin_enabled, alice):
-    r = client.get("/admin/users", auth=BASIC)
+    r = client.get("/admin/users", headers=admin_enabled)
     assert r.status_code == 200
     for column in ("Logins", "Requests", "Last login", "Last active"):
         assert column in r.text
@@ -88,7 +89,7 @@ def test_admin_user_list_shows_usage_stats(client, admin_enabled, alice):
 
 def test_admin_user_list_links_to_detail(client, admin_enabled, alice):
     user, _ = alice
-    r = client.get("/admin/users", auth=BASIC)
+    r = client.get("/admin/users", headers=admin_enabled)
     assert f'href="/admin/users/{user["id"]}"' in r.text
 
 
@@ -104,7 +105,7 @@ def test_admin_user_list_shows_bypassed_confirmation_count(client, admin_enabled
     finally:
         db.close()
 
-    r = client.get("/admin/users", auth=BASIC)
+    r = client.get("/admin/users", headers=admin_enabled)
     assert r.status_code == 200
     assert "Bypassed Confirmation" in r.text
     assert '<div class="stat-value" id="stat-bypassed-confirmation">1</div>' in r.text
@@ -115,26 +116,28 @@ def test_admin_user_list_shows_bypassed_confirmation_count(client, admin_enabled
 
 def test_admin_edit_username(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/edit", data={"username": "renamed"}, auth=BASIC, follow_redirects=False)
+    r = client.post(
+        f"/admin/users/{user['id']}/edit", data={"username": "renamed"}, headers=admin_enabled, follow_redirects=False
+    )
     assert r.status_code == 303
-    assert "renamed" in client.get("/admin/users", auth=BASIC).text
+    assert "renamed" in client.get("/admin/users", headers=admin_enabled).text
 
 
 def test_admin_edit_username_conflict(client, admin_enabled, alice, bob):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/edit", data={"username": "bob"}, auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/edit", data={"username": "bob"}, headers=admin_enabled)
     assert r.status_code == 409
 
 
 def test_admin_edit_email(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/edit", data={"email": "moved@example.com"}, auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/edit", data={"email": "moved@example.com"}, headers=admin_enabled)
     assert r.status_code in (200, 303)
 
 
 def test_admin_edit_email_invalid_rejected(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/edit", data={"email": "not-an-email"}, auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/edit", data={"email": "not-an-email"}, headers=admin_enabled)
     assert r.status_code == 422
 
 
@@ -145,20 +148,24 @@ def test_admin_edit_email_normalized(client, admin_enabled, alice, bob):
     normalization catches this)."""
     alice_user, _ = alice
     bob_user, _ = bob
-    r = client.post(f"/admin/users/{alice_user['id']}/edit", data={"email": "  New@Example.com  "}, auth=BASIC)
+    r = client.post(
+        f"/admin/users/{alice_user['id']}/edit", data={"email": "  New@Example.com  "}, headers=admin_enabled
+    )
     assert r.status_code in (200, 303)
-    r = client.get(f"/admin/users/{alice_user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{alice_user['id']}", headers=admin_enabled)
     assert "new@example.com" in r.text
 
-    conflict = client.post(f"/admin/users/{bob_user['id']}/edit", data={"email": " NEW@EXAMPLE.COM "}, auth=BASIC)
+    conflict = client.post(
+        f"/admin/users/{bob_user['id']}/edit", data={"email": " NEW@EXAMPLE.COM "}, headers=admin_enabled
+    )
     assert conflict.status_code == 409
 
 
 def test_admin_edit_username_normalized(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/edit", data={"username": "  spaced  "}, auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/edit", data={"username": "  spaced  "}, headers=admin_enabled)
     assert r.status_code in (200, 303)
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "spaced" in r.text
     assert "  spaced  " not in r.text
 
@@ -166,7 +173,10 @@ def test_admin_edit_username_normalized(client, admin_enabled, alice):
 def test_admin_set_password_takes_effect(client, admin_enabled, alice):
     user, _ = alice
     r = client.post(
-        f"/admin/users/{user['id']}/password", data={"new_password": "brandnew99"}, auth=BASIC, follow_redirects=False
+        f"/admin/users/{user['id']}/password",
+        data={"new_password": "brandnew99"},
+        headers=admin_enabled,
+        follow_redirects=False,
     )
     assert r.status_code == 303
     assert client.post("/auth/login", data={"username": "alice", "password": PASSWORD}).status_code == 401
@@ -175,14 +185,17 @@ def test_admin_set_password_takes_effect(client, admin_enabled, alice):
 
 def test_admin_set_password_too_short_rejected(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/password", data={"new_password": "short"}, auth=BASIC)
+    r = client.post(f"/admin/users/{user['id']}/password", data={"new_password": "short"}, headers=admin_enabled)
     assert r.status_code == 422
 
 
 def test_admin_edit_unknown_user_not_found(client, admin_enabled):
-    assert client.post("/admin/users/9999/edit", data={"username": "x"}, auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/edit", data={"username": "x"}, headers=admin_enabled).status_code == 404
     assert (
-        client.post("/admin/users/9999/password", data={"new_password": "longenough1"}, auth=BASIC).status_code == 404
+        client.post(
+            "/admin/users/9999/password", data={"new_password": "longenough1"}, headers=admin_enabled
+        ).status_code
+        == 404
     )
 
 
@@ -197,7 +210,7 @@ def test_admin_account_actions_require_auth(client, admin_enabled, alice):
 
 def test_admin_user_detail_requires_auth(client, admin_enabled, alice):
     user, _ = alice
-    assert client.get(f"/admin/users/{user['id']}").status_code == 401
+    assert client.get(f"/admin/users/{user['id']}", follow_redirects=False).status_code == 303  # to the login page
 
 
 def test_admin_user_detail_renders_charts(client, admin_enabled, alice):
@@ -205,7 +218,7 @@ def test_admin_user_detail_renders_charts(client, admin_enabled, alice):
     client.post("/media", json={"media_type": "film", "title": "Heat"}, headers=headers)
     client.post("/comments", json={"media_type": "film", "title": "Heat", "text": "great"}, headers=headers)
 
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert r.status_code == 200
     for section in (
         "Connections per day",
@@ -222,7 +235,7 @@ def test_admin_user_detail_renders_charts(client, admin_enabled, alice):
 def test_admin_user_detail_has_requests_per_day_and_actions(client, admin_enabled, alice):
     user, headers = alice
     client.get("/auth/me", headers=headers)  # generate request usage
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert r.status_code == 200
     # requests show as a per-day chart, with a link to the endpoint breakdown page;
     # no per-endpoint list lives on this page
@@ -237,7 +250,7 @@ def test_admin_user_detail_has_requests_per_day_and_actions(client, admin_enable
 
 
 def test_admin_user_detail_unknown_not_found(client, admin_enabled):
-    assert client.get("/admin/users/9999", auth=BASIC).status_code == 404
+    assert client.get("/admin/users/9999", headers=admin_enabled).status_code == 404
 
 
 def test_admin_delete_user_removes_login_events(client, admin_enabled, alice):
@@ -248,7 +261,7 @@ def test_admin_delete_user_removes_login_events(client, admin_enabled, alice):
     finally:
         db.close()
 
-    r = client.post(f"/admin/users/{user['id']}/delete", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/delete", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -272,14 +285,14 @@ def _post_comment(client, headers, text: str) -> dict:
 
 
 def test_admin_comments_requires_auth(client, admin_enabled):
-    assert client.get("/admin/comments").status_code == 401
+    assert client.get("/admin/comments", follow_redirects=False).status_code == 303  # to the login page
 
 
 def test_admin_comments_page_shows_text(client, admin_enabled, alice):
     _, headers = alice
     _post_comment(client, headers, "an amazing heist movie")
 
-    r = client.get("/admin/comments", auth=BASIC)
+    r = client.get("/admin/comments", headers=admin_enabled)
     assert r.status_code == 200
     assert "an amazing heist movie" in r.text
     assert "alice" in r.text
@@ -291,14 +304,14 @@ def test_admin_comments_filter_by_user(client, admin_enabled, alice, bob):
     _post_comment(client, alice_headers, "from alice")
     _post_comment(client, bob_headers, "from bob")
 
-    r = client.get(f"/admin/comments?user_id={alice_user['id']}", auth=BASIC)
+    r = client.get(f"/admin/comments?user_id={alice_user['id']}", headers=admin_enabled)
     assert r.status_code == 200
     assert "from alice" in r.text
     assert "from bob" not in r.text
 
 
 def test_admin_comments_filter_unknown_user_not_found(client, admin_enabled):
-    assert client.get("/admin/comments?user_id=9999", auth=BASIC).status_code == 404
+    assert client.get("/admin/comments?user_id=9999", headers=admin_enabled).status_code == 404
 
 
 def test_admin_delete_comment_removes_comment_and_likes(client, admin_enabled, alice, bob):
@@ -307,7 +320,7 @@ def test_admin_delete_comment_removes_comment_and_likes(client, admin_enabled, a
     comment = _post_comment(client, alice_headers, "soon to be gone")
     assert client.post(f"/comments/{comment['id']}/like", headers=bob_headers).status_code == 204
 
-    r = client.post(f"/admin/comments/{comment['id']}/delete", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/comments/{comment['id']}/delete", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -319,7 +332,7 @@ def test_admin_delete_comment_removes_comment_and_likes(client, admin_enabled, a
 
 
 def test_admin_delete_missing_comment_not_found(client, admin_enabled):
-    assert client.post("/admin/comments/9999/delete", auth=BASIC).status_code == 404
+    assert client.post("/admin/comments/9999/delete", headers=admin_enabled).status_code == 404
 
 
 def test_admin_comments_page_shows_report_count(client, admin_enabled, alice, bob):
@@ -328,7 +341,7 @@ def test_admin_comments_page_shows_report_count(client, admin_enabled, alice, bo
     comment = _post_comment(client, alice_headers, "reported comment")
     assert client.post(f"/comments/{comment['id']}/report", headers=bob_headers).status_code == 204
 
-    r = client.get("/admin/comments", auth=BASIC)
+    r = client.get("/admin/comments", headers=admin_enabled)
     assert r.status_code == 200
     assert "Reports" in r.text
     assert "&#x2691; 1" in r.text
@@ -340,7 +353,7 @@ def test_admin_delete_user_removes_filed_reports(client, admin_enabled, alice, b
     comment = _post_comment(client, alice_headers, "flagged by bob")
     assert client.post(f"/comments/{comment['id']}/report", headers=bob_headers).status_code == 204
 
-    r = client.post(f"/admin/users/{bob_user['id']}/delete", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{bob_user['id']}/delete", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -355,7 +368,7 @@ def test_admin_delete_user_removes_filed_reports(client, admin_enabled, alice, b
 
 
 def test_admin_settings_page_renders(client, admin_enabled):
-    r = client.get("/admin/settings", auth=BASIC)
+    r = client.get("/admin/settings", headers=admin_enabled)
     assert r.status_code == 200
     assert "Site Settings" in r.text
     assert "registration_open" in r.text
@@ -365,7 +378,7 @@ def test_admin_settings_page_renders(client, admin_enabled):
 
 
 def test_admin_settings_page_requires_auth(client, admin_enabled):
-    assert client.get("/admin/settings").status_code == 401
+    assert client.get("/admin/settings", follow_redirects=False).status_code == 303  # to the login page
 
 
 def test_admin_settings_post_updates_and_persists(client, admin_enabled):
@@ -392,7 +405,7 @@ def test_admin_settings_post_updates_and_persists(client, admin_enabled):
         "deletion_grace_days": "30",
         # invite_only omitted → False (unchecked checkbox)
     }
-    r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
+    r = client.post("/admin/settings", data=payload, headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -432,9 +445,9 @@ def test_admin_settings_page_renders_exempt_ip_pills(client, admin_enabled):
         "deletion_grace_days": "30",
         "exempt_ips": "127.0.0.1, ::1",
     }
-    client.post("/admin/settings", data=payload, auth=BASIC)
+    client.post("/admin/settings", data=payload, headers=admin_enabled)
 
-    r = client.get("/admin/settings", auth=BASIC)
+    r = client.get("/admin/settings", headers=admin_enabled)
     assert r.status_code == 200
     # one pill per exempt IP, plus the hidden field the form actually submits
     assert '<span class="tag-pill" data-value="127.0.0.1">127.0.0.1' in r.text
@@ -466,7 +479,7 @@ def test_admin_settings_invite_only_toggle(client, admin_enabled):
         "username_cooldown_days": "30",
         "deletion_grace_days": "30",
     }
-    r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
+    r = client.post("/admin/settings", data=payload, headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -481,14 +494,14 @@ def test_admin_settings_invite_only_toggle(client, admin_enabled):
 
 
 def test_admin_periodic_tasks_page_renders(client, admin_enabled):
-    r = client.get("/admin/periodic-tasks", auth=BASIC)
+    r = client.get("/admin/periodic-tasks", headers=admin_enabled)
     assert r.status_code == 200
     assert "Episode check" in r.text
     assert "Never run" in r.text
 
 
 def test_admin_periodic_tasks_grouped_by_media_type(client, admin_enabled):
-    r = client.get("/admin/periodic-tasks", auth=BASIC)
+    r = client.get("/admin/periodic-tasks", headers=admin_enabled)
     for group in ("TV Shows", "Films", "Security"):
         assert group in r.text
     # both TV-show tasks land under the same "TV Shows" section
@@ -498,14 +511,14 @@ def test_admin_periodic_tasks_grouped_by_media_type(client, admin_enabled):
 
 
 def test_admin_periodic_tasks_page_requires_auth(client, admin_enabled):
-    assert client.get("/admin/periodic-tasks").status_code == 401
+    assert client.get("/admin/periodic-tasks", follow_redirects=False).status_code == 303  # to the login page
 
 
 def test_admin_periodic_tasks_toggle_persists(client, admin_enabled):
     r = client.post(
         "/admin/periodic-tasks/toggle",
         data={"task_key": "film_check", "value": "0"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -517,7 +530,7 @@ def test_admin_periodic_tasks_toggle_persists(client, admin_enabled):
     finally:
         db.close()
 
-    assert "Disabled" in client.get("/admin/periodic-tasks", auth=BASIC).text
+    assert "Disabled" in client.get("/admin/periodic-tasks", headers=admin_enabled).text
 
 
 def test_admin_periodic_tasks_toggle_is_atomized(client, admin_enabled):
@@ -528,7 +541,7 @@ def test_admin_periodic_tasks_toggle_is_atomized(client, admin_enabled):
     client.post(
         "/admin/periodic-tasks/toggle",
         data={"task_key": "episode_check", "value": "0"},
-        auth=BASIC,
+        headers=admin_enabled,
     )
     assert task_runs.is_enabled("episode_check") is False
     assert task_runs.is_enabled("episode_history_sync") is True
@@ -538,7 +551,7 @@ def test_admin_periodic_tasks_toggle_rejects_unknown_task(client, admin_enabled)
     r = client.post(
         "/admin/periodic-tasks/toggle",
         data={"task_key": "not_a_real_task", "value": "1"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -560,7 +573,7 @@ def test_admin_periodic_tasks_shows_recorded_run(client, admin_enabled):
     from renar_backend.models import utcnow
 
     task_runs.record_run("episode_check", utcnow(), "ok", "3 new notifications")
-    r = client.get("/admin/periodic-tasks", auth=BASIC)
+    r = client.get("/admin/periodic-tasks", headers=admin_enabled)
     assert "3 new notifications" in r.text
     assert "OK" in r.text
 
@@ -570,7 +583,7 @@ def test_admin_periodic_tasks_shows_error_status(client, admin_enabled):
     from renar_backend.models import utcnow
 
     task_runs.record_run("strike_cleanup", utcnow(), "error", "db timeout")
-    r = client.get("/admin/periodic-tasks", auth=BASIC)
+    r = client.get("/admin/periodic-tasks", headers=admin_enabled)
     assert "db timeout" in r.text
     assert "Error" in r.text
 
@@ -579,7 +592,7 @@ def test_admin_periodic_tasks_interval_persists(client, admin_enabled):
     r = client.post(
         "/admin/periodic-tasks/interval",
         data={"task_key": "episode_check", "minutes": "45"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -591,7 +604,7 @@ def test_admin_periodic_tasks_interval_persists(client, admin_enabled):
     finally:
         db.close()
 
-    assert 'value="45"' in client.get("/admin/periodic-tasks", auth=BASIC).text
+    assert 'value="45"' in client.get("/admin/periodic-tasks", headers=admin_enabled).text
 
 
 def test_admin_periodic_tasks_interval_is_atomized(client, admin_enabled):
@@ -602,7 +615,7 @@ def test_admin_periodic_tasks_interval_is_atomized(client, admin_enabled):
     client.post(
         "/admin/periodic-tasks/interval",
         data={"task_key": "episode_check", "minutes": "30"},
-        auth=BASIC,
+        headers=admin_enabled,
     )
     assert task_runs.get_interval_minutes("episode_check") == 30
     assert task_runs.get_interval_minutes("episode_history_sync") == 360  # untouched default
@@ -612,7 +625,7 @@ def test_admin_periodic_tasks_interval_rejects_out_of_range(client, admin_enable
     r = client.post(
         "/admin/periodic-tasks/interval",
         data={"task_key": "film_check", "minutes": "0"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -628,7 +641,7 @@ def test_admin_periodic_tasks_interval_rejects_unknown_task(client, admin_enable
     r = client.post(
         "/admin/periodic-tasks/interval",
         data={"task_key": "not_a_real_task", "minutes": "30"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -734,20 +747,20 @@ def test_task_runs_state_falls_back_to_defaults_on_load_error(admin_enabled, mon
 
 
 def test_admin_invites_page_renders(client, admin_enabled):
-    r = client.get("/admin/invites", auth=BASIC)
+    r = client.get("/admin/invites", headers=admin_enabled)
     assert r.status_code == 200
     assert "Invite Codes" in r.text
 
 
 def test_admin_invites_page_requires_auth(client, admin_enabled):
-    assert client.get("/admin/invites").status_code == 401
+    assert client.get("/admin/invites", follow_redirects=False).status_code == 303  # to the login page
 
 
 def test_admin_create_invite_code(client, admin_enabled):
     r = client.post(
         "/admin/invites/create",
         data={"max_uses": "3"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -768,7 +781,7 @@ def test_admin_create_unlimited_invite_code(client, admin_enabled):
     r = client.post(
         "/admin/invites/create",
         data={"max_uses": ""},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -783,13 +796,13 @@ def test_admin_create_unlimited_invite_code(client, admin_enabled):
 
 
 def test_admin_create_invite_rejects_zero_uses(client, admin_enabled):
-    r = client.post("/admin/invites/create", data={"max_uses": "0"}, auth=BASIC)
+    r = client.post("/admin/invites/create", data={"max_uses": "0"}, headers=admin_enabled)
     assert r.status_code == 422
 
 
 def test_admin_create_invite_appears_on_page(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
-    r = client.get("/admin/invites", auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "1"}, headers=admin_enabled)
+    r = client.get("/admin/invites", headers=admin_enabled)
     assert r.status_code == 200
 
     db = SessionLocal()
@@ -801,7 +814,7 @@ def test_admin_create_invite_appears_on_page(client, admin_enabled):
 
 
 def test_admin_create_invite_records_admin_username(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "1"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -811,12 +824,12 @@ def test_admin_create_invite_records_admin_username(client, admin_enabled):
     finally:
         db.close()
 
-    r = client.get("/admin/invites", auth=BASIC)
+    r = client.get("/admin/invites", headers=admin_enabled)
     assert 'class="td-email">root</td>' in r.text
 
 
 def test_admin_revoke_invite_marks_revoked(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "5"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -826,7 +839,7 @@ def test_admin_revoke_invite_marks_revoked(client, admin_enabled):
     finally:
         db.close()
 
-    r = client.post(f"/admin/invites/{code_id}/revoke", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/invites/{code_id}/revoke", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -838,7 +851,7 @@ def test_admin_revoke_invite_marks_revoked(client, admin_enabled):
 
 
 def test_admin_restore_invite_clears_revoked(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "5"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -846,9 +859,9 @@ def test_admin_restore_invite_clears_revoked(client, admin_enabled):
     finally:
         db.close()
 
-    client.post(f"/admin/invites/{code_id}/revoke", auth=BASIC)
+    client.post(f"/admin/invites/{code_id}/revoke", headers=admin_enabled)
 
-    r = client.post(f"/admin/invites/{code_id}/restore", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/invites/{code_id}/restore", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -859,12 +872,12 @@ def test_admin_restore_invite_clears_revoked(client, admin_enabled):
 
 
 def test_admin_restore_invite_missing_returns_404(client, admin_enabled):
-    r = client.post("/admin/invites/999999/restore", auth=BASIC)
+    r = client.post("/admin/invites/999999/restore", headers=admin_enabled)
     assert r.status_code == 404
 
 
 def test_admin_delete_invite_removes_row(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "5"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -873,7 +886,7 @@ def test_admin_delete_invite_removes_row(client, admin_enabled):
     finally:
         db.close()
 
-    r = client.post(f"/admin/invites/{code_id}/delete", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/invites/{code_id}/delete", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -884,12 +897,12 @@ def test_admin_delete_invite_removes_row(client, admin_enabled):
 
 
 def test_admin_delete_invite_missing_returns_404(client, admin_enabled):
-    r = client.post("/admin/invites/999999/delete", auth=BASIC)
+    r = client.post("/admin/invites/999999/delete", headers=admin_enabled)
     assert r.status_code == 404
 
 
 def test_admin_invites_page_shows_reset_uses_when_only_exhausted(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "1"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -901,14 +914,14 @@ def test_admin_invites_page_shows_reset_uses_when_only_exhausted(client, admin_e
     finally:
         db.close()
 
-    r = client.get("/admin/invites", auth=BASIC)
+    r = client.get("/admin/invites", headers=admin_enabled)
     assert 'data-status="exhausted"' in r.text
     assert "Reset uses" in r.text
     assert '<details class="restore-expiry">' not in r.text
 
 
 def test_admin_reset_invite_uses_clears_uses(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "1"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -920,7 +933,7 @@ def test_admin_reset_invite_uses_clears_uses(client, admin_enabled):
     finally:
         db.close()
 
-    r = client.post(f"/admin/invites/{code_id}/reset-uses", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/invites/{code_id}/reset-uses", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -933,12 +946,12 @@ def test_admin_reset_invite_uses_clears_uses(client, admin_enabled):
 
 
 def test_admin_reset_invite_uses_missing_returns_404(client, admin_enabled):
-    r = client.post("/admin/invites/999999/reset-uses", auth=BASIC)
+    r = client.post("/admin/invites/999999/reset-uses", headers=admin_enabled)
     assert r.status_code == 404
 
 
 def test_admin_restore_invite_expiry_sets_new_expiry_and_resets_uses(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "5"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -954,7 +967,7 @@ def test_admin_restore_invite_expiry_sets_new_expiry_and_resets_uses(client, adm
     r = client.post(
         f"/admin/invites/{code_id}/restore-expiry",
         data={"expires_at": new_expires},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -969,7 +982,7 @@ def test_admin_restore_invite_expiry_sets_new_expiry_and_resets_uses(client, adm
 
 
 def test_admin_restore_invite_expiry_blank_means_never(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "5"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "5"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -983,7 +996,7 @@ def test_admin_restore_invite_expiry_blank_means_never(client, admin_enabled):
     r = client.post(
         f"/admin/invites/{code_id}/restore-expiry",
         data={"expires_at": ""},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -996,14 +1009,14 @@ def test_admin_restore_invite_expiry_blank_means_never(client, admin_enabled):
 
 
 def test_admin_restore_invite_expiry_missing_returns_404(client, admin_enabled):
-    r = client.post("/admin/invites/999999/restore-expiry", auth=BASIC, data={"expires_at": ""})
+    r = client.post("/admin/invites/999999/restore-expiry", headers=admin_enabled, data={"expires_at": ""})
     assert r.status_code == 404
 
 
 def test_admin_invites_page_labels_exhaustion_before_expiry(client, admin_enabled):
     """A code that hit its use cap before it expired should show as
     "Exhausted", not "Expired", even though the expiry check runs first."""
-    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "1"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -1016,7 +1029,7 @@ def test_admin_invites_page_labels_exhaustion_before_expiry(client, admin_enable
     finally:
         db.close()
 
-    r = client.get("/admin/invites", auth=BASIC)
+    r = client.get("/admin/invites", headers=admin_enabled)
     assert 'data-status="exhausted"' in r.text
     # also past expires_at, so the combined restore-expiry action (which
     # resets both expires_at and uses together) shows instead of the
@@ -1026,7 +1039,7 @@ def test_admin_invites_page_labels_exhaustion_before_expiry(client, admin_enable
 
 
 def test_admin_invites_page_shows_both_pills_when_expired_and_exhausted(client, admin_enabled):
-    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "1"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -1038,7 +1051,7 @@ def test_admin_invites_page_shows_both_pills_when_expired_and_exhausted(client, 
     finally:
         db.close()
 
-    r = client.get("/admin/invites", auth=BASIC)
+    r = client.get("/admin/invites", headers=admin_enabled)
     assert '<div class="status-pills">' in r.text
     assert ">Expired<" in r.text
     assert ">Exhausted<" in r.text
@@ -1047,7 +1060,7 @@ def test_admin_invites_page_shows_both_pills_when_expired_and_exhausted(client, 
 def test_admin_invites_page_labels_expiry_before_exhaustion(client, admin_enabled):
     """A code that expired before it was ever fully used should still show
     as "Expired", not "Exhausted"."""
-    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "1"}, headers=admin_enabled)
 
     db = SessionLocal()
     try:
@@ -1060,7 +1073,7 @@ def test_admin_invites_page_labels_expiry_before_exhaustion(client, admin_enable
     finally:
         db.close()
 
-    r = client.get("/admin/invites", auth=BASIC)
+    r = client.get("/admin/invites", headers=admin_enabled)
     assert 'data-status="expired"' in r.text
 
 
@@ -1091,10 +1104,10 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
         "username_cooldown_days": "30",
         "deletion_grace_days": "30",
     }
-    client.post("/admin/settings", data=payload_settings, auth=BASIC)
+    client.post("/admin/settings", data=payload_settings, headers=admin_enabled)
     site_settings.invalidate()
 
-    client.post("/admin/invites/create", data={"max_uses": "1"}, auth=BASIC)
+    client.post("/admin/invites/create", data={"max_uses": "1"}, headers=admin_enabled)
     db = SessionLocal()
     try:
         code_row = db.query(InviteCode).first()
@@ -1103,7 +1116,7 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
     finally:
         db.close()
 
-    client.post(f"/admin/invites/{code_id}/revoke", auth=BASIC)
+    client.post(f"/admin/invites/{code_id}/revoke", headers=admin_enabled)
 
     r = client.post(
         "/auth/register",
@@ -1117,7 +1130,7 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
 
 def test_admin_ban_user(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/ban", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/ban", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     db = SessionLocal()
     try:
@@ -1127,7 +1140,7 @@ def test_admin_ban_user(client, admin_enabled, alice):
 
 
 def test_admin_ban_missing_user_not_found(client, admin_enabled):
-    assert client.post("/admin/users/9999/ban", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/ban", headers=admin_enabled).status_code == 404
 
 
 def test_admin_unban_user(client, admin_enabled, alice):
@@ -1138,7 +1151,7 @@ def test_admin_unban_user(client, admin_enabled, alice):
         db.commit()
     finally:
         db.close()
-    r = client.post(f"/admin/users/{user['id']}/unban", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/unban", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     db = SessionLocal()
     try:
@@ -1148,14 +1161,14 @@ def test_admin_unban_user(client, admin_enabled, alice):
 
 
 def test_admin_unban_missing_user_not_found(client, admin_enabled):
-    assert client.post("/admin/users/9999/unban", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/unban", headers=admin_enabled).status_code == 404
 
 
 # ---------- premium revoke 404 ----------
 
 
 def test_admin_revoke_premium_missing_user(client, admin_enabled):
-    assert client.post("/admin/users/9999/premium/revoke", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/premium/revoke", headers=admin_enabled).status_code == 404
 
 
 # ---------- cancel deletion ----------
@@ -1169,7 +1182,7 @@ def test_admin_cancel_deletion(client, admin_enabled, alice):
         assert db.get(User, user["id"]).deletion_requested_at is not None
     finally:
         db.close()
-    r = client.post(f"/admin/users/{user['id']}/cancel-deletion", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/cancel-deletion", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     db = SessionLocal()
     try:
@@ -1179,7 +1192,7 @@ def test_admin_cancel_deletion(client, admin_enabled, alice):
 
 
 def test_admin_cancel_deletion_missing_user(client, admin_enabled):
-    assert client.post("/admin/users/9999/cancel-deletion", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/cancel-deletion", headers=admin_enabled).status_code == 404
 
 
 # ---------- reviewer whitelist ----------
@@ -1187,7 +1200,7 @@ def test_admin_cancel_deletion_missing_user(client, admin_enabled):
 
 def test_admin_whitelist_review(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/whitelist-review", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     db = SessionLocal()
     try:
@@ -1197,14 +1210,14 @@ def test_admin_whitelist_review(client, admin_enabled, alice):
 
 
 def test_admin_whitelist_review_missing_user(client, admin_enabled):
-    assert client.post("/admin/users/9999/whitelist-review", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/whitelist-review", headers=admin_enabled).status_code == 404
 
 
 def test_admin_whitelist_review_already_whitelisted_noop(client, admin_enabled, alice):
     """Second POST when user is already whitelisted must not error (skips the if body)."""
     user, _ = alice
-    client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC)
-    r = client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC, follow_redirects=False)
+    client.post(f"/admin/users/{user['id']}/whitelist-review", headers=admin_enabled)
+    r = client.post(f"/admin/users/{user['id']}/whitelist-review", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     db = SessionLocal()
     try:
@@ -1215,8 +1228,8 @@ def test_admin_whitelist_review_already_whitelisted_noop(client, admin_enabled, 
 
 def test_admin_unwhitelist_review(client, admin_enabled, alice):
     user, _ = alice
-    client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC)
-    r = client.post(f"/admin/users/{user['id']}/unwhitelist-review", auth=BASIC, follow_redirects=False)
+    client.post(f"/admin/users/{user['id']}/whitelist-review", headers=admin_enabled)
+    r = client.post(f"/admin/users/{user['id']}/unwhitelist-review", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     db = SessionLocal()
     try:
@@ -1226,7 +1239,7 @@ def test_admin_unwhitelist_review(client, admin_enabled, alice):
 
 
 def test_admin_unwhitelist_review_missing_user(client, admin_enabled):
-    assert client.post("/admin/users/9999/unwhitelist-review", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/unwhitelist-review", headers=admin_enabled).status_code == 404
 
 
 # ---------- verification ----------
@@ -1240,7 +1253,7 @@ def test_admin_deny_verification(client, admin_enabled, alice):
         db.commit()
     finally:
         db.close()
-    r = client.post(f"/admin/users/{user['id']}/verify/deny", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/verify/deny", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     db = SessionLocal()
     try:
@@ -1250,11 +1263,11 @@ def test_admin_deny_verification(client, admin_enabled, alice):
 
 
 def test_admin_deny_verification_missing_user(client, admin_enabled):
-    assert client.post("/admin/users/9999/verify/deny", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/verify/deny", headers=admin_enabled).status_code == 404
 
 
 def test_admin_unverify_missing_user(client, admin_enabled):
-    assert client.post("/admin/users/9999/unverify", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/unverify", headers=admin_enabled).status_code == 404
 
 
 # ---------- reset login limit / onboarding ----------
@@ -1262,12 +1275,12 @@ def test_admin_unverify_missing_user(client, admin_enabled):
 
 def test_admin_reset_login_limit(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/reset-login-limit", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/reset-login-limit", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
 
 def test_admin_reset_login_limit_missing_user(client, admin_enabled):
-    assert client.post("/admin/users/9999/reset-login-limit", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/reset-login-limit", headers=admin_enabled).status_code == 404
 
 
 def test_admin_reset_onboarding(client, admin_enabled, alice):
@@ -1278,7 +1291,7 @@ def test_admin_reset_onboarding(client, admin_enabled, alice):
         db.commit()
     finally:
         db.close()
-    r = client.post(f"/admin/users/{user['id']}/reset-onboarding", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/reset-onboarding", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     db = SessionLocal()
     try:
@@ -1288,20 +1301,20 @@ def test_admin_reset_onboarding(client, admin_enabled, alice):
 
 
 def test_admin_reset_onboarding_missing_user(client, admin_enabled):
-    assert client.post("/admin/users/9999/reset-onboarding", auth=BASIC).status_code == 404
+    assert client.post("/admin/users/9999/reset-onboarding", headers=admin_enabled).status_code == 404
 
 
 # ---------- user library ----------
 
 
 def test_admin_user_library_missing_user(client, admin_enabled):
-    assert client.get("/admin/users/9999/library", auth=BASIC).status_code == 404
+    assert client.get("/admin/users/9999/library", headers=admin_enabled).status_code == 404
 
 
 def test_admin_user_library_all_entries(client, admin_enabled, alice):
     user, headers = alice
     client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 949}, headers=headers)
-    r = client.get(f"/admin/users/{user['id']}/library", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}/library", headers=admin_enabled)
     assert r.status_code == 200
     assert "Heat" in r.text
     assert "all titles" in r.text
@@ -1310,7 +1323,7 @@ def test_admin_user_library_all_entries(client, admin_enabled, alice):
 def test_admin_user_library_filter_media_type(client, admin_enabled, alice):
     user, headers = alice
     client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 949}, headers=headers)
-    r = client.get(f"/admin/users/{user['id']}/library", params={"media_type": "film"}, auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}/library", params={"media_type": "film"}, headers=admin_enabled)
     assert r.status_code == 200
     assert "Heat" in r.text
     assert "film" in r.text
@@ -1319,7 +1332,7 @@ def test_admin_user_library_filter_media_type(client, admin_enabled, alice):
 def test_admin_user_library_filter_status(client, admin_enabled, alice):
     user, headers = alice
     client.post("/media", json={"media_type": "film", "title": "Heat", "tmdb_id": 949}, headers=headers)
-    r = client.get(f"/admin/users/{user['id']}/library", params={"status": "want_to_watch"}, auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}/library", params={"status": "want_to_watch"}, headers=admin_enabled)
     assert r.status_code == 200
     assert "want to watch" in r.text
 
@@ -1359,16 +1372,16 @@ def test_pagination_nav_multi_page_shows_links():
 
 def test_admin_user_detail_premium_forever_state(client, admin_enabled, alice):
     user, _ = alice
-    client.post(f"/admin/users/{user['id']}/premium", data={"forever": "1"}, auth=BASIC)
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    client.post(f"/admin/users/{user['id']}/premium", data={"forever": "1"}, headers=admin_enabled)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert r.status_code == 200
     assert "Premium active forever" in r.text
 
 
 def test_admin_user_detail_premium_active_shows_revoke(client, admin_enabled, alice):
     user, _ = alice
-    client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, auth=BASIC)
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    client.post(f"/admin/users/{user['id']}/premium", data={"days": "30"}, headers=admin_enabled)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "Premium active until" in r.text
     assert "Revoke premium" in r.text
 
@@ -1383,7 +1396,7 @@ def test_admin_user_detail_premium_lapsed_shows_revoke(client, admin_enabled, al
         db.commit()
     finally:
         db.close()
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "Premium lapsed" in r.text
     assert "Revoke premium" in r.text  # premium_until is set even when lapsed
 
@@ -1396,7 +1409,7 @@ def test_admin_user_detail_verified_shows_revoke_and_badge(client, admin_enabled
         db.commit()
     finally:
         db.close()
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "Revoke verified" in r.text
     assert "xg-verified" in r.text  # _premium_pills verified badge SVG
 
@@ -1409,7 +1422,7 @@ def test_admin_user_detail_verification_requested(client, admin_enabled, alice):
         db.commit()
     finally:
         db.close()
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "Approve verification" in r.text
     assert "verification requested" in r.text  # _premium_pills pill text
 
@@ -1422,7 +1435,7 @@ def test_admin_user_detail_premium_badge_shown(client, admin_enabled, alice):
         db.commit()
     finally:
         db.close()
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "xg-premium" in r.text  # _premium_pills premium branch SVG
 
 
@@ -1434,7 +1447,7 @@ def test_admin_user_detail_banned_shows_unban_action(client, admin_enabled, alic
         db.commit()
     finally:
         db.close()
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "Unban" in r.text
     assert "banned" in r.text
 
@@ -1442,7 +1455,7 @@ def test_admin_user_detail_banned_shows_unban_action(client, admin_enabled, alic
 def test_admin_user_detail_pending_deletion_shown(client, admin_enabled, alice):
     user, headers = alice
     client.delete("/auth/me", headers=headers)
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "pending deletion" in r.text
     assert "Cancel pending deletion" in r.text
 
@@ -1455,7 +1468,7 @@ def test_admin_user_detail_reviewer_pill_and_action(client, admin_enabled, alice
         db.commit()
     finally:
         db.close()
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert "reviewer" in r.text
     assert "Remove from reviewer whitelist" in r.text
 
@@ -1472,7 +1485,7 @@ def _png_b64_small() -> str:
 def test_admin_user_detail_with_avatar(client, admin_enabled, alice):
     user, headers = alice
     client.patch("/auth/profile", json={"avatar_b64": _png_b64_small()}, headers=headers)
-    r = client.get(f"/admin/users/{user['id']}", auth=BASIC)
+    r = client.get(f"/admin/users/{user['id']}", headers=admin_enabled)
     assert '<img class="detail-avatar"' in r.text
 
 
@@ -1487,7 +1500,7 @@ def test_admin_user_list_banned_shows_unban_button(client, admin_enabled, alice)
         db.commit()
     finally:
         db.close()
-    r = client.get("/admin/users", auth=BASIC)
+    r = client.get("/admin/users", headers=admin_enabled)
     assert "Unban" in r.text
     assert "banned" in r.text
 
@@ -1495,14 +1508,14 @@ def test_admin_user_list_banned_shows_unban_button(client, admin_enabled, alice)
 def test_admin_user_list_comments_link_rendered(client, admin_enabled, alice):
     _, headers = alice
     client.post("/comments", json={"media_type": "film", "title": "Heat", "text": "solid"}, headers=headers)
-    r = client.get("/admin/users", auth=BASIC)
+    r = client.get("/admin/users", headers=admin_enabled)
     assert "/admin/comments?user_id=" in r.text
 
 
 def test_admin_user_list_with_avatar(client, admin_enabled, alice):
     user, headers = alice
     client.patch("/auth/profile", json={"avatar_b64": _png_b64_small()}, headers=headers)
-    r = client.get("/admin/users", auth=BASIC)
+    r = client.get("/admin/users", headers=admin_enabled)
     assert '<img class="avatar"' in r.text
 
 
@@ -1514,7 +1527,7 @@ def test_admin_user_list_unconfirmed_email_class(client, admin_enabled, alice):
         db.commit()
     finally:
         db.close()
-    r = client.get("/admin/users", auth=BASIC)
+    r = client.get("/admin/users", headers=admin_enabled)
     assert "email-unconfirmed" in r.text
 
 
@@ -1522,7 +1535,7 @@ def test_admin_user_list_unconfirmed_email_class(client, admin_enabled, alice):
 
 
 def test_admin_premium_page_renders(client, admin_enabled):
-    r = client.get("/admin/premium", auth=BASIC)
+    r = client.get("/admin/premium", headers=admin_enabled)
     assert r.status_code == 200
     assert "Premium Features" in r.text
     assert "Profile style" in r.text
@@ -1530,14 +1543,14 @@ def test_admin_premium_page_renders(client, admin_enabled):
 
 
 def test_admin_premium_page_requires_auth(client, admin_enabled):
-    assert client.get("/admin/premium").status_code == 401
+    assert client.get("/admin/premium", follow_redirects=False).status_code == 303  # to the login page
 
 
 def test_admin_premium_toggle_feature_persists(client, admin_enabled):
     r = client.post(
         "/admin/premium/toggle",
         data={"feature": "themes", "value": "0"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -1551,12 +1564,12 @@ def test_admin_premium_toggle_feature_persists(client, admin_enabled):
 
 def test_admin_premium_toggle_enables_feature(client, admin_enabled):
     # first disable
-    client.post("/admin/premium/toggle", data={"feature": "ranking", "value": "0"}, auth=BASIC)
+    client.post("/admin/premium/toggle", data={"feature": "ranking", "value": "0"}, headers=admin_enabled)
     # then re-enable
     r = client.post(
         "/admin/premium/toggle",
         data={"feature": "ranking", "value": "1"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -1573,7 +1586,7 @@ def test_admin_premium_toggle_unknown_feature_redirects(client, admin_enabled):
     r = client.post(
         "/admin/premium/toggle",
         data={"feature": "not_a_real_feature", "value": "1"},
-        auth=BASIC,
+        headers=admin_enabled,
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -1592,7 +1605,7 @@ def test_admin_comments_like_and_report_counts_scoped_to_shown(client, admin_ena
     client.post(f"/comments/{comment['id']}/like", headers=bob_headers)
     client.post(f"/comments/{comment['id']}/report", headers=bob_headers)
 
-    r = client.get("/admin/comments", auth=BASIC)
+    r = client.get("/admin/comments", headers=admin_enabled)
     assert r.status_code == 200
     # Like count icon and report flag icon both rendered correctly
     assert "&#x2691; 1" in r.text  # report count

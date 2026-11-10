@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/09/03 14:06:02.207669
+Revised: 2026/11/09 23:36:43.146415
 
 AbuseGuardMiddleware + login backoff: what gets stopped, and — just as
 important for a commercial deployment — what must never be flagged.
@@ -209,6 +209,15 @@ def test_renamed_admin_turns_default_path_into_honeypot(monkeypatch):
     assert client.get("/").status_code == 403
 
 
+def test_renamed_admin_turns_default_login_page_into_honeypot(monkeypatch):
+    """The login page lives under ADMIN_PATH too: probing the default
+    /admin/login after a rename is a scanner, not the admin."""
+    monkeypatch.setattr(settings, "admin_path", "/panel-x7k2")
+    client = make_client()
+    assert client.get("/admin/login").status_code == 404
+    assert client.get("/").status_code == 403
+
+
 def test_auth_requests_throttled_per_ip():
     client = make_client()
     codes = [client.post("/auth/login").status_code for _ in range(7)]
@@ -246,9 +255,7 @@ def test_login_backoff_across_ips_blunts_stuffing():
         check_login_allowed("alice", "10.9.9.9")  # a fresh IP is still blocked
 
 
-def test_admin_bans_page_and_unban(client, monkeypatch):
-    monkeypatch.setattr(settings, "admin_username", "boss")
-    monkeypatch.setattr(settings, "admin_password", "pw")
+def test_admin_bans_page_and_unban(client, admin_enabled):
     with SessionLocal() as db:
         ban = BannedIP(ip="203.0.113.7", reason="honeypot hit: /.env")
         db.add(ban)
@@ -256,11 +263,11 @@ def test_admin_bans_page_and_unban(client, monkeypatch):
         ban_id = ban.id
     security._permabanned.add("203.0.113.7")
 
-    page = client.get("/admin/bans", auth=("boss", "pw"))
+    page = client.get("/admin/bans", headers=admin_enabled)
     assert page.status_code == 200
     assert "203.0.113.7" in page.text
 
-    r = client.post(f"/admin/bans/{ban_id}/delete", auth=("boss", "pw"), follow_redirects=False)
+    r = client.post(f"/admin/bans/{ban_id}/delete", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     assert "203.0.113.7" not in security._permabanned
     with SessionLocal() as db:
@@ -318,6 +325,39 @@ def test_null_origin_post_rejected():
     """`Origin: null` is what sandboxed iframes and opaque contexts send."""
     r = make_origin_client().post("/things", headers={"Origin": "null"})
     assert r.status_code == 403
+
+
+def make_admin_origin_client() -> TestClient:
+    app = FastAPI()
+    app.add_middleware(OriginCheckMiddleware)
+
+    @app.post(f"{settings.admin_path}/things")
+    def create():
+        return {"ok": True}
+
+    @app.post(f"{settings.admin_path}things")  # a sibling path that merely shares the prefix
+    def sibling():
+        return {"ok": True}
+
+    return TestClient(app)
+
+
+def test_admin_post_rejects_allowlisted_origin():
+    """The admin session is a cookie, and SameSite treats every *.renar.app
+    host as one site, so the web app's (CORS-allowlisted) origin must not be
+    able to post to the panel."""
+    r = make_admin_origin_client().post(f"{settings.admin_path}/things", headers={"Origin": settings.cors_origins[0]})
+    assert r.status_code == 403
+
+
+def test_admin_post_accepts_own_origin():
+    r = make_admin_origin_client().post(f"{settings.admin_path}/things", headers={"Origin": "http://testserver"})
+    assert r.status_code == 200
+
+
+def test_admin_prefix_sibling_path_keeps_cors_allowlist():
+    r = make_admin_origin_client().post(f"{settings.admin_path}things", headers={"Origin": settings.cors_origins[0]})
+    assert r.status_code == 200
 
 
 def test_foreign_origin_get_passes():

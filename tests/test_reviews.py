@@ -2,14 +2,13 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:37:50.106302
-Revised: 2026/09/02 10:58:09.669589
+Revised: 2026/11/09 23:36:42.986568
 
 Reviews: whitelist-gated create, edit/delete own, one-per-title,
 ownership, and the admin whitelist toggle.
 """
 
 import pytest
-from conftest import ADMIN_BASIC as BASIC
 
 from renar_backend.database import SessionLocal
 from renar_backend.models import ReviewWhitelist, User
@@ -98,7 +97,9 @@ def test_review_reviewer_badge_false_after_whitelist_revoked(client, alice, bob,
     _whitelist(alice_user["id"])
     _post_review(client, a_headers)
 
-    r = client.post(f"/admin/users/{alice_user['id']}/unwhitelist-review", auth=BASIC, follow_redirects=False)
+    r = client.post(
+        f"/admin/users/{alice_user['id']}/unwhitelist-review", headers=admin_enabled, follow_redirects=False
+    )
     assert r.status_code == 303
 
     (listed,) = client.get("/media/reviews", params={"media_type": "film", "tmdb_id": 949}, headers=b_headers).json()
@@ -117,7 +118,7 @@ def test_me_reports_is_reviewer_mirroring_can_review(client, alice):
 
 def test_admin_whitelist_toggle_round_trip(client, alice, admin_enabled):
     user, headers = alice
-    r = client.post(f"/admin/users/{user['id']}/whitelist-review", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/whitelist-review", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     r = _post_review(client, headers)
@@ -129,7 +130,7 @@ def test_admin_whitelist_toggle_round_trip(client, alice, admin_enabled):
     finally:
         db.close()
 
-    r = client.post(f"/admin/users/{user['id']}/unwhitelist-review", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/unwhitelist-review", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
 
     me = client.get("/auth/me", headers=headers).json()

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/08/18 17:45:40.105371 )
+[//]: # (+ Revised: 	2026/11/09 23:36:37.738155 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Renar Backend
@@ -19,7 +19,37 @@ copy .env.example .env   # then edit SECRET_KEY
 
 ```powershell
 uv run alembic upgrade head   # apply database migrations (first run and after every pull)
-uv run uvicorn renar_backend.main:asgi_app --reload
+uv run be                     # uvicorn with auto-reload, HTTPS when certs/ has a cert
+```
+
+### Updating the server
+
+The admin panel's **Server Update** page (`<ADMIN_PATH>/update`) shows the
+running version and commit and any newer commits on `origin/master`. Its
+**Update** button stages the new `pyproject.toml`, `uv.lock` and `alembic/`,
+runs `uv sync --locked` and `alembic upgrade head`, then fast-forwards the
+checkout; uvicorn's reloader swaps in the new code. The server process is
+never stopped, so this works the same under systemd (prod) or a console (dev
+PC). If any step fails, or the new code doesn't come up within 2 minutes, it
+rolls back (migration downgraded, `git reset --hard` to the old commit, `uv
+sync`) and the page says so, with the log path
+(`logs/self-update-<timestamp>.log`).
+
+The button is disabled, with the reason, unless all of these hold: the
+server runs under `uv run be`, the checkout is on `master` with no
+uncommitted changes and no unpushed commits, `git fetch` works, and no other
+update is running. A migration must not import app code (it runs before the
+code swap). On Windows, `uv sync` can't replace a compiled package the
+running server has loaded; such an update rolls back and has to be done by
+hand.
+
+By hand, the same thing is:
+
+```powershell
+git pull --ff-only origin master
+uv sync --locked              # --no-dev on prod
+uv run alembic upgrade head
+# uv run be reloads by itself; otherwise restart it
 ```
 
 ## HTTPS
@@ -53,6 +83,11 @@ API docs: http://127.0.0.1:8000/docs
 
 ## Endpoints
 
+- `GET /app-releases/latest?platform=android-<abi>` — unauthenticated; newest
+  APK for that ABI (`version`, `size_bytes`, `sha256`, `blake3`, `notes`,
+  `download_url`), 404 when none, 422 for an unknown platform
+- `GET /app-releases/{id}/download` — unauthenticated; the APK, named
+  `renar-<version>-<abi>.apk`
 - `GET /auth/registration-status` — unauthenticated; returns `registration_open` and
   `invite_only` so the signup screen can render the invite-code field before submission
 - `POST /auth/register` — create account (also accepts `invite_code` when
@@ -131,8 +166,11 @@ API docs: http://127.0.0.1:8000/docs
   web-server anti-abuse guard share this server's persisted ban/strike state
   (see [docs/anti-abuse.md](docs/anti-abuse.md)); deliberately not under `/internal/`,
   which is honeypot bait
-- `GET /admin` — HTML admin panel behind HTTP Basic; returns 503 until
-  `ADMIN_USERNAME`/`ADMIN_PASSWORD` are set in `.env`. Tiles:
+- `GET /admin` — HTML admin panel behind a login page (password +
+  authenticator code, then an 8-hour session cookie; Log out on every page);
+  returns 503 until `ADMIN_USERNAME`, `ADMIN_PASSWORD` and `ADMIN_TOTP_SECRET`
+  are set in `.env` (see [Setting up admin sign-in](#setting-up-admin-sign-in)).
+  Tiles:
   - **User manager** (`/users`) — per-user usage stats (logins, requests, last
     login/active), ban/unban, delete. Clicking a username opens a **detail page**
     (`/users/{id}`) with account actions (edit username/email, set a new password,
@@ -157,6 +195,30 @@ API docs: http://127.0.0.1:8000/docs
   - **Invite Codes** (`/invites`) — generate random 32-char invite codes with
     configurable max-uses (single/5/10/25/unlimited/custom) and optional expiry;
     revoke active codes on-page.
+  - **Server Update** (`/update`) — one-click update to `origin/master` with
+    automatic rollback, see [Updating the server](#updating-the-server).
+  - **App Releases** (`/app-releases`) — every uploaded Android APK per ABI,
+    newest first, with a Latest pill and a delete button. Uploads come from
+    renar-frontend's `uv run build apk --split --publish`, which calls
+    `POST <ADMIN_PATH>/app-releases` (multipart `file`, `platform`, `version`,
+    optional `notes`; 201 new, 200 identical re-upload, 409 same version with
+    different bytes, 413 over 200 MiB, 422 not an APK).
+
+#### Setting up admin sign-in
+
+On the server host (over SSH on prod):
+
+1. `uv run admin-totp` prints a new secret, a QR code and the
+   `ADMIN_TOTP_SECRET=…` line. Scan the QR with an authenticator app
+   (Aegis, Google Authenticator, 1Password, …) and put the line in `.env`.
+2. For `--publish` uploads, also set `ADMIN_API_TOKEN` (see
+   [docs/environment-variables.md](docs/environment-variables.md#admin-panel)).
+3. Restart the server.
+
+Every failed sign-in is an abuse strike (temp ban, then a permanent ban),
+except from an IP in Exempt IPs. Locked yourself out? `uv run admin-unban
+<ip>` lifts every ban on that IP; restart the server afterwards so it
+forgets its in-memory copy (`sudo systemctl restart renar-backend` on prod).
 
 TMDB responses are cached in memory for 6 hours.
 

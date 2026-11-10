@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/09/07 15:13:00.636447
+Revised: 2026/11/09 16:20:33.688065
 """
 
 import enum
@@ -415,6 +415,30 @@ class PeriodicTaskRun(Base):
     last_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String, nullable=True)
     last_detail: Mapped[str] = mapped_column(Text, default="", server_default="")
+
+
+class AppRelease(Base):
+    """One uploaded Android APK served to in-app updates (see app_releases.py).
+
+    BCNF: the candidate keys are ``id``, ``(platform, version)``, ``blake3``
+    and ``sha256``; every other column depends only on them. The file's path
+    is derived from ``blake3`` at runtime, never stored, and there is no
+    version-sort column because it would be derived from ``version``.
+    """
+
+    __tablename__ = "app_releases"
+    __table_args__ = (UniqueConstraint("platform", "version", name="uq_app_releases_platform_version"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform: Mapped[str] = mapped_column(String, nullable=False)
+    version: Mapped[str] = mapped_column(String, nullable=False)
+    blake3: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Free-text release notes (exposed as ``notes`` in the API); singular
+    # name because it is one blob, not a list of values.
+    changelog: Mapped[str | None] = mapped_column(Text, nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class InviteCode(Base):

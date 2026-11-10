@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:29:43.281408
-Revised: 2026/09/03 08:33:48.904104
+Revised: 2026/11/10 11:04:48.287418
 
 Locust load profile: a rough mirror of a logged-in user's traffic mix once
 the app is open (health/status checks, own-profile lookups, stats), weighted
@@ -37,7 +37,7 @@ LOAD_TEST_PASSWORD = "LoadTest123!"
 # any frontend test fixture that loads catalog data will have seen it.
 _SEED_TMDB_ID = 27205
 _SEED_TITLE = "Inception"
-_SEED_MEDIA_TYPE = "movie"
+_SEED_MEDIA_TYPE = "film"  # models.MediaType: film | tv_show
 
 
 class RenarUser(HttpUser):
@@ -144,6 +144,6 @@ class RenarUser(HttpUser):
         self.client.post(
             "/media",
             headers=self.auth_headers,
-            json={"media_type": "movie", "title": unique_title},
+            json={"media_type": "film", "title": unique_title},
             name="/media [add]",
         )

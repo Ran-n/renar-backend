@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/08/24 12:39:05.446651
+Revised: 2026/11/09 16:20:36.738919
 
 Schema normalization guard: fails CI the moment a denormalization sneaks
 back into the models.
@@ -61,6 +61,7 @@ ALLOWED_AGGREGATES: dict[str, str] = {
     "titles.total_episodes": "fact about the show from TMDB, not a count of our rows",
     "titles.total_seasons": "fact about the show from TMDB, not a count of our rows",
     "images.size_bytes": "fact about the stored file, not a count of rows",
+    "app_releases.size_bytes": "fact about the uploaded APK file, not a count of rows",
     "users.total_watch_minutes": (
         "ranking leaderboard cache — unlike login_count (the counter that "
         "drifted and motivated this rule), this is maintained by a Postgres "

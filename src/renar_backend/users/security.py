@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/09/02 10:57:11.316476
+Revised: 2026/11/09 23:36:41.135366
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -144,6 +144,16 @@ def permaban(ip: str, reason: str) -> None:
 def lift_permaban(ip: str) -> None:
     """In-memory half of an unban; the caller removes the DB row."""
     _permabanned.discard(ip)
+
+
+# Temp bans decided outside the middleware (the admin login's strike), picked
+# up by AbuseGuardMiddleware on its next request so they apply at once rather
+# than only after the persisted strike is reloaded on restart.
+_external_temp_bans: dict[str, float] = {}
+
+
+def note_temp_ban(ip: str, until: float) -> None:
+    _external_temp_bans[ip] = max(until, _external_temp_bans.get(ip, 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +437,10 @@ class AbuseGuardMiddleware(BaseHTTPMiddleware):
             self.banned_until.update(load_active_temp_bans())
             self._temp_bans_loaded = True
 
+        while _external_temp_bans:
+            banned_ip, banned_until = _external_temp_bans.popitem()
+            self.banned_until[banned_ip] = max(banned_until, self.banned_until.get(banned_ip, 0.0))
+
         until = self.banned_until.get(ip)
         if until is not None:
             if now < until:
@@ -542,11 +556,17 @@ _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 class OriginCheckMiddleware(BaseHTTPMiddleware):
     """Rejects cross-site browser requests that carry a mismatched Origin.
 
-    Auth here is a bearer token, not a cookie, so classic CSRF (a forged
-    request riding the victim's session cookie) doesn't apply. This is
-    defense-in-depth for the case a browser client sends the token anyway.
+    App auth is a bearer token, not a cookie, so classic CSRF (a forged
+    request riding the victim's session cookie) doesn't apply there; this is
+    defense-in-depth for a browser client that sends the token anyway.
     Non-browser clients (the app, curl, server-to-server) don't send an
     Origin header at all, so they're unaffected.
+
+    The admin panel is different: its session is a cookie (see
+    users/admin_session.py), so its POSTs are CSRF-exposed. The cookie is
+    SameSite=Strict, but SameSite treats every *.renar.app host as the same
+    site, so a page on the web app's origin could still ride it. Admin paths
+    therefore accept only the panel's own origin, never the CORS allowlist.
 
     Browsers send Origin on POST/PUT/PATCH/DELETE even for same-origin
     requests (e.g. the admin panel's own <form method="post"> actions), so
@@ -558,7 +578,11 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
             origin = request.headers.get("origin")
             if origin:
                 self_origin = f"{request.url.scheme}://{request.headers.get('host', '')}"
-                if origin != self_origin and origin not in settings.cors_origins:
+                admin_path = request.url.path == settings.admin_path or request.url.path.startswith(
+                    f"{settings.admin_path}/"
+                )
+                allowed = origin == self_origin or (not admin_path and origin in settings.cors_origins)
+                if not allowed:
                     _log.warning(
                         "blocked %s %s: Origin %r matches neither self (%s) nor CORS_ORIGINS %s",
                         request.method,

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:37:49.855061
-Revised: 2026/09/02 10:57:32.359088
+Revised: 2026/11/09 23:36:41.793007
 
 Soft-delete account deletion: DELETE /auth/me starts a grace period instead
 of purging immediately (see users/accounts.py's request_deletion/
@@ -12,7 +12,6 @@ cancel_deletion/purge_expired_deletions and the account_purge periodic task).
 from datetime import timedelta
 
 import pytest
-from conftest import ADMIN_BASIC as BASIC
 from conftest import PASSWORD, hard_delete
 
 from renar_backend.database import SessionLocal
@@ -158,7 +157,7 @@ def test_admin_can_cancel_a_pending_deletion(client, alice, admin_enabled):
     user, headers = alice
     client.delete("/auth/me", headers=headers)
 
-    r = client.post(f"/admin/users/{user['id']}/cancel-deletion", auth=BASIC, follow_redirects=False)
+    r = client.post(f"/admin/users/{user['id']}/cancel-deletion", headers=admin_enabled, follow_redirects=False)
     assert r.status_code == 303
     assert _user_row(user["id"]).deletion_requested_at is None
 
