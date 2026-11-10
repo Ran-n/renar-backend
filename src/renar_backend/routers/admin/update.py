@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:18.560391
-Revised: 2026/11/10 13:53:25.388918
+Revised: 2026/11/10 16:20:16.229616
 
 Admin Server Update: shows the running version and what's newer (the
 incoming commits on origin/master for a git checkout, the latest release
@@ -14,6 +14,7 @@ self_update.py), with automatic rollback. The page polls
 
 import html
 import logging
+from datetime import UTC
 
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -60,6 +61,12 @@ _UPDATE_CSS = """
     }
     .btn-update:hover:not(:disabled) { background: #fbf1c7; }
     .btn-update:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-check {
+      background: transparent; color: var(--text-2); border: 1px solid var(--border); border-radius: 8px;
+      padding: .45rem .9rem; font-size: .8rem;
+    }
+    .btn-check:hover:not(:disabled) { color: var(--text); border-color: var(--text-3); }
+    .btn-check:disabled { opacity: .4; cursor: not-allowed; }
     .banner { border-radius: 10px; padding: .8rem 1.1rem; margin-bottom: 1.25rem; font-size: .85rem;
               border: 1px solid; }
     .banner code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; }
@@ -83,6 +90,23 @@ _UPDATE_JS = """
       var busy = document.getElementById('updating');
       var msg = document.getElementById('updating-msg');
       var statusUrl = '__P__/update/status';
+      var check = document.getElementById('check-btn');
+      var checkedAt = document.getElementById('checked-at');
+      if (checkedAt) {  // show the check time in the viewer's own time zone
+        var t = new Date(checkedAt.getAttribute('datetime'));
+        if (!isNaN(t)) {
+          checkedAt.title = checkedAt.textContent;
+          checkedAt.textContent = t.toLocaleString();
+        }
+      }
+      if (check) {
+        check.addEventListener('click', function () {  // every page load re-checks
+          check.disabled = true;
+          if (btn) { btn.disabled = true; }
+          check.textContent = 'Checking…';
+          window.location.reload();
+        });
+      }
       function poll(startedAt) {
         if (Date.now() - startedAt > 180000) {
           busy.querySelector('.update-spinner').style.display = 'none';
@@ -168,6 +192,12 @@ def _meta(st: update_check.UpdateStatus, version: str) -> str:
             latest = html.escape(st.latest_version or "?")
         rows.append(("Source", "release tarball"))
         rows.append(("Latest release", latest))
+    checked = st.checked_at.astimezone(UTC)
+    rows.append((
+        "Checked",
+        f'<time id="checked-at" datetime="{checked.isoformat(timespec="seconds")}">'
+        f"{checked:%Y-%m-%d %H:%M:%S} UTC</time>",
+    ))
     items = "".join(f"<dt>{label}</dt><dd>{value}</dd>" for label, value in rows)
     return f'\n      <dl class="update-meta">{items}</dl>'
 
@@ -206,9 +236,8 @@ def _state_card(st: update_check.UpdateStatus, version: str, running: bool) -> s
         pill = '<span class="pill pill-blocked">Blocked</span>'
         dirty = "".join(f"<li><code>{html.escape(p)}</code></li>" for p in st.dirty_paths[:50])
         more = f"<li>and {len(st.dirty_paths) - 50} more</li>" if len(st.dirty_paths) > 50 else ""
-        retry = f' <a href="{_P}/update">Retry</a>' if st.retryable else ""
         body = (
-            f'<div class="update-body"><div class="update-reason">{html.escape(st.blocked_reason)}{retry}</div>'
+            f'<div class="update-body"><div class="update-reason">{html.escape(st.blocked_reason)}</div>'
             + (f"<ul>{dirty}{more}</ul>" if dirty else "")
             + "</div>"
         )
@@ -219,6 +248,7 @@ def _state_card(st: update_check.UpdateStatus, version: str, running: bool) -> s
         pill = '<span class="pill pill-ok">Up to date</span>'
         body = ""
     disabled_attr = " disabled" if disabled else ""
+    check_label = "Retry" if st.retryable and not running else "Check now"
     return f"""
     <div class="card">
       <div class="card-header"><h2 class="card-title">Server</h2>{pill}</div>
@@ -226,6 +256,7 @@ def _state_card(st: update_check.UpdateStatus, version: str, running: bool) -> s
       {body}
       <div class="update-actions">
         <button class="btn-update" id="update-btn" type="button"{disabled_attr}>{label}</button>
+        <button class="btn-check" id="check-btn" type="button">{check_label}</button>
         <div class="updating{" on" if running else ""}" id="updating">
           <div class="update-spinner"></div><span id="updating-msg">An update is in progress&hellip;</span>
         </div>

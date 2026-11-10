@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/11/10 13:53:25.931247 )
+[//]: # (+ Revised: 	2026/11/10 16:20:53.458916 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Renar Backend
@@ -26,6 +26,9 @@ uv run be                     # uvicorn with auto-reload, HTTPS when certs/ has 
 
 The admin panel's **Server Update** page (`<ADMIN_PATH>/update`) shows the
 running version and what's newer, and its **Update** button installs it.
+Every page load checks again; **Check now** re-runs the check on demand
+(it reads **Retry** after a failed lookup), and *Checked* shows when the
+last check ran, in your own time zone.
 The source depends on the project directory:
 
 - **Git checkout** (`.git` present, e.g. the dev PC): the newer commits on

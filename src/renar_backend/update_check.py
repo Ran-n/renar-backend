@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:18.387223
-Revised: 2026/11/10 13:53:25.205426
+Revised: 2026/11/10 16:17:27.444492
 
 The server's side of the admin panel's one-click update: whether an update
 is available or blocked (``check``), getting it ready (``prepare``),
@@ -39,7 +39,7 @@ import tarfile
 import time
 import tomllib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import blake3
@@ -88,7 +88,8 @@ class UpdateStatus:
     # the newer version: the release's in tarball mode, origin/master's pyproject.toml in git mode
     latest_version: str | None = None
     blocked_reason: str | None = None
-    retryable: bool = False  # a failed lookup (release feed or git fetch): offer "Retry"
+    retryable: bool = False  # a failed lookup (release feed or git fetch): the page's check button says "Retry"
+    checked_at: datetime = field(default_factory=lambda: datetime.now(UTC))  # when check() built this
     # tarball mode
     release_url: str = ""  # the release's web page
     release_notes: str = ""

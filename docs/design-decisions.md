@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/11/10 13:53:26.043947 )
+[//]: # (+ Revised: 	2026/11/10 16:22:09.419668 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -1011,6 +1011,19 @@ tarball over a checkout is never attempted. Renames make every tarball
 file change all-or-nothing, so the reloader never sees a half-copied
 package, and renaming the package directory inside `src/` (not `src/`
 itself) keeps the reloader's watch on `src/` alive.
+
+### Server Update: Check now reloads the page
+
+The Server Update page's **Check now** button (it reads **Retry** after a
+failed lookup) just reloads the page, and the card shows a *Checked* time,
+rendered server-side in UTC and turned into the viewer's local time by the
+page's script.
+
+**Why:** every load of the page already runs the full check
+(`update_check.check()`), so a reload is the check; a separate JSON
+endpoint would be a second path that renders the same state and could
+drift from the page. The time stamp makes a manual check visible even when
+the answer ("Up to date") doesn't change.
 
 ### No reverse proxy in front of uvicorn
 
