@@ -2,11 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:18.560391
-Revised: 2026/11/09 23:36:43.989314
+Revised: 2026/11/10 13:53:25.388918
 
-Admin Server Update: shows the running version and commit, whether
-origin/master has newer commits, and an Update button that fast-forwards,
-syncs dependencies, migrates and reloads the server (see update_check.py and
+Admin Server Update: shows the running version and what's newer (the
+incoming commits on origin/master for a git checkout, the latest release
+and its notes otherwise), and an Update button that installs it, syncs
+dependencies, migrates and reloads the server (see update_check.py and
 self_update.py), with automatic rollback. The page polls
 ``/update/status`` while the update runs and reloads when it's done.
 """
@@ -42,6 +43,12 @@ _UPDATE_CSS = """
     .update-body { padding: 1rem 1.5rem; font-size: .85rem; color: var(--text-2); }
     .update-body ul { margin: .5rem 0 0; padding-left: 1.1rem; }
     .update-body li { margin: .2rem 0; }
+    .update-meta a { color: var(--text); }
+    .update-notes { margin: .6rem 0 0; padding: .75rem 1rem; max-height: 22rem; overflow: auto;
+                    white-space: pre-wrap; word-break: break-word; border-radius: 8px;
+                    background: var(--border-sub); border: 1px solid var(--border);
+                    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem;
+                    color: var(--text-2); }
     .update-reason { color: var(--orange); margin-bottom: .75rem; }
     .pill-ok { background: rgba(184,187,38,.15); color: #b8bb26; }
     .pill-new { background: rgba(250,189,47,.15); color: #fabd2f; }
@@ -148,18 +155,53 @@ def _banner(result: update_check.LastResult | None, running: bool) -> str:
     return f'<div class="banner banner-bad">The last update\'s result file is unreadable.{log}</div>'
 
 
+def _meta(st: update_check.UpdateStatus, version: str) -> str:
+    rows = [("Running version", html.escape(version))]
+    if st.mode == update_check.MODE_GIT:
+        rows.append(("Source", "git checkout (origin/master)"))
+        rows.append(("Branch", html.escape(st.branch or "?")))
+        rows.append(("Commit", f"<code>{html.escape(st.head_sha[:8]) if st.head_sha else '?'}</code>"))
+    else:
+        if st.latest_version and st.release_url:
+            latest = f'<a href="{html.escape(st.release_url)}">{html.escape(st.latest_version)}</a>'
+        else:
+            latest = html.escape(st.latest_version or "?")
+        rows.append(("Source", "release tarball"))
+        rows.append(("Latest release", latest))
+    items = "".join(f"<dt>{label}</dt><dd>{value}</dd>" for label, value in rows)
+    return f'\n      <dl class="update-meta">{items}</dl>'
+
+
+def _available_body(st: update_check.UpdateStatus, version: str) -> tuple[str, str, str]:
+    """(pill, body, button label) for an available update."""
+    if st.mode == update_check.MODE_GIT:
+        n = st.behind_count
+        pill = f'<span class="pill pill-new">{n} new commit{"s" if n != 1 else ""}</span>'
+        items = "".join(
+            f"<li><code>{html.escape(sha)}</code> {html.escape(subject)}</li>"
+            for sha, _, subject in (c.partition(" ") for c in st.behind)
+        )
+        hidden = n - len(st.behind)
+        more = f"<li>and {hidden} more</li>" if hidden > 0 else ""
+        body = f'<div class="update-body">Incoming:<ul>{items}{more}</ul></div>'
+        if st.latest_version and st.latest_version != version:
+            label = f"Update to {html.escape(st.latest_version)}"
+        else:
+            label = f"Update ({n} commit{'s' if n != 1 else ''})"
+        return pill, body, label
+    pill = '<span class="pill pill-new">New release</span>'
+    notes = (
+        f'<pre class="update-notes">{html.escape(st.release_notes.strip())}</pre>' if st.release_notes.strip() else ""
+    )
+    body = f'<div class="update-body">Release {html.escape(st.latest_version or "")}{notes}</div>'
+    return pill, body, f"Update to {html.escape(st.latest_version or '')}"
+
+
 def _state_card(st: update_check.UpdateStatus, version: str, running: bool) -> str:
-    sha = html.escape(st.head_sha[:8]) if st.head_sha else "?"
-    meta = f"""
-      <dl class="update-meta">
-        <dt>Running version</dt><dd>{html.escape(version)}</dd>
-        <dt>Branch</dt><dd>{html.escape(st.branch or "?")}</dd>
-        <dt>Commit</dt><dd><code>{sha}</code></dd>
-      </dl>"""
+    disabled, label = True, "Update"
     if running:
         pill = '<span class="pill pill-new">Updating</span>'
         body = ""
-        disabled, label = True, "Update"
     elif st.blocked_reason:
         pill = '<span class="pill pill-blocked">Blocked</span>'
         dirty = "".join(f"<li><code>{html.escape(p)}</code></li>" for p in st.dirty_paths[:50])
@@ -170,30 +212,17 @@ def _state_card(st: update_check.UpdateStatus, version: str, running: bool) -> s
             + (f"<ul>{dirty}{more}</ul>" if dirty else "")
             + "</div>"
         )
-        disabled, label = True, "Update"
-    elif st.behind_count:
-        pill = f'<span class="pill pill-new">{st.behind_count} new commit{"s" if st.behind_count != 1 else ""}</span>'
-        items = "".join(
-            f"<li><code>{html.escape(sha)}</code> {html.escape(subject)}</li>"
-            for sha, _, subject in (c.partition(" ") for c in st.behind)
-        )
-        hidden = st.behind_count - len(st.behind)
-        more = f"<li>and {hidden} more</li>" if hidden > 0 else ""
-        body = f'<div class="update-body">Incoming:<ul>{items}{more}</ul></div>'
+    elif st.available:
+        pill, body, label = _available_body(st, version)
         disabled = False
-        if st.remote_version and st.remote_version != version:
-            label = f"Update to {html.escape(st.remote_version)}"
-        else:
-            label = f"Update ({st.behind_count} commit{'s' if st.behind_count != 1 else ''})"
     else:
         pill = '<span class="pill pill-ok">Up to date</span>'
         body = ""
-        disabled, label = True, "Update"
     disabled_attr = " disabled" if disabled else ""
     return f"""
     <div class="card">
       <div class="card-header"><h2 class="card-title">Server</h2>{pill}</div>
-      {meta}
+      {_meta(st, version)}
       {body}
       <div class="update-actions">
         <button class="btn-update" id="update-btn" type="button"{disabled_attr}>{label}</button>
@@ -244,8 +273,9 @@ def render_page(st: update_check.UpdateStatus, result: update_check.LastResult |
 
 @router.get("/update", response_class=HTMLResponse, include_in_schema=False)
 def admin_update_page(_: str = Depends(_require_admin)):
-    st = update_check.check()
-    return HTMLResponse(render_page(st, update_check.last_result(), _running_version()))
+    version = _running_version()
+    st = update_check.check(version)
+    return HTMLResponse(render_page(st, update_check.last_result(), version))
 
 
 @router.get("/update/status", include_in_schema=False)
@@ -257,7 +287,7 @@ def admin_update_status(_: str = Depends(_require_admin)):
 @router.post("/update", include_in_schema=False)
 def admin_update_start(admin_user: str = Depends(_require_admin)):
     # The page may be stale: re-check every blocking condition now.
-    st = update_check.check()
+    st = update_check.check(_running_version())
     if st.blocked_reason:
         return JSONResponse({"detail": st.blocked_reason}, status_code=status.HTTP_409_CONFLICT)
     if not st.available:
@@ -265,7 +295,20 @@ def admin_update_start(admin_user: str = Depends(_require_admin)):
     if not update_check.take_lock():
         return JSONResponse({"detail": "An update is already in progress."}, status_code=status.HTTP_409_CONFLICT)
     try:
-        log_path = update_check.launch(st, _running_version())
+        stage = update_check.prepare(st)
+    except update_check.UpdateError as exc:
+        update_check.release_lock()
+        _log.error("self-update (%s) refused: %s", st.mode, exc)
+        return JSONResponse({"detail": str(exc)}, status_code=status.HTTP_502_BAD_GATEWAY)
+    except Exception:
+        update_check.release_lock()
+        _log.exception("could not prepare the %s self-update", st.mode)
+        return JSONResponse(
+            {"detail": "Couldn't prepare the update; see the server log."},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    try:
+        log_path = update_check.launch(st, stage)
     except Exception:
         update_check.release_lock()
         _log.exception("could not start the self-update helper")
@@ -273,5 +316,6 @@ def admin_update_start(admin_user: str = Depends(_require_admin)):
             {"detail": "Couldn't start the update; see the server log."},
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
-    _log.warning("admin=%s started a server update to %s", admin_user, st.remote_sha[:8])
+    target = st.remote_sha[:8] if st.mode == update_check.MODE_GIT else st.latest_version
+    _log.warning("admin=%s started a %s server update to %s", admin_user, st.mode, target)
     return JSONResponse({"log_path": str(log_path)}, status_code=status.HTTP_202_ACCEPTED)

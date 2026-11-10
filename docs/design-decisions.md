@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/11/09 23:36:38.426827 )
+[//]: # (+ Revised: 	2026/11/10 13:53:26.043947 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -968,27 +968,49 @@ again, so any request there is unambiguously a scanner.
 
 The admin panel's Update button starts `self_update.py` detached, with the
 base interpreter in isolated mode (`python -I`), and never stops the server:
-it stages the new `pyproject.toml`/`uv.lock`/`alembic/` (paths the reloader
-doesn't watch), syncs, migrates, then fast-forwards `src/`, and uvicorn's
-reloader swaps the worker. Each worker writes `logs/be-worker.json` at
-startup, so the helper knows the new one is up, not the old one.
+it moves the release's `pyproject.toml`/`uv.lock`/`alembic/` and other
+top-level files into place (paths the reloader doesn't watch), syncs,
+migrates, then swaps `src/`, and uvicorn's reloader swaps the worker. Each
+worker writes `logs/be-worker.json` at startup, so the helper knows the new
+one is up, not the old one.
 
 **Why:** stopping and restarting the server would mean a different
 mechanism per OS and per supervisor (systemd on the Hetzner VPS, a console
-on the dev PC); changing files is the same everywhere. Staging the lock and
-migrations first keeps the running code consistent: the new code never
+on the dev PC); changing files is the same everywhere. Installing the lock
+and migrations first keeps the running code consistent: the new code never
 starts before its dependencies and schema exist. The helper imports only
 the standard library and runs outside the venv so `uv sync` can replace
 any package while it runs.
 
-### Self-update: fast-forward only, clean tree only
+### Self-update: git checkouts fast-forward, everything else installs release tarballs
 
-Updates are refused on a branch other than `master`, with uncommitted
-changes, or with local commits not on `origin/master`.
+The source is picked by the project directory: with `.git` it fast-forwards
+to `origin/master`, otherwise it installs the latest release's
+`renar_backend-<version>.tar.gz` (the sdist every release ships). Git mode
+refuses a branch other than `master`, uncommitted changes, or local
+commits not on `origin/master`. Tarball mode refuses a tarball that
+doesn't match the `.tar.gz.b3` BLAKE3 sum published with it, doesn't hold
+one top-level folder, doesn't unpack under `tarfile`'s `data` filter (no
+links or paths outside) or whose `pyproject.toml` names another version.
+It swaps each top-level entry, and each entry of `src/`, in by two renames
+(old one to `.self-update/previous`, new one in), all inside the project so
+they stay on one filesystem; the rollback renames them back. Everything
+else (lock, reloader, migrations, health check, rollback order) is shared:
+the helper's two sources only differ in how files get staged, swapped and
+restored.
 
-**Why:** the rollback is `git reset --hard <old commit>`, which would
-silently destroy uncommitted work (a second editor often has some in this
-checkout), and an update must never create a merge commit on the server.
+**Why:** prod is deployed from tarballs and has no checkout, and anyone
+else running the server gets release assets, not repository access; a
+release is also a tested, tagged version. The dev PC is a checkout, where
+following `master` is the point. Git mode's rollback is `git reset --hard
+<old commit>`, which would silently destroy uncommitted work (a second
+editor often has some in a checkout), and an update must never create a
+merge commit, hence its preconditions. Picking by `.git` instead of a
+setting means a host can't be pointed at the wrong source: unpacking a
+tarball over a checkout is never attempted. Renames make every tarball
+file change all-or-nothing, so the reloader never sees a half-copied
+package, and renaming the package directory inside `src/` (not `src/`
+itself) keeps the reloader's watch on `src/` alive.
 
 ### No reverse proxy in front of uvicorn
 

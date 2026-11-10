@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/11/09 23:36:39.124638
+Revised: 2026/11/10 13:40:09.811853
 """
 
 import base64
@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     # check/report banned_ips over /svc/bans (see routers/svc.py). Empty
     # means the endpoints stay 404 to everyone, same as an unset admin panel.
     internal_service_secret: str = ""
+    # The admin panel's Server Update reads the latest release here (GitHub's
+    # or Forgejo/Codeberg's "latest release" JSON) and installs its
+    # renar_backend-<version>.tar.gz asset, checked against the .tar.gz.b3
+    # BLAKE3 sum next to it. Point it at a fork's releases to follow that.
+    update_release_url: str = "https://api.github.com/repos/Ran-n/renar-backend/releases/latest"
 
     # anti-abuse (see security.py); the API is exposed to the open internet.
     # Limits are per IP, and one IP can be a whole office or CGNAT pool of

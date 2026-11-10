@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/11/09 23:36:37.738155 )
+[//]: # (+ Revised: 	2026/11/10 13:53:25.931247 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Renar Backend
@@ -25,25 +25,41 @@ uv run be                     # uvicorn with auto-reload, HTTPS when certs/ has 
 ### Updating the server
 
 The admin panel's **Server Update** page (`<ADMIN_PATH>/update`) shows the
-running version and commit and any newer commits on `origin/master`. Its
-**Update** button stages the new `pyproject.toml`, `uv.lock` and `alembic/`,
-runs `uv sync --locked` and `alembic upgrade head`, then fast-forwards the
-checkout; uvicorn's reloader swaps in the new code. The server process is
-never stopped, so this works the same under systemd (prod) or a console (dev
-PC). If any step fails, or the new code doesn't come up within 2 minutes, it
-rolls back (migration downgraded, `git reset --hard` to the old commit, `uv
-sync`) and the page says so, with the log path
-(`logs/self-update-<timestamp>.log`).
+running version and what's newer, and its **Update** button installs it.
+The source depends on the project directory:
 
-The button is disabled, with the reason, unless all of these hold: the
-server runs under `uv run be`, the checkout is on `master` with no
-uncommitted changes and no unpushed commits, `git fetch` works, and no other
-update is running. A migration must not import app code (it runs before the
-code swap). On Windows, `uv sync` can't replace a compiled package the
-running server has loaded; such an update rolls back and has to be done by
-hand.
+- **Git checkout** (`.git` present, e.g. the dev PC): the newer commits on
+  `origin/master`. The update stages the new `pyproject.toml`, `uv.lock`
+  and `alembic/`, runs `uv sync --locked` and `alembic upgrade head`, then
+  fast-forwards the checkout. Rollback is `git reset --hard` to the old
+  commit, so the button only works on `master` with no uncommitted changes
+  and no unpushed commits, and `git fetch` has to work.
+- **Anything else** (a tarball deploy, e.g. prod): the latest release from
+  `UPDATE_RELEASE_URL` (GitHub's releases by default) and its notes. The
+  update downloads `renar_backend-<version>.tar.gz`, checks it against the
+  `.tar.gz.b3` BLAKE3 sum next to it and unpacks it into
+  `.self-update/stage`. It then moves the new `pyproject.toml`, `uv.lock`,
+  `alembic/` and the rest into place, syncs, migrates, and finally swaps
+  `src/`. Rollback moves the old files back from `.self-update/previous`,
+  where they also stay after a success until the next update. The release
+  needs both assets.
 
-By hand, the same thing is:
+Either way uvicorn's reloader picks up the new code; the server process is
+never stopped, so this works the same under systemd or a console. `.env`,
+`media/`, `logs/`, `certs/` and `.venv/` are never touched. If any step
+fails, or the new code doesn't come up within 2 minutes, it rolls back
+(migration downgraded, old files back, `uv sync`) and the page says so,
+with the log path (`logs/self-update-<timestamp>.log`).
+
+The button is also disabled, with the reason, unless the server runs under
+`uv run be` and no other update is running. The whole project directory
+must be writable by the server's user (under systemd with
+`ProtectSystem=strict`, `ReadWritePaths=` must cover it, not only `media/`
+and `logs/`). A migration must not import app code (it runs before the code
+swap). On Windows, `uv sync` can't replace a compiled package the running
+server has loaded; such an update rolls back and has to be done by hand.
+
+By hand, from a git checkout:
 
 ```powershell
 git pull --ff-only origin master
@@ -195,8 +211,9 @@ API docs: http://127.0.0.1:8000/docs
   - **Invite Codes** (`/invites`) — generate random 32-char invite codes with
     configurable max-uses (single/5/10/25/unlimited/custom) and optional expiry;
     revoke active codes on-page.
-  - **Server Update** (`/update`) — one-click update to `origin/master` with
-    automatic rollback, see [Updating the server](#updating-the-server).
+  - **Server Update** (`/update`) — one-click update (git checkout:
+    `origin/master`; otherwise the latest release tarball, BLAKE3-checked)
+    with automatic rollback, see [Updating the server](#updating-the-server).
   - **App Releases** (`/app-releases`) — every uploaded Android APK per ABI,
     newest first, with a Latest pill and a delete button. Uploads come from
     renar-frontend's `uv run build apk --split --publish`, which calls

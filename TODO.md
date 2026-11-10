@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/11/09 11:43:55.623794 )
-[//]: # (+ Revised: 	2026/11/10 11:04:47.969158 )
+[//]: # (+ Revised: 	2026/11/10 15:58:25.933242 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # TODO
@@ -17,7 +17,7 @@ history lives in git, `CHANGELOG.md` and `docs/design-decisions.md`. Items
 moved over from the old `docs/backlog.md` keep their original free-form
 text; rewrite one into the template below before implementing it.
 
-Next item number: 28
+Next item number: 32
 
 ## Index
 
@@ -45,6 +45,10 @@ Next item number: 28
 22. [Privacy policy and Terms of Service are drafted but not published](#22-privacy-policy-and-terms-of-service-are-drafted-but-not-published)
 23. [No payment integration wired to the app stores — and mobile can't just reuse a web payment flow](#23-no-payment-integration-wired-to-the-app-stores--and-mobile-cant-just-reuse-a-web-payment-flow)
 27. [Turn on admin sign-in and the one-click update on the dev PC and the Hetzner VPS](#27-turn-on-admin-sign-in-and-the-one-click-update-on-the-dev-pc-and-the-hetzner-vps)
+28. [Show the renar logo as the api.renar.app favicon and on the admin sign-in page](#28-show-the-renar-logo-as-the-apirenarapp-favicon-and-on-the-admin-sign-in-page)
+29. [Store the admin password as an Argon2id hash and lock `.env` to the service user](#29-store-the-admin-password-as-an-argon2id-hash-and-lock-env-to-the-service-user)
+30. [Put the prod admin panel behind Cloudflare Access](#30-put-the-prod-admin-panel-behind-cloudflare-access)
+31. [Make the backend verify Cloudflare Access's signed header on admin routes](#31-make-the-backend-verify-cloudflare-accesss-signed-header-on-admin-routes)
 
 ## Adding an item
 
@@ -663,15 +667,68 @@ the Turnstile item above, so batch with that when DNS is next touched.
 
 **[Future]** · Area: Infrastructure
 
-`routers/admin.py`
-is a working operator dashboard (users, usage, comments, banned IPs)
-gated by a single shared `HTTPBasic` credential pair
-(`settings.admin_path`, admin.py:49) — good for one operator, not for
-granting individual users admin/mod privileges. `models.py:111-151`
-`User` has no `role`/`is_admin` field (only `banned`, `verified`,
-`is_premium`). Needs a role field/table and auth checks gating
-admin/mod-only actions per account if multiple privileged users are
-wanted, distinct from the existing single-operator panel.
+**Why:** the admin panel has one shared login: `ADMIN_USERNAME`,
+`ADMIN_PASSWORD_HASH` (after item 29) and `ADMIN_TOTP_SECRET` in `.env`,
+checked in `users/admin_session.py`. That works for one operator but can't
+give a second person access, take it away from one person, or tell from the
+logs who did what. `models.User` has no role field (only `banned`,
+`verified`, `is_premium`), so a moderator can't be an ordinary renar account
+with extra rights. clavren keeps admins in their own table because it has no
+user accounts; renar already has `users` with bcrypt password hashes, so
+admin should be a role on those accounts instead of a second account system.
+**Goal:** an admin or moderator signs in to the panel with their own renar
+account plus their own authenticator code; the operator grants and removes
+the role per account; `.env` holds no admin login at all.
+
+### Behaviour
+- Roles: `admin` (everything the panel does today) and `moderator`
+  (Moderation and Users pages only, no Settings, Update, Invites, Premium,
+  App Releases). An account has at most one role; no role = ordinary user.
+- An account with a role can't use the panel until it has enrolled TOTP;
+  enrolment shows the QR once and ten single-use recovery codes.
+- TOTP secrets are stored encrypted (AES-256-GCM) with a key file outside
+  the database (`ADMIN_KEY_FILE`, default `<data dir>/admin.key`, mode
+  `0600`, created on first boot), so a database dump alone can't produce
+  codes. Recovery codes are stored hashed.
+- Sign-in uses the account's existing password (bcrypt, `users/auth.py`)
+  plus the code; strikes, backoff and Exempt IPs behave as today.
+- `uv run admin-grant <username> admin|moderator` and
+  `uv run admin-revoke <username>` from the server shell; revoking ends that
+  account's admin sessions at once. The panel can't remove the last `admin`.
+- Session cookies carry the account id; the fingerprint includes the role
+  and TOTP secret version, so a revoke or re-enrolment signs that account out.
+- The admin audit log (where one exists) records the account, not "admin".
+- `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` and `ADMIN_TOTP_SECRET` are
+  removed; a migration-time CLI step grants `admin` to the operator's
+  account first, and boot refuses those three variables if still set.
+  `ADMIN_API_TOKEN` stays for scripts.
+
+### Out of scope
+- A UI for granting roles (CLI only at first).
+- Finer permissions than the two roles.
+- Changing how app users sign in.
+
+### Implementation
+Split into items before building (it's more than one sitting): (a) schema
+and key file, (b) sign-in and sessions on accounts, (c) TOTP enrolment and
+recovery codes, (d) moderator restrictions per page, (e) removing the `.env`
+login. Each needs its own Implementation, Tests and Docs per the template;
+`role` lives in its own table keyed by `user_id` if that keeps the schema
+BCNF (run `tests/test_normalization.py`).
+
+### Tests
+- Defined per split item; at minimum: role checks on every admin route
+  (moderator 403 on admin-only pages), revoke kills sessions, encrypted TOTP
+  round trip, missing key file stops boot, recovery code single use.
+
+### Docs
+- `docs/design-decisions.md`: "Admin is a role on renar accounts, not a
+  separate account system" with the clavren comparison above.
+- `docs/environment-variables.md`: remove the three variables, add
+  `ADMIN_KEY_FILE`.
+
+### Done when
+- [ ] The split items above exist in this file and this item is deleted.
 
 ## 20. Log line formatting is hard to read
 
@@ -740,8 +797,8 @@ collection and PCI card-data scope off Renar entirely.
 **Why:** the admin panel now signs in with a password plus an authenticator
 code and has a Server Update page, but both need one-time setup on each host
 that only the operator can do. Until `ADMIN_TOTP_SECRET` is set, the panel
-answers 503; until prod is a git checkout, its Update button stays disabled
-("Not a git checkout").
+answers 503; and the Update page needs the server able to write its own
+project directory.
 **Goal:** on both hosts the admin can sign in with an authenticator code,
 `uv run build apk --split --publish` uploads with the API token, and the
 Update button updates and rolls back for real.
@@ -763,32 +820,27 @@ Update button updates and rolls back for real.
    `ADMIN_TOTP_SECRET=…` and a new
    `ADMIN_API_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")`
    in `.env`, restart `uv run be`, sign in at `<ADMIN_PATH>`.
-2. Prod, over SSH: deploy this code first (still by hand: the update button
-   needs step 4), then run the same commands as `renar` in `/opt/renar-backend`
-   (`sudo -u renar /opt/renar-backend/.local/bin/uv run admin-totp`), edit
-   `.env`, `sudo systemctl restart renar-backend`, sign in.
+2. Prod, over SSH: 0.20.0 is deployed (by tarball) and `.env` already has an
+   `ADMIN_API_TOKEN`. Run `sudo -u renar /opt/renar-backend/.local/bin/uv run admin-totp`
+   in `/opt/renar-backend`, add `ADMIN_TOTP_SECRET=…` to `.env`,
+   `sudo systemctl restart renar-backend`, sign in.
 3. Both panels: add the operator's public IP to Exempt IPs.
-4. Prod as a git checkout, so the Update button works:
-   - `apt install git` if missing.
-   - A read-only deploy key for the `renar-backend` GitHub repo:
-     `sudo -u renar ssh-keygen -t ed25519 -f /opt/renar-backend/.ssh/deploy -N ""`,
-     add the `.pub` as a deploy key (read-only) on GitHub, and
-     `/opt/renar-backend/.ssh/config` with `Host github.com` →
-     `IdentityFile ~/.ssh/deploy`.
-   - Convert in place: `git init -b master`, `git remote add origin
-     git@github.com:<owner>/renar-backend.git`, `git fetch origin master`,
-     `git reset --mixed origin/master`, then `git status` must be empty
-     (anything listed is a difference between the tar deploy and the repo:
-     resolve it before going on).
-   - systemd: `ReadWritePaths` must cover `/opt/renar-backend` itself (git,
-     `uv sync` and the reloader all write there, not only under `media`,
-     `logs`, `certs`, `.cache`); `systemctl daemon-reload` and restart.
+4. Prod, so the Update button works: systemd's `ReadWritePaths` must cover
+   `/opt/renar-backend` itself (the update renames `src/`, `alembic/`,
+   `pyproject.toml`… and writes `.self-update/`, not only `media`, `logs`,
+   `certs`, `.cache`); `systemctl daemon-reload` and restart. Prod stays a
+   tarball deploy (no git): the page installs release tarballs. The first
+   release with the tarball updater has to be deployed by hand, since 0.20.0
+   still carries the git-based one.
 5. Build PC: store the publish credentials per README "Build" (renar-frontend)
-   for `api.renar.app` and `api.dev.renar.app`: `<host>:api_token` and
-   `<host>:admin_path`.
-6. One real update on each host across a commit that adds a migration; one
-   with a deliberately failing migration pushed to a scratch branch, merged
-   into a scratch remote's `master`, then deleted.
+   for `api.dev.renar.app` (`api.renar.app` is stored): `<host>:api_token`
+   and `<host>:admin_path`.
+6. One real update on prod across a release that adds a migration; one with
+   a deliberately failing migration, from a scratch release on a fork, with
+   `UPDATE_RELEASE_URL` pointed at it for the test and restored after. On
+   the dev PC (a git checkout, so it follows `origin/master`): one real
+   update across a commit that adds a migration, and one forced failure from
+   a scratch remote's `master`.
 
 ### Tests
 - None new; this is configuration. The code is covered by
@@ -803,5 +855,524 @@ Update button updates and rolls back for real.
 - [ ] Both panels show the login page, and a live authenticator code signs in.
 - [ ] Operator IP in Exempt IPs on both.
 - [ ] `uv run build apk --split --publish` uploads to prod with the token.
-- [ ] Prod `/opt/renar-backend` is a clean git checkout; the Update page shows "Up to date".
+- [ ] Prod's Update page shows "Up to date" (not Blocked) on the latest release.
 - [ ] A real update ends with the green "Updated A → B" banner; a forced migration failure ends "rolled back" with the old version running.
+
+## 28. Show the renar logo as the api.renar.app favicon and on the admin sign-in page
+
+**[Blocking for 1.0]** · Area: Admin panel / Branding
+
+**Why:** today every admin page's browser tab shows a 🛠 emoji: `_FAVICON` in
+`src/renar_backend/routers/admin/_html.py` is a `data:image/svg+xml` URI
+drawing that emoji, and every admin page links it. The panel's CSP
+(`default-src 'self'`, set in `SecurityHeadersMiddleware` in
+`src/renar_backend/users/security.py`) doesn't allow `data:`, so browsers
+that apply CSP to favicons (Firefox) block that icon outright. Opening
+`https://api.renar.app/` directly (the `GET /` JSON reply, `home()` in
+`main.py`) shows the browser's blank-page icon, because `/favicon.ico` has no
+route: it 404s, and since it matches no route, `AbuseGuardMiddleware` counts
+each automatic browser fetch as a scanner probe toward
+`PROBE_BAN_THRESHOLD`. The sign-in page (`routers/admin/login.py` `_page()`)
+shows a generic padlock in the topbar instead of the product's mark, so
+nothing tells the operator this is renar's server.
+**Goal:** every page on `api.renar.app` and `api.dev.renar.app` (the JSON
+root, every admin page) shows the renar mark in the browser tab, as the same
+dark rounded tile the web app uses, and the sign-in and session-expired
+pages show the renar mark in the topbar where the padlock is now.
+
+### Behaviour
+- `GET /favicon.ico` returns 200, `Content-Type: image/x-icon`, a multi-size
+  ICO (16, 32, 48, 64 px) of the dark tile: mark `#e9e5da`, dot `#c99b6c`,
+  rings `rgba(111,163,145,.5)` on `#17191a`, rounded corners. These are the
+  frontend's app-icon colours (`renar-frontend/branding-tools/gen_logo.py`
+  `MARK`, `DOT`, `RING`, `INK_BG`); a dark tile reads on both light and dark
+  tab strips, which is why the frontend uses it too.
+- The response carries `Cache-Control: public, max-age=86400` (a day: the
+  icon almost never changes, and without it browsers re-fetch it often).
+- `/favicon.ico` never counts toward the rate limit or probe detection: it is
+  added to `_UNCOUNTED_PATHS` next to `/health` and `/robots.txt`. It is
+  already in `users/usage.py` `_UNTRACKED_PATHS`, so usage stats don't change.
+- Every admin page's `<link rel="icon">` points at `/favicon.ico` (same
+  origin, so the admin CSP `default-src 'self'` allows it; no CSP change).
+  Changing the `_FAVICON` constant is enough: every page in
+  `routers/admin/` (`app_releases`, `dashboard`, `invites`, `login`,
+  `moderation`, `periodic_tasks`, `premium`, `settings`, `update`, `users`,
+  and `_html._usage_page`) already links `{_FAVICON}`.
+- The sign-in page (`login._page()`) topbar shows the renar mark at 30×30 px
+  in place of the padlock SVG inside `.logo`, with no yellow/orange gradient
+  box behind it (the mark has its own rings; the gradient would clash). The
+  mark is an inline `<svg>` (inline markup isn't a fetch, so CSP doesn't
+  apply), in the dark palette above on a transparent background, so it sits
+  on the topbar's `--surface` (`#3c3836`).
+- `session_expired_page()` has no topbar today; it gets the same topbar as
+  `_page()` (mark + "Admin" / "renar"), so both sign-in screens match.
+- Every other admin page keeps its own topbar icon (dashboard tiles, 📦 on
+  Invites, …): those icons say which page you're on.
+- If the ICO or SVG file is missing from the install (a packaging bug), the
+  app fails at import with a `FileNotFoundError` naming the path, rather than
+  serving a broken icon: both files are read once at import.
+
+### Out of scope
+- The frontend's own favicon (`renar-frontend/src/renar_frontend/assets/`)
+  and the app icons: unchanged.
+- A light favicon variant or `prefers-color-scheme` switching: the dark tile
+  works on both tab strips.
+- `apple-touch-icon` and a web manifest: the API isn't installed as a web app.
+- Topbar icons on the other admin pages.
+
+### Implementation
+1. `src/renar_backend/static/favicon.ico` (new folder and file): generate it
+   from `renar-frontend/branding-tools/logo_out/icon-ico-base.png` (256 px
+   dark rounded tile) with Pillow:
+   `Image.open(p).save("favicon.ico", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])`,
+   run once from the scratchpad (no committed script). Don't copy the
+   frontend's `icon.ico`: it carries 128 and 256 px layers (≈62 KB) that a
+   tab never uses. Check the result lists exactly those four sizes
+   (`Image.open(...).info["sizes"]`).
+2. `src/renar_backend/static/renar-mark-dark.svg` (new): copy
+   `renar-frontend/branding-tools/renar-mark.svg`, drop the `<title>` and the
+   `width`/`height` attributes (keep `viewBox="0 0 512 512"`), and recolour:
+   both ring circles `stroke="#6fa391" stroke-opacity="0.5"`, the path
+   `fill="#e9e5da"`, the dot `fill="#c99b6c"`. Render it to PNG at 30 px and
+   60 px (LANCZOS, never NEAREST) on a `#3c3836` background and look at it
+   before going on: rings, spiral and dot must all be visible and not muddy.
+3. `src/renar_backend/routers/admin/_html.py`: replace the `_FAVICON`
+   data-URI with `_FAVICON = "/favicon.ico"`; add
+   `_STATIC = Path(__file__).resolve().parents[2] / "static"` and
+   `_LOGO_MARK_SVG = (_STATIC / "renar-mark-dark.svg").read_text(encoding="utf-8")`;
+   add `.logo.mark { background: none; }` and
+   `.logo.mark svg { width: 30px; height: 30px; stroke: none; }` to
+   `_BASE_CSS` (the existing `.logo svg` rule sets 16 px and
+   `stroke: var(--bg)`, which would shrink the mark and outline its filled
+   shapes; the ring circles keep their own `stroke` attribute, which a CSS
+   `stroke: none` on the `<svg>` element doesn't override because it only
+   inherits).
+4. `src/renar_backend/routers/admin/login.py`: add a `_topbar()` helper
+   returning the `<header class="topbar">` block with
+   `<div class="logo mark" aria-hidden="true">{_LOGO_MARK_SVG}</div>` and the
+   existing brand spans; use it in `_page()` (replacing the padlock header)
+   and in `session_expired_page()` (new, before `<main>`). One helper, so the
+   two screens can't drift (DRY).
+5. `src/renar_backend/main.py`: add
+   `@app.get("/favicon.ico", include_in_schema=False)` next to `home()`,
+   returning `Response(_FAVICON_BYTES, media_type="image/x-icon",
+   headers={"Cache-Control": "public, max-age=86400"})`, with
+   `_FAVICON_BYTES = (Path(__file__).parent / "static" / "favicon.ico").read_bytes()`
+   at module level.
+6. `src/renar_backend/users/security.py`: add `"/favicon.ico"` to
+   `_UNCOUNTED_PATHS` and extend its comment ("…and the browser's automatic
+   favicon fetch").
+7. Packaging: hatch ships every non-ignored file under `src/renar_backend`,
+   so `static/` should be in the wheel. Confirm with `uv build --wheel` and
+   `python -m zipfile -l dist/<wheel>` (both files listed), then delete the
+   `dist/` output.
+8. `metadata -m` on every edited file; `ruff format` then `ruff check` on the
+   edited `.py` files, fixing by hand (never `--fix`).
+
+### Tests
+- `tests/test_security.py`:
+  - `test_favicon_served`: `GET /favicon.ico` → 200, `image/x-icon`,
+    `Cache-Control` contains `max-age=86400`, body opens with Pillow and its
+    `info["sizes"]` is exactly {16, 32, 48, 64}.
+  - `test_favicon_never_counts_as_probe`: fetch `/favicon.ico`
+    `probe_ban_threshold + 5` times from one client, then `GET /` is still
+    200 (not 403): the browser's repeated fetches can't ban anyone.
+  - `test_favicon_not_rate_limited`: lower `rate_limit_per_minute` to 3 with
+    the site-settings override pattern this file already uses, fetch the
+    icon 10 times, all 200.
+- `tests/test_admin_login.py`:
+  - extend `test_login_page_renders_form`: the page contains
+    `href="/favicon.ico"`, `class="logo mark"` and the mark's
+    `viewBox="0 0 512 512"`, and no longer contains the padlock path
+    `M7 11V7a5 5 0 0 1 10 0v4`.
+  - `test_session_expired_page_has_logo_topbar`: get the session-expired
+    page the way the existing expired-session tests reach it and assert the
+    same topbar markup.
+  - `test_every_admin_page_uses_served_favicon`: walk the same page list as
+    `test_every_admin_page_has_logout_button`; each has
+    `href="/favicon.ico"` and none contains `data:image/svg+xml`.
+- Rendered UI check: start the backend (`uv run be`), open
+  `<ADMIN_PATH>/login` with Playwright in Chromium and Firefox, screenshot
+  the topbar and assert the 30×30 `.logo` box isn't one flat colour (mark
+  pixels present); check `/favicon.ico` loads (200) in both. Firefox matters
+  because it's the browser that blocked the old data-URI icon. Screenshot
+  the session-expired page too.
+- Full suite: `uv run pytest` green.
+
+### Docs
+- `docs/design-decisions.md`, section "Admin panel colors mirror the app's
+  Gruvbox palette": add a paragraph: the favicon and sign-in mark are the
+  app's dark icon tile (`#17191a`, mark `#e9e5da`, dot `#c99b6c`), served
+  from `/favicon.ico` rather than a data URI because the admin CSP is
+  `default-src 'self'`.
+- `docs/anti-abuse.md`, "3. Rate limiting — throttle first, ban only for
+  floods": one sentence that `/health`, `/robots.txt` and `/favicon.ico`
+  never count; "2. Probe detection": the favicon is a real route, so
+  browsers fetching it never count as probes.
+- Changelog under `[Unreleased]`: `### Added` "Serve the renar logo as
+  `/favicon.ico` on every page, and show it on the admin sign-in page.";
+  `### Fixed` "Browsers fetching the favicon no longer count as scanner
+  probes."
+
+### Done when
+- [ ] `curl -I https://api.dev.renar.app/favicon.ico` → 200 `image/x-icon`.
+- [ ] The browser tab on `/` and on every admin page shows the renar tile in
+      Chromium and Firefox (screenshots).
+- [ ] Sign-in and session-expired pages show the mark in the topbar, with no
+      padlock and no gradient box (screenshots).
+- [ ] Repeated `/favicon.ico` fetches never ban or throttle (tests green).
+- [ ] The wheel contains `renar_backend/static/favicon.ico` and
+      `renar_backend/static/renar-mark-dark.svg`.
+- [ ] New tests and the full suite pass; ruff clean; headers updated.
+- [ ] Docs and CHANGELOG lines in place.
+
+## 29. Store the admin password as an Argon2id hash and lock `.env` to the service user
+
+**[Blocking for 1.0]** · Area: Admin panel / Security
+
+**Why:** the admin password sits in `.env` in plain text (`ADMIN_PASSWORD`,
+`config.py` `admin_password`) and `users/admin_session.py` compares it
+directly (`secrets.compare_digest(password.encode(),
+settings.admin_password.encode())`). Anyone who reads `.env`, a pre-deploy
+backup of it (prod keeps code tarballs with `.env` in `/root/renar-backups/`)
+or a copy on the dev PC gets the password outright. The TOTP secret is in the
+same file, so one leaked file is a full admin login. On the VPS nothing
+restricts the file beyond the `renar` user owning `/opt/renar-backend`.
+**Goal:** `.env` holds only an Argon2id hash of the admin password
+(`ADMIN_PASSWORD_HASH`). A leaked `.env` gives the TOTP secret but not the
+password, so it can't sign in alone. On the VPS `.env` and the Cloudflare
+credentials file are readable only by `renar`.
+
+### Behaviour
+- `uv run admin-password` asks for the password twice (hidden, `getpass`),
+  refuses an empty one, one under 12 characters, or two that differ (exit 1,
+  a one-line reason, nothing printed), and otherwise prints
+  `ADMIN_PASSWORD_HASH='$argon2id$v=19$m=65536,t=3,p=4$…'` plus "Put this
+  line in .env and restart the server. This signs out every current admin
+  session." The single quotes matter: python-dotenv doesn't interpolate inside
+  single quotes, so the `$` signs survive.
+- Hashing uses `argon2-cffi`'s `PasswordHasher()` defaults (RFC 9106
+  low-memory profile: 64 MiB, 3 passes, 4 lanes). One sign-in costs about
+  50 ms and 64 MiB on the 1 GB VPS, which is fine because sign-ins are rare
+  and already rate-limited.
+- Sign-in verifies with `PasswordHasher().verify(hash, password)`;
+  `VerifyMismatchError` means a wrong password (same response and strike as
+  today). The password is always verified, even when the username is wrong,
+  so response time doesn't reveal which half was wrong (the current code
+  also always runs both comparisons).
+- Boot checks, in `config.py` validators, each stopping the server with a
+  one-line message (same pattern as the existing `admin_totp_secret`
+  validator):
+  - a non-empty `ADMIN_PASSWORD` → "ADMIN_PASSWORD is no longer read: run
+    `uv run admin-password` and set ADMIN_PASSWORD_HASH instead" (so an old
+    `.env` can't silently leave the panel unconfigured or the plain password
+    in place);
+  - a non-empty `ADMIN_PASSWORD_HASH` that doesn't start with `$argon2id$`
+    → "ADMIN_PASSWORD_HASH is not an Argon2id hash".
+- `admin_configured()` needs `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` and
+  `ADMIN_TOTP_SECRET`; the 503 detail names `ADMIN_PASSWORD_HASH`.
+- Changing the password changes the hash, which is part of the session
+  fingerprint, so every admin session is signed out (as today).
+- VPS: `/opt/renar-backend/.env` and `/opt/renar-backend/.secrets/cloudflare.ini`
+  are `renar:renar` mode `0600`; `/root/renar-backups/` is mode `0700`.
+  The local leftover `D:\tmp\renar_db_pw.txt` (prod DB password written
+  during the VPS migration) is deleted once its value is in a password
+  manager.
+
+### Out of scope
+- Admin accounts in the database and per-account roles (item 19).
+- Moving `ADMIN_TOTP_SECRET` or `ADMIN_API_TOKEN` out of `.env`.
+- Rehashing on parameter change (`check_needs_rehash`): one operator re-runs
+  `admin-password` instead.
+- App users' bcrypt hashes (`users/auth.py`): unchanged.
+
+### Implementation
+1. `pyproject.toml`: add `argon2-cffi>=23.1` to `dependencies` with
+   `uv add`, and the script `admin-password` (entry point `renar_backend.admin_cli:password`)
+   next to `admin-totp`.
+2. `src/renar_backend/config.py`: add `admin_password_hash: str = ""`; keep
+   `admin_password: str = ""` only so a field validator can reject a non-empty
+   value with the message above; add the `$argon2id$` prefix validator.
+3. `src/renar_backend/users/admin_session.py`: module-level
+   `_HASHER = PasswordHasher()`; `admin_configured()` and
+   `_cred_fingerprint()` use `settings.admin_password_hash`; the credential
+   check calls `_HASHER.verify(...)`, catching `VerifyMismatchError` as a
+   wrong password. Any other `argon2.exceptions.VerificationError` /
+   `InvalidHashError` is logged at `error` with `exc_info` (named logger
+   already in the module) and treated as a failed sign-in, never a 500 and
+   never silent.
+4. `src/renar_backend/admin_cli.py`: `password_main(argv)` (argparse,
+   `getpass.getpass` twice, checks above, prints the line) and a `password()`
+   entry point, mirroring `totp_main`/`totp`.
+5. `src/renar_backend/routers/admin/login.py:109` and
+   `src/renar_backend/users/auth.py:42`: the 503 detail says
+   `ADMIN_PASSWORD_HASH`.
+6. `src/renar_backend/_test_server.py:67`: set `ADMIN_PASSWORD_HASH = ""`
+   instead of `ADMIN_PASSWORD`.
+7. `.env.example`: replace `ADMIN_PASSWORD=` with `ADMIN_PASSWORD_HASH=` and
+   a comment "generate with `uv run admin-password`".
+8. Dev PC: `uv run admin-password`, replace the `ADMIN_PASSWORD` line in
+   `.env`, restart `uv run be`, sign in.
+9. VPS (after deploying the release with this change):
+   `sudo -u renar HOME=/opt/renar-backend /opt/renar-backend/.local/bin/uv run --no-dev admin-password`,
+   edit `.env`, then `chown renar:renar /opt/renar-backend/.env /opt/renar-backend/.secrets/cloudflare.ini`,
+   `chmod 600` both, `chmod 700 /root/renar-backups`,
+   `systemctl restart renar-backend`, sign in. If item 27 is still open,
+   add `admin-password` to its setup steps for both hosts.
+10. `ruff format` then `ruff check` on edited `.py` files (fix by hand);
+    `metadata -m` on every edited file.
+
+### Tests
+- `tests/conftest.py`: `ADMIN_PASSWORD_HASH = PasswordHasher().hash(ADMIN_CREDS[1])`
+  computed once at import; the admin fixture sets `settings.admin_password_hash`;
+  env reset uses `ADMIN_PASSWORD_HASH`.
+- `tests/test_admin_login.py`: the two parametrized lists
+  (`test_unconfigured_returns_503`, `test_rotated_credential_kills_session`)
+  use `admin_password_hash`; new `test_wrong_password_with_hash_is_rejected`
+  (strike recorded), `test_wrong_username_still_verifies_password` (patch
+  `_HASHER.verify` with a spy, assert it ran), and
+  `test_corrupt_hash_fails_closed_and_logs` (hash replaced by
+  `$argon2id$garbage` after boot → sign-in refused, `caplog` has an error).
+- `tests/test_config.py` (or wherever the `admin_totp_secret` validator is
+  tested): plain `ADMIN_PASSWORD` set → `ValidationError` with the message;
+  non-Argon2 hash → `ValidationError`; empty both → loads.
+- `tests/test_admin_cli.py`: `password_main` with patched `getpass` — happy
+  path prints a line that `PasswordHasher().verify` accepts; mismatch, empty
+  and 11-character inputs exit 1 and print no hash.
+- Full suite `uv run pytest` green.
+
+### Docs
+- `docs/environment-variables.md`, "Admin panel": replace the
+  `ADMIN_USERNAME` / `ADMIN_PASSWORD` row with `ADMIN_USERNAME` and
+  `ADMIN_PASSWORD_HASH` (generate with `uv run admin-password`, single-quoted,
+  boot refuses a plain `ADMIN_PASSWORD`).
+- `docs/design-decisions.md`: new entry "Admin password stored as an Argon2id
+  hash": why (a leaked `.env` no longer gives the password; the TOTP secret
+  alone can't sign in), why Argon2id over the bcrypt app users use (memory-hard,
+  current OWASP first choice, no 72-byte limit), why defaults.
+- `README.md`: wherever admin setup is described, the `admin-password` step.
+- Changelog `[Unreleased]`: `### Changed` "The admin password is stored as an
+  Argon2id hash (`ADMIN_PASSWORD_HASH`, made with `uv run admin-password`);
+  a plain `ADMIN_PASSWORD` stops the server at boot."
+
+### Done when
+- [ ] `grep ADMIN_PASSWORD= .env` is empty on the dev PC and the VPS, and
+      sign-in works on both.
+- [ ] A plain `ADMIN_PASSWORD` in `.env` stops the server with the message.
+- [ ] `stat -c '%U:%G %a'` shows `renar:renar 600` for `.env` and
+      `cloudflare.ini` on the VPS, and `700` for `/root/renar-backups`.
+- [ ] `D:\tmp\renar_db_pw.txt` no longer exists.
+- [ ] New tests and the full suite pass; ruff clean; headers updated.
+- [ ] Docs and CHANGELOG lines in place.
+
+## 30. Put the prod admin panel behind Cloudflare Access
+
+**[Blocking for 1.0]** · Area: Admin panel / Security
+
+**Why:** anyone on the internet who learns `ADMIN_PATH` (from browser
+history, a screenshot, a log line) reaches the prod sign-in page; only the
+password and TOTP code stand between them and the panel. `ADMIN_PATH` hides
+the page from scanners but is itself a secret that can leak. Prod
+(`api.renar.app`, Hetzner VPS) already accepts traffic only from
+Cloudflare's IP ranges (ufw rules), so Cloudflare can check who someone is
+before a request ever reaches the server. After item 29, so the password is
+hashed before this goes live.
+**Goal:** opening `https://api.renar.app/<ADMIN_PATH>` first shows
+Cloudflare's sign-in (a one-time code mailed to the operator's address); only
+then does renar's own sign-in page appear. `uv run build apk --split --publish`
+keeps uploading to prod without a browser.
+
+### Behaviour
+- Cloudflare Zero Trust (free plan, up to 50 users) has one self-hosted
+  application "renar admin (prod)": domain `api.renar.app`, path
+  `<ADMIN_PATH without the leading slash>` (Access matches the path and
+  everything under it), session duration 24 hours.
+- Policy 1 "operator", action Allow: include Emails = the operator's own
+  address; login method One-time PIN.
+- Policy 2 "apk publish", action Service Auth: include Service Token =
+  `renar-apk-publish` (created under Access → Service credentials, duration
+  1 year). Non-browser clients send `CF-Access-Client-Id` and
+  `CF-Access-Client-Secret` headers instead of signing in.
+- Everything outside the admin path (the app API, `/app-releases/latest`, the
+  APK download, `/health`, `/robots.txt`, the `/admin` honeypot) is untouched.
+- renar-frontend's publish (`launcher.py`, `_publish_credentials` and the
+  upload loop): reads two optional keyring entries in the existing
+  `renar-backend-admin` service, `api.renar.app:cf_access_client_id` and
+  `api.renar.app:cf_access_client_secret`. If both are set, every upload
+  sends them as the two headers; if neither is, nothing changes (dev). If
+  only one is set, it stops with "--publish: set both cf_access_client_id
+  and cf_access_client_secret for <host>, or neither".
+- Publish when Access blocks the upload (missing/expired token): Cloudflare
+  answers 302 to its login page or 403. The upload loop turns both into
+  "--publish: Cloudflare Access blocked the upload to <host> (HTTP <code>);
+  store the service token in the keyring (see README Build)", not the
+  generic "answered HTTP …" with a page of HTML.
+- Dev (`api.dev.renar.app`) is out: its DNS record is unproxied (DNS only),
+  so Cloudflare never sees that traffic; it keeps `ADMIN_PATH` + password +
+  TOTP.
+
+### Out of scope
+- Making renar itself verify Cloudflare's signed header (item 31).
+- Proxying the dev host through Cloudflare.
+- Access in front of anything but the admin path.
+
+### Implementation
+1. renar-frontend `src/renar_frontend/launcher.py`: add
+   `cf_access_client_id: str | None` and `cf_access_client_secret: str | None`
+   to `PublishTarget`; read them in `_publish_credentials` (both-or-neither
+   check above); in the upload loop build `headers` from the bearer token plus
+   the two Access headers when present; add the 302/403 branch with the
+   message above. Logging stays on the module's `_log`; never log the secret.
+2. Ship that frontend change (commit; no app release needed, it's build
+   tooling) before step 3, or publishing breaks the moment Access goes on.
+3. Cloudflare dashboard → Zero Trust: create the team if none exists, keep
+   One-time PIN as the login method, create service token
+   `renar-apk-publish` (copy the id and secret once; the secret isn't shown
+   again), create the application and both policies above. Dashboard only:
+   the zone-scoped DNS token can't manage Access, and the work is one-off.
+4. Build PC: store the two values with
+   `uv run python -c "import keyring; keyring.set_password('renar-backend-admin', 'api.renar.app:cf_access_client_id', '<id>')"`
+   and the same for `:cf_access_client_secret`.
+5. Check by hand: a private browser window on `https://api.renar.app/<ADMIN_PATH>`
+   shows Cloudflare's code prompt; after the code, renar's sign-in; `curl -I`
+   without headers gets 302/403; `uv run build apk --split --publish` of a
+   test version uploads (then delete that test release from the App Releases
+   page).
+6. Add a calendar reminder 11 months out to rotate the service token (it
+   expires after a year and publishing would then fail with the 403 message).
+
+### Tests
+- renar-frontend `tests/test_launcher_build_tooling.py`:
+  - `test_publish_credentials_reads_cf_access_pair`: both keyring entries set
+    → `PublishTarget` carries them.
+  - `test_publish_credentials_rejects_half_cf_access_pair`: only one set →
+    `SystemExit` with the message.
+  - `test_publish_sends_cf_access_headers` (with the injectable `client`, an
+    `httpx.MockTransport`): headers present on every upload; absent when the
+    pair is unset.
+  - `test_publish_access_block_message` for 302 and 403: the friendly message,
+    and `already published` lists earlier ABIs.
+- Full renar-frontend suite green. The Cloudflare side is checked by step 5
+  (no automated test can reach Zero Trust).
+
+### Docs
+- renar-frontend `README.md`, "Build": the two optional keyring commands and
+  when they're needed (prod behind Access).
+- renar-backend `docs/design-decisions.md`, next to "`ADMIN_PATH` is
+  configurable…": entry "Prod admin panel behind Cloudflare Access": why
+  (identity check before the origin; `ADMIN_PATH` stays as a second layer),
+  why a service token for publish, why dev isn't covered.
+- renar-backend `docs/anti-abuse.md` or the deployment doc that covers the
+  VPS: where the Access app lives and how to rotate the service token.
+- Changelogs: renar-frontend `### Added` "`--publish` sends a Cloudflare
+  Access service token when one is stored for the target host."
+
+### Done when
+- [ ] Private window on the prod admin path shows Cloudflare's code prompt
+      first (screenshot).
+- [ ] `curl -I https://api.renar.app/<ADMIN_PATH>/login` without headers →
+      302 or 403.
+- [ ] A test `--publish` to prod succeeds with the token, and fails with the
+      friendly message with the token removed from the keyring.
+- [ ] Rotation reminder set.
+- [ ] Frontend tests pass; docs and changelog lines in place.
+
+## 31. Make the backend verify Cloudflare Access's signed header on admin routes
+
+**[Blocking for 1.0]** · Area: Admin panel / Security
+
+**Why:** after item 30, Cloudflare Access protects prod's admin path, but
+renar doesn't know that: the server would serve the admin path to any request
+that arrives from a Cloudflare IP. Allowing only Cloudflare's IP ranges
+doesn't prove the request went through *your* Cloudflare zone and its Access
+policy: anyone with their own Cloudflare account can point a proxied record
+at the VPS IP (`<VPS IP>`) and reach the origin from a Cloudflare IP,
+skipping Access entirely. Cloudflare adds a signed JWT
+(`Cf-Access-Jwt-Assertion` header) to every request it lets through;
+checking it closes that gap. After item 30.
+**Goal:** when Access is configured for a host, a request to the admin path
+without a valid Access token gets the same 404 an unknown path gets, before
+any renar sign-in code runs.
+
+### Behaviour
+- Two new settings: `CF_ACCESS_TEAM_DOMAIN` (e.g. `renar.cloudflareaccess.com`)
+  and `CF_ACCESS_AUD` (the application's Audience tag, Zero Trust → Access →
+  Applications → renar admin (prod) → Overview). Both empty (default, and on
+  dev) → no check at all. Only one set → boot stops with
+  "set both CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD, or neither".
+- Both set → every request whose path starts with the admin path (including
+  `/login`, the API-token upload route and static admin pages) must carry
+  `Cf-Access-Jwt-Assertion`, an RS256 JWT whose signature checks against
+  `https://<team>/cdn-cgi/access/certs`, with `aud` containing
+  `CF_ACCESS_AUD`, `iss` = `https://<team>`, and `exp` in the future (PyJWT
+  default 0 s leeway; add 60 s for clock skew). Browser sign-ins and the
+  service-token publish both carry this header.
+- Missing or invalid token → 404 `{"detail": "Not Found"}` (indistinguishable
+  from a nonexistent path), logged at `warning` with the client IP and the
+  reason (missing / bad signature / wrong aud / expired), never the token.
+  It does not add an abuse strike: a stale browser tab must not get the
+  operator banned.
+- Signing keys are fetched with `jwt.PyJWKClient` (cached, `lifespan=3600`).
+  If the certs URL can't be fetched and no cached key matches → 503 "Admin
+  access check unavailable", logged at `error` with `exc_info`; never fail
+  open.
+- The `/admin` honeypot keeps working as before (it isn't the admin path once
+  `ADMIN_PATH` is moved).
+
+### Out of scope
+- Using the Access identity (email) as renar's admin identity; renar's own
+  sign-in stays.
+- Any non-admin route.
+
+### Implementation
+1. `pyproject.toml`: change `PyJWT>=2.9` to `PyJWT[crypto]>=2.9` (`uv add`),
+   which pulls in `cryptography` for RS256.
+2. `src/renar_backend/config.py`: `cf_access_team_domain: str = ""`,
+   `cf_access_aud: str = ""`, and a model validator for the both-or-neither
+   rule.
+3. New `src/renar_backend/users/cf_access.py`: `verify_access_jwt(token) -> None`
+   raising a small `AccessDenied(reason)` exception, with the module-level
+   `PyJWKClient` built lazily from the setting; named logger `_log`.
+4. `src/renar_backend/users/security.py`: in `SecurityHeadersMiddleware`'s
+   neighbour (or a new `CloudflareAccessMiddleware` registered right after
+   `AbuseGuardMiddleware` in `main.py`, so bans still apply first), run the
+   check for admin-path requests when both settings are set, returning the
+   404/503 above. One middleware, not a dependency on each admin router, so
+   no admin route can be missed.
+5. VPS `.env`: set both values, restart, check (Done when).
+6. `ruff format` then `ruff check`; `metadata -c` on the new module,
+   `metadata -m` on edited files.
+
+### Tests
+- `tests/test_cf_access.py` (new), with an RSA key generated in the test and
+  `PyJWKClient.get_signing_key_from_jwt` patched to return it:
+  - settings unset → admin path works without a header (dev unchanged);
+  - valid token → admin login page 200;
+  - missing header, wrong `aud`, wrong `iss`, expired, signed by another key
+    → 404 each, a warning logged with the reason, no strike row written;
+  - key fetch raises `PyJWKClientError` → 503, error logged;
+  - non-admin path (`/health`, `/app-releases/latest`) never checked;
+  - config: only one of the two set → `ValidationError`.
+- `tests/test_admin_login.py`: one test that the upload route with a valid
+  bearer token but no Access header gets 404 when Access is configured.
+- Full suite green.
+
+### Docs
+- `docs/environment-variables.md`, "Admin panel": rows for
+  `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` (where to find each, empty on
+  dev).
+- `docs/design-decisions.md`: extend item 30's entry with why the origin
+  checks the JWT (Cloudflare-IP allowlisting alone can be bypassed through
+  another Cloudflare account) and why failures are a 404 without a strike.
+- Changelog `[Unreleased]` `### Security`: "When Cloudflare Access is
+  configured, admin routes require its signed header; requests that bypass
+  Access get a 404."
+
+### Done when
+- [ ] On prod, the admin path works in the browser after the Cloudflare code
+      and `--publish` still uploads.
+- [ ] `curl -H "Host: api.renar.app" https://<VPS IP>/<ADMIN_PATH>/login --resolve …`
+      style request without the header (from a Cloudflare-proxied test
+      record on another zone, or by temporarily allowing your IP in ufw) → 404.
+- [ ] New tests and the full suite pass; ruff clean; headers updated.
+- [ ] Docs and CHANGELOG lines in place.
