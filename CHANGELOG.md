@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/11/10 11:05:30.819877 )
+[//]: # (+ Revised: 	2026/11/10 15:58:08.265957 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- The admin panel's Server Update now also works on a server that isn't a
+  git checkout (e.g. prod's tarball deploy): it installs the latest
+  release's `renar_backend-<version>.tar.gz` after checking its `.b3`
+  BLAKE3 sum, with the same rollback. New optional `.env` setting
+  `UPDATE_RELEASE_URL` (GitHub's releases by default)
 
 ## [0.20.0] - 2026-11-10
 
