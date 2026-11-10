@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:19.233482
-Revised: 2026/11/10 13:53:25.822469
+Revised: 2026/11/10 16:17:28.131846
 
 The admin Server Update page and its routes: each state's rendering (the
 Update button enabled only when an update is available), the POST re-check,
@@ -12,6 +12,8 @@ update_check.check()/prepare()/launch() are replaced here; the
 test_update_check*.py and test_self_update*.py files cover them on real
 tarballs and real git repos.
 """
+
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -165,11 +167,49 @@ def test_git_mode_post_launches_without_a_stage(client, admin_enabled, state, mo
     assert launched[0][1] is None
 
 
+def _check_button(page: str) -> str:
+    start = page.index('id="check-btn"')
+    return page[start : page.index("</button>", start)]
+
+
 def test_fetch_failure_offers_retry(client, admin_enabled, state):
     state(blocked_reason="Couldn't check for updates: timed out", retryable=True)
     page = client.get("/admin/update", headers=admin_enabled).text
-    assert 'href="/admin/update">Retry</a>' in page
+    assert _check_button(page).endswith(">Retry")
     assert "Up to date" not in page
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{}, AVAILABLE, {"blocked_reason": "Repository has local changes."}],
+    ids=["up_to_date", "available", "blocked"],
+)
+def test_every_state_has_an_enabled_check_now_button(client, admin_enabled, state, kw):
+    state(**kw)
+    button = _check_button(client.get("/admin/update", headers=admin_enabled).text)
+    assert button.endswith(">Check now")
+    assert "disabled" not in button
+
+
+def test_check_now_reloads_the_page(client, admin_enabled, state):
+    page = client.get("/admin/update", headers=admin_enabled).text
+    script = page[page.index("getElementById('check-btn')") :]
+    assert "window.location.reload()" in script[: script.index("})();")]
+
+
+def test_page_shows_when_it_checked(client, admin_enabled, state, monkeypatch):
+    when = datetime(2026, 11, 10, 15, 4, 5, tzinfo=UTC)
+    monkeypatch.setattr(update_check, "check", lambda current, *a, **k: _status(current, checked_at=when))
+    page = client.get("/admin/update", headers=admin_enabled).text
+    assert "<dt>Checked</dt>" in page
+    assert '<time id="checked-at" datetime="2026-11-10T15:04:05+00:00">2026-11-10 15:04:05 UTC</time>' in page
+
+
+def test_checked_time_is_shown_in_utc(client, admin_enabled, state, monkeypatch):
+    when = datetime(2026, 11, 10, 16, 4, 5, tzinfo=timezone(timedelta(hours=1)))
+    monkeypatch.setattr(update_check, "check", lambda current, *a, **k: _status(current, checked_at=when))
+    page = client.get("/admin/update", headers=admin_enabled).text
+    assert ">2026-11-10 15:04:05 UTC</time>" in page
 
 
 def test_reason_is_escaped(client, admin_enabled, state):

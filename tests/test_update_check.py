@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:19.074462
-Revised: 2026/11/10 13:53:25.595140
+Revised: 2026/11/10 16:17:28.475594
 
 update_check in tarball mode (a project without .git): every state the
 Server Update page can show against a fake release feed, prepare()'s
@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -116,6 +117,13 @@ def test_stale_lock_is_replaced(project, caplog):
 def test_missing_server_pid_blocks(project):
     (project / "logs" / "be.pid").unlink()
     assert "wasn't started with `uv run be`" in update_check.check("0.1.0").blocked_reason
+
+
+def test_check_stamps_when_it_ran(project, forge):
+    before = datetime.now(UTC)
+    st = update_check.check("0.1.0")
+    assert before <= st.checked_at <= datetime.now(UTC)
+    assert st.checked_at.tzinfo is not None
 
 
 def test_unparseable_running_version_blocks(project):
