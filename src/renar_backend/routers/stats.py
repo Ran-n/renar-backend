@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.713668
-Revised: 2026/11/09 11:49:59.908372
+Revised: 2026/11/10 09:48:06.601691
 
 Watch-time and library statistics for the current user.
 """
@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..catalog.titles import WITH_TITLE_GENRES
@@ -67,11 +67,14 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
         db.query(LibraryEntry).options(*WITH_TITLE_GENRES).filter(LibraryEntry.user_id == user.id).all()
     )
     items_by_id = {item.id: item for item in items}
-    watches: list[EpisodeWatch] = (
-        db.query(EpisodeWatch)
-        .join(LibraryEntry, EpisodeWatch.media_item_id == LibraryEntry.id)
-        .filter(LibraryEntry.user_id == user.id)
-        .all()
+    # only the timestamp is used below — selecting the one column skips ORM
+    # hydration of every watch row, which dominated this endpoint's time
+    watched_ats: list[datetime | None] = list(
+        db.scalars(
+            select(EpisodeWatch.watched_at)
+            .join(LibraryEntry, EpisodeWatch.media_item_id == LibraryEntry.id)
+            .where(LibraryEntry.user_id == user.id)
+        )
     )
 
     film_minutes = 0
@@ -118,8 +121,8 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
     weekday_counter: Counter[str] = Counter()
     watch_days: set[date] = set()
 
-    for w in watches:
-        ts = _as_utc(w.watched_at)
+    for watched_at in watched_ats:
+        ts = _as_utc(watched_at)
         if ts is None:
             continue
         watch_days.add(ts.date())

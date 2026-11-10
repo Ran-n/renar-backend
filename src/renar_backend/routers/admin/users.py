@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/11/09 11:49:59.637335
+Revised: 2026/11/09 23:36:40.806003
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -53,6 +53,7 @@ from ._html import (
     _daily_from_map,
     _endpoint_item,
     _fmt_ts,
+    _logout_button,
     _render_daily_chart,
     _render_endpoint_bars,
     _render_hbars,
@@ -348,6 +349,7 @@ def _render_user_detail(
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{_P}/users">Users</a>
+    {_logout_button()}
   </header>
 
   <div class="page">
@@ -460,6 +462,7 @@ def _render_users(
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{_P}">Admin</a>
+    {_logout_button()}
   </header>
 
   <div class="page">

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 13:10:00.000000
-Revised: 2026/09/02 10:57:41.615749
+Revised: 2026/11/09 23:36:42.295360
 
 Registration/email-change confirmation codes (users/email_confirmation.py,
 routers/auth.py's /auth/confirm-email + /auth/resend-confirmation) and the
@@ -15,8 +15,7 @@ register through the API directly to exercise the unconfirmed path itself.
 from datetime import timedelta
 
 import pytest
-from conftest import ADMIN_BASIC as BASIC
-from conftest import PASSWORD, hard_delete
+from conftest import PASSWORD, admin_headers, hard_delete
 
 from renar_backend import site_settings
 from renar_backend.database import SessionLocal
@@ -681,7 +680,7 @@ def _set_email_confirmation_enabled(client, enabled: bool) -> None:
     payload = dict(_BASE_SETTINGS_PAYLOAD)
     if enabled:
         payload["email_confirmation_enabled"] = "1"
-    r = client.post("/admin/settings", data=payload, auth=BASIC, follow_redirects=False)
+    r = client.post("/admin/settings", data=payload, headers=admin_headers(), follow_redirects=False)
     assert r.status_code == 303, r.text
 
 

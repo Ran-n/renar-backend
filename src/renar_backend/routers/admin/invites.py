@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/08/10 16:09:56.561126
+Revised: 2026/11/09 23:36:39.960522
 
 Admin invite-codes page: list, generate, revoke, restore, and delete
 registration invite codes.
@@ -28,6 +28,7 @@ from ._html import (
     _PAGE_CSS,
     _RESPONSIVE_CSS,
     _fmt_ts,
+    _logout_button,
     _stat_tile,
 )
 from .settings import _SETTINGS_CSS
@@ -324,6 +325,7 @@ def _render_invites(codes: list[InviteCode], flash: str = "") -> str:
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{_P}">Admin</a>
+    {_logout_button()}
   </header>
 
   <div class="page">

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/09/07 15:13:00.384643
+Revised: 2026/11/09 16:20:34.181708
 """
 
 import re
@@ -1077,3 +1077,17 @@ class StrikeResultOut(BaseModel):
 
     permanent: bool
     banned_until: float | None = None
+
+
+class AppReleaseOut(BaseModel):
+    """One APK the in-app updater can install (see app_releases.py)."""
+
+    id: int
+    platform: str
+    version: str
+    size_bytes: int
+    sha256: str
+    blake3: str
+    notes: str | None
+    uploaded_at: datetime
+    download_url: str

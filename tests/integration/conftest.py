@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 16:49:30.615616
-Revised: 2026/08/18 16:49:46.134243
+Revised: 2026/11/09 23:36:41.457232
 
 Fixtures for tests that need the real app reachable over real HTTP, not
 TestClient's in-process ASGI transport — the main motivating case is
@@ -18,6 +18,7 @@ up right.
 """
 
 import contextlib
+import os
 import signal
 import socket
 import subprocess
@@ -32,6 +33,10 @@ import httpx
 import pytest
 
 TEST_PASSWORD = "IntegrationTest123!"
+# Throwaway admin API token the live test server enables (see
+# _test_server.py's ITEST_ADMIN_API_TOKEN handling).
+ITEST_ADMIN_API_TOKEN = "itest-admin-api-token"  # nosec B105 -- throwaway, test server only
+ITEST_ADMIN_HEADERS = {"Authorization": f"Bearer {ITEST_ADMIN_API_TOKEN}"}
 
 
 def _free_port() -> int:
@@ -40,7 +45,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _spawn_logged(args: list[str]) -> tuple[subprocess.Popen, Path, TextIO]:
+def _spawn_logged(args: list[str], env: dict | None = None) -> tuple[subprocess.Popen, Path, TextIO]:
     """subprocess.Popen with output going to a real file, not stdout=PIPE.
 
     Not load-bearing here the way it was for renar-frontend's Playwright
@@ -57,6 +62,7 @@ def _spawn_logged(args: list[str]) -> tuple[subprocess.Popen, Path, TextIO]:
         stdout=log_file,
         stderr=subprocess.STDOUT,
         close_fds=True,
+        env=env,
     )
     return proc, log_path, log_file
 
@@ -92,7 +98,10 @@ def live_server():
     """Base URL of the real app on a real socket, isolated Postgres schema,
     torn down (schema dropped) at the end of the session."""
     port = _free_port()
-    proc, log_path, log_file = _spawn_logged([sys.executable, "-m", "renar_backend._test_server", "--port", str(port)])
+    env = {**os.environ, "ITEST_ADMIN_API_TOKEN": ITEST_ADMIN_API_TOKEN}
+    proc, log_path, log_file = _spawn_logged(
+        [sys.executable, "-m", "renar_backend._test_server", "--port", str(port)], env=env
+    )
     base_url = f"http://127.0.0.1:{port}"
     try:
         _wait_ready(proc, f"{base_url}/health", log_path)

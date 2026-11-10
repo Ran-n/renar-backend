@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/29 16:09:56.207783
+Revised: 2026/11/09 23:36:39.611893
 
 Shared HTML/CSS primitives for the admin control panel.
 
@@ -91,6 +91,8 @@ _BASE_CSS = """
       transition: color .15s, border-color .15s;
     }
     .admin-pill:hover { color: var(--text-2); border-color: var(--text-3); }
+    .logout-form { display: contents; }
+    .logout-form button { cursor: pointer; font-family: inherit; margin-left: .5rem; }
     .topbar-brand-link {
       display: flex; align-items: center; gap: .875rem;
       text-decoration: none; color: inherit;
@@ -135,6 +137,16 @@ _RESPONSIVE_CSS = """
       .tile { padding: 1.1rem .9rem; }
     }
 """
+
+
+def _logout_button() -> str:
+    """Top-bar Log out control: a POST form (a GET link could be fired by a
+    stray <img src>), styled like the Admin pill beside it."""
+    return (
+        f'<form class="logout-form" method="post" action="{_P}/logout">'
+        '<button class="admin-pill" type="submit">Log out</button></form>'
+    )
+
 
 _PAGE_CSS = """
     .page { max-width: 1400px; margin: 0 auto; padding: 1.75rem 2rem; }
@@ -602,6 +614,7 @@ def _usage_page(title: str, icon: str, back_href: str, back_label: str, inner: s
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{back_href}">{html.escape(back_label)}</a>
+    {_logout_button()}
   </header>
 
   <div class="page">

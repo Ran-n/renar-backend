@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/21 09:51:03.288862
+Revised: 2026/11/09 23:36:39.789889
 
 Admin dashboard: the tile-grid landing page at /admin (or the configured
 admin path).
@@ -17,7 +17,10 @@ from ._html import (
     _FAVICON,
     _P,
     _RESPONSIVE_CSS,
+    _logout_button,
 )
+from .app_releases import APP_RELEASES_ICON_PATHS
+from .update import SERVER_UPDATE_ICON_PATHS
 
 router = APIRouter()
 
@@ -162,6 +165,26 @@ _SERVICES = [
             "</svg>"
         ),
     },
+    {
+        "name": "App Releases",
+        "desc": "Android builds served to in-app updates",
+        "href": f"{_P}/app-releases",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
+            ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+            f"{APP_RELEASES_ICON_PATHS}</svg>"
+        ),
+    },
+    {
+        "name": "Server Update",
+        "desc": "Pull the latest version and restart",
+        "href": f"{_P}/update",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
+            ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+            f"{SERVER_UPDATE_ICON_PATHS}</svg>"
+        ),
+    },
 ]
 
 
@@ -201,6 +224,7 @@ def _render_dashboard() -> str:
     </div>
     <div class="topbar-fill"></div>
     <span class="admin-pill">Admin</span>
+    {_logout_button()}
   </header>
   <div class="page">
     <h1 class="page-heading">Control Panel</h1>

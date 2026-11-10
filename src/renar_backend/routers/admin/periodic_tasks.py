@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/07/18 00:26:59.018518
+Revised: 2026/11/09 23:36:40.296797
 
 Admin periodic-tasks page: cards grouped by media type (TV Shows, Films,
 Security), one card per background task, each with its own enable toggle,
@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from ... import task_runs
 from ...models import PeriodicTaskRun
 from ...users.auth import require_admin as _require_admin
-from ._html import _BASE_CSS, _FAVICON, _P, _PAGE_CSS, _RESPONSIVE_CSS, _fmt_ts
+from ._html import _BASE_CSS, _FAVICON, _P, _PAGE_CSS, _RESPONSIVE_CSS, _fmt_ts, _logout_button
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -170,6 +170,7 @@ def _render_periodic_tasks(runs: dict) -> str:
     </a>
     <div class="topbar-fill"></div>
     <a class="admin-pill" href="{_P}">Admin</a>
+    {_logout_button()}
   </header>
 
   <div class="page">

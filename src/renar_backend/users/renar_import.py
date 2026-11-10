@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/09/02 10:57:11.225854
+Revised: 2026/11/09 15:59:25.118676
 
 Import a Renar-native export (users/export.py's .7z of profile/library/
 comments/social JSON) back into an account — the write side of GDPR Art.
@@ -44,6 +44,7 @@ from pathlib import Path
 import py7zr
 from sqlalchemy.orm import Session
 
+from ..catalog.progress import caught_up_status, show_is_airing
 from ..catalog.titles import find_or_create_title, normalize_title_key
 from ..database import SessionLocal
 from ..models import (
@@ -228,6 +229,10 @@ def _reconcile_library_entry(entry: LibraryEntry, incoming: dict) -> bool:
 
 
 def _sync_progress(item: LibraryEntry, db: Session) -> None:
+    if item.status == WatchStatus.completed and show_is_airing(item.title_ref):
+        # an export from before airing shows stopped auto-completing (see
+        # catalog/progress.py) — an airing show is in progress, not finished
+        item.status = WatchStatus.watching
     watches = db.query(EpisodeWatch).filter(EpisodeWatch.media_item_id == item.id).all()
     if not watches:
         return
@@ -239,7 +244,7 @@ def _sync_progress(item: LibraryEntry, db: Session) -> None:
         and item.episodes_watched >= item.total_episodes
         and item.status not in (WatchStatus.dropped, WatchStatus.paused)
     ):
-        item.status = WatchStatus.completed
+        item.status = caught_up_status(item)
 
 
 def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) -> None:

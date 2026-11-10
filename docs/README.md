@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 13:30:58.253707 )
-[//]: # (+ Revised: 	2026/07/09 13:30:58.253707 )
+[//]: # (+ Revised: 	2026/11/09 23:36:38.087785 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Docs
@@ -15,5 +15,6 @@
   panel, caching and other non-obvious architecture choices are the way
   they are.
 
-For setup, running the server, and the endpoint list, see the
+For setup, running the server, updating it (the admin panel's Server
+Update page and the manual commands) and the endpoint list, see the
 [top-level README](../README.md).

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/11/09 11:43:55.623794 )
-[//]: # (+ Revised: 	2026/11/09 11:50:01.319096 )
+[//]: # (+ Revised: 	2026/11/10 11:04:47.969158 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # TODO
@@ -17,7 +17,7 @@ history lives in git, `CHANGELOG.md` and `docs/design-decisions.md`. Items
 moved over from the old `docs/backlog.md` keep their original free-form
 text; rewrite one into the template below before implementing it.
 
-Next item number: 27
+Next item number: 28
 
 ## Index
 
@@ -44,9 +44,7 @@ Next item number: 27
 21. [Production hosting isn't chosen or set up](#21-production-hosting-isnt-chosen-or-set-up)
 22. [Privacy policy and Terms of Service are drafted but not published](#22-privacy-policy-and-terms-of-service-are-drafted-but-not-published)
 23. [No payment integration wired to the app stores — and mobile can't just reuse a web payment flow](#23-no-payment-integration-wired-to-the-app-stores--and-mobile-cant-just-reuse-a-web-payment-flow)
-24. [Host Android app releases for in-app updates](#24-host-android-app-releases-for-in-app-updates)
-25. [Add a one-click backend update to the admin panel](#25-add-a-one-click-backend-update-to-the-admin-panel)
-26. [Replace the admin panel's Basic-auth popup with a login page and authenticator-app codes](#26-replace-the-admin-panels-basic-auth-popup-with-a-login-page-and-authenticator-app-codes)
+27. [Turn on admin sign-in and the one-click update on the dev PC and the Hetzner VPS](#27-turn-on-admin-sign-in-and-the-one-click-update-on-the-dev-pc-and-the-hetzner-vps)
 
 ## Adding an item
 
@@ -735,550 +733,75 @@ web checkout is added, prefer a merchant-of-record processor (Stripe Tax,
 Paddle, or similar) rather than raw Stripe — it keeps VAT/sales-tax
 collection and PCI card-data scope off Renar entirely.
 
-## 24. Host Android app releases for in-app updates
+## 27. Turn on admin sign-in and the one-click update on the dev PC and the Hetzner VPS
 
-**[Blocking for 1.0]**
+**[Blocking for 1.0]** · Area: Operations
 
-**Why:** the user wants Renar to update itself with one button press. Today a
-new frontend build only reaches a phone by hand: `uv run build apk --tg` in
-renar-frontend sends the arm64 APK to Telegram, and the user installs it from
-there. There is nowhere an installed app can ask "is there a newer version?",
-and no forge release to fetch from: renar-frontend's GitHub repo is private
-(`gh repo view` → `PRIVATE`) and no tags or releases exist on any forge, so an
-unauthenticated phone can't download anything from it. The backend is the one
-server every installed app already reaches, so it hosts the update channel.
-This item is the server half; renar-frontend's `TODO.md` items 30 (publish
-builds here) and 31 (the in-app Update button) build on it.
-
-**Goal:** the backend stores uploaded APKs per ABI, any app can ask
-`GET /app-releases/latest?platform=android-arm64-v8a` and download the file,
-and the admin panel has an **App Releases** page listing every upload with a
-delete button.
+**Why:** the admin panel now signs in with a password plus an authenticator
+code and has a Server Update page, but both need one-time setup on each host
+that only the operator can do. Until `ADMIN_TOTP_SECRET` is set, the panel
+answers 503; until prod is a git checkout, its Update button stays disabled
+("Not a git checkout").
+**Goal:** on both hosts the admin can sign in with an authenticator code,
+`uv run build apk --split --publish` uploads with the API token, and the
+Update button updates and rolls back for real.
 
 ### Behaviour
-- `GET /app-releases/latest?platform=<p>` (no auth) returns 200 with
-  `{"id", "platform", "version", "size_bytes", "sha256", "blake3", "notes",
-  "uploaded_at", "download_url"}` for the highest version of that platform.
-  "Highest" compares `version` as an integer tuple (`0.10.0` > `0.9.9`), not
-  as a string, so it never picks `0.9.9` over `0.10.0`.
-- No release for that platform yet → 404 `{"detail": "No release for this platform"}`.
-- `platform` not in `APP_RELEASE_PLATFORMS` → 422 (FastAPI validation via a
-  `Literal`/enum query type), so a typo is never answered with a silent 404.
-- `GET /app-releases/{id}/download` (no auth) streams the file with
-  `Content-Type: application/vnd.android.package-archive`, `Content-Length`,
-  and `Content-Disposition: attachment; filename="renar-<version>-<abi>.apk"`
-  (every artifact filename carries the app version). Unknown id → 404. Row
-  exists but file missing on disk → 500 logged at ERROR with the path, never a
-  0-byte 200.
-- `POST /admin/app-releases` (HTTP Basic admin auth, `users.auth.require_admin`,
-  same as every other admin route) takes multipart `file`, `platform`,
-  `version`, optional `notes` (max 2000 chars) and returns 201 with the same
-  JSON as `latest`.
-  - `version` must match `^\d+\.\d+\.\d+$` → else 422.
-  - File must start with the ZIP magic bytes `PK\x03\x04` (an APK is a ZIP) → else 422 "Not an APK".
-  - File larger than `APP_RELEASE_MAX_BYTES` (200 MiB; today's arm64 APK is
-    well under Telegram's 50 MB cap, so 200 MiB leaves headroom) → 413, and the
-    partial temp file is deleted.
-  - Same `(platform, version)` already stored with the same BLAKE3 → 200 with
-    the existing row (re-running a publish is idempotent).
-  - Same `(platform, version)` with a different BLAKE3 → 409 "Version already
-    published with different content; bump the version". Installed apps
-    compare versions, so silently replacing a version's bytes would leave some
-    phones on a build that no longer exists.
-  - Wrong/missing admin credentials → 401, as everywhere else in `/admin`.
-- Files are stored content-addressed under
-  `<settings.media_dir>/app-releases/<blake3>.apk`, written to a `.part` temp
-  file while hashing (BLAKE3 and SHA-256 in one streaming pass), then renamed
-  atomically. SHA-256 is stored alongside BLAKE3 because the phone verifies
-  with Python's stdlib `hashlib` (no extra native wheel on Android — see
-  renar-frontend `TODO.md` item 31); BLAKE3 stays the project's canonical hash
-  (`.b3` files, the media store).
-- Admin page `GET /admin/app-releases`: one table per platform, newest version
-  first, columns Version · Size (MB, 1 decimal) · Uploaded (UTC) · Notes ·
-  BLAKE3 (first 12 hex chars, full value in `title`) · a red-outlined
-  **Delete** button. The latest row per platform carries a green "Latest" pill.
-  Empty state: "No releases uploaded yet. Publish one with
-  `uv run build apk --split --publish` in renar-frontend."
-- `POST /admin/app-releases/{id}/delete` removes the row and its file, then
-  redirects back (303) to the page. File already missing → row still deleted,
-  WARNING logged. Deleting the latest makes the next-highest the latest.
-- The admin dashboard (`routers/admin/dashboard.py` `_SERVICES`) gets an
-  **App Releases** tile, desc "Android builds served to in-app updates", with
-  a package/box icon not used by any other tile (distinct icon per control).
+- Dev PC (`api.dev.renar.app`, the renar-backend checkout there) and
+  prod (`api.renar.app`, Hetzner VPS `/opt/renar-backend`, systemd
+  `renar-backend.service` as user `renar`) each get their own
+  `ADMIN_TOTP_SECRET` and `ADMIN_API_TOKEN`.
+- The operator's own public IP is in Exempt IPs (`<ADMIN_PATH>/settings`) on
+  both, so failed sign-ins never ban it. If it changes and a ban happens:
+  `ssh` to the host, `uv run admin-unban <ip>`, then restart the service.
 
 ### Out of scope
-- Uploading from the admin page UI (uploads come from the build command,
-  renar-frontend `TODO.md` item 30); the page is list + delete only.
-- iOS, Windows, web and Play Store builds: Play builds must update through
-  Play (Google Play policy forbids self-updating outside it), the others aren't
-  shipped to users yet.
-- A minimum-supported-version / forced-update flag.
-- Forge (GitHub/GitLab/Codeberg) releases — separate release workflow.
+- Any code change, unless a step below finds a bug (then add an item for it).
 
 ### Implementation
-1. `src/renar_backend/constants.py`: add `APP_RELEASE_PLATFORMS = ("android-arm64-v8a",
-   "android-armeabi-v7a", "android-x86_64")` (the three ABIs
-   renar-frontend's `launcher._ANDROID_ABIS` builds) and
-   `APP_RELEASE_MAX_BYTES = 200 * 1024 * 1024`.
-2. `src/renar_backend/models.py`: add `class AppRelease(Base)`, table
-   `app_releases`: `id` PK, `platform` (String, not null), `version` (String,
-   not null), `blake3` (String(64), unique, not null), `sha256` (String(64),
-   unique, not null), `size_bytes` (BigInteger, not null), `notes` (Text,
-   nullable), `uploaded_at` (DateTime tz, default `utcnow`). `UniqueConstraint
-   ("platform", "version")`. BCNF: the candidate keys are `id`, `(platform,
-   version)`, `blake3` and `sha256`; `size_bytes`/`notes`/`uploaded_at` depend
-   only on those keys, and the file path is derived from `blake3` at runtime,
-   never stored. No version-sort column: it would be derived from `version`.
-3. `alembic/versions/<rev>_add_app_releases_table.py`: `uv run alembic revision
-   --autogenerate -m "add app_releases table"`, review it, `upgrade head`.
-4. `tests/test_normalization.py`: add `app_releases` to whatever per-table
-   expectation it keeps (run it first; do not widen any allowlist — see the
-   project's BCNF rule).
-5. `src/renar_backend/schemas.py`: `AppReleaseOut` (the JSON above;
-   `download_url` built as `/app-releases/{id}/download`).
-6. `src/renar_backend/app_releases.py` (new, the service layer): `store_upload
-   (db, upload_file, platform, version, notes) -> AppRelease` (stream to
-   `.part` in 1 MiB chunks, hash with `blake3.blake3()` + `hashlib.sha256()`,
-   enforce size and magic, dedupe/409 logic, atomic `os.replace`), `latest(db,
-   platform)`, `file_path(release) -> Path`, `delete(db, release_id)`. Named
-   logger `logging.getLogger(__name__)`; INFO on store/delete with platform,
-   version, size; every failure raises `HTTPException` or logs at ERROR — no
-   bare `except`.
-7. `src/renar_backend/routers/app_releases.py` (new): the two public routes,
-   thin, calling step 6.
-8. `src/renar_backend/routers/admin/app_releases.py` (new): the JSON upload
-   route, the HTML page (reuse `_html._BASE_CSS`, `_RESPONSIVE_CSS`, `_P`,
-   `_FAVICON`, and the existing table/pill/button classes — copy the markup
-   style of `periodic_tasks.py`), and the delete POST.
-9. `src/renar_backend/routers/admin/__init__.py`: import and
-   `include_router(app_releases.router)`; add it to the docstring's sub-module
-   list.
-10. `src/renar_backend/routers/admin/dashboard.py`: add the `_SERVICES` tile.
-11. `src/renar_backend/main.py`: `app.include_router(app_releases.router)` next
-    to the other public routers.
-12. Check `AbuseGuardMiddleware`: a 404 from `/app-releases/latest` on a
-    platform with no build yet is normal traffic from every installed app on
-    every launch; make sure it never counts as a strike (exempt the path the
-    same way existing benign 404s are exempted), and that any strike path
-    still checks `site_settings.exempt_ips` first.
-13. `ruff format` then `ruff check` (fix by hand, no `--fix`) on every edited
-    `.py`; `metadata -c` on new files, `metadata -m` on edited ones.
+1. Dev PC: `uv run admin-totp`, scan the QR (entry "renar (dev)"), put
+   `ADMIN_TOTP_SECRET=…` and a new
+   `ADMIN_API_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")`
+   in `.env`, restart `uv run be`, sign in at `<ADMIN_PATH>`.
+2. Prod, over SSH: deploy this code first (still by hand: the update button
+   needs step 4), then run the same commands as `renar` in `/opt/renar-backend`
+   (`sudo -u renar /opt/renar-backend/.local/bin/uv run admin-totp`), edit
+   `.env`, `sudo systemctl restart renar-backend`, sign in.
+3. Both panels: add the operator's public IP to Exempt IPs.
+4. Prod as a git checkout, so the Update button works:
+   - `apt install git` if missing.
+   - A read-only deploy key for the `renar-backend` GitHub repo:
+     `sudo -u renar ssh-keygen -t ed25519 -f /opt/renar-backend/.ssh/deploy -N ""`,
+     add the `.pub` as a deploy key (read-only) on GitHub, and
+     `/opt/renar-backend/.ssh/config` with `Host github.com` →
+     `IdentityFile ~/.ssh/deploy`.
+   - Convert in place: `git init -b master`, `git remote add origin
+     git@github.com:<owner>/renar-backend.git`, `git fetch origin master`,
+     `git reset --mixed origin/master`, then `git status` must be empty
+     (anything listed is a difference between the tar deploy and the repo:
+     resolve it before going on).
+   - systemd: `ReadWritePaths` must cover `/opt/renar-backend` itself (git,
+     `uv sync` and the reloader all write there, not only under `media`,
+     `logs`, `certs`, `.cache`); `systemctl daemon-reload` and restart.
+5. Build PC: store the publish credentials per README "Build" (renar-frontend)
+   for `api.renar.app` and `api.dev.renar.app`: `<host>:api_token` and
+   `<host>:admin_path`.
+6. One real update on each host across a commit that adds a migration; one
+   with a deliberately failing migration pushed to a scratch branch, merged
+   into a scratch remote's `master`, then deleted.
 
 ### Tests
-- `tests/test_app_releases.py` (new, real Postgres via the existing fixtures,
-  a tmp `media_dir`):
-  - `test_upload_stores_file_and_row`: 201, file at `app-releases/<blake3>.apk`, hashes correct.
-  - `test_upload_same_content_is_idempotent`: second identical upload → 200, one row, one file.
-  - `test_upload_same_version_different_content_conflicts`: 409, original untouched.
-  - `test_upload_rejects_non_zip`, `test_upload_rejects_bad_version`,
-    `test_upload_rejects_unknown_platform`: 422 each, no file left behind.
-  - `test_upload_too_large_is_413_and_cleans_part_file` (monkeypatch the cap to 1 KiB).
-  - `test_upload_requires_admin`: 401 without/with wrong Basic auth.
-  - `test_latest_compares_versions_numerically`: `0.9.9` and `0.10.0` → `0.10.0`.
-  - `test_latest_404_when_none` and `test_latest_is_per_platform`.
-  - `test_download_streams_with_versioned_filename`: headers and bytes match.
-  - `test_download_missing_file_is_500_and_logged` (caplog ERROR).
-  - `test_delete_removes_row_and_file` and `test_delete_promotes_next_latest`.
-  - `test_admin_page_lists_releases_and_empty_state`: HTML contains rows / empty text.
-  - `test_latest_404_is_not_an_abuse_strike`: many 404s from one IP never ban it.
-- `tests/test_property.py`: hypothesis property — for any set of valid
-  versions, `latest` equals `max` by integer tuple.
-- `tests/test_fuzz.py`: fuzz the upload form fields → never a 500.
-- `tests/integration/test_smoke.py`: live server upload → latest → download → delete round trip.
-- `tests/test_normalization.py` passes with the new table.
+- None new; this is configuration. The code is covered by
+  `tests/test_admin_login.py`, `test_admin_cli.py`, `test_update_check.py`,
+  `test_self_update.py` and `test_admin_update.py`.
 
 ### Docs
-- `docs/README.md`: API section — the three new routes and the admin page.
-- `docs/design-decisions.md`: "App updates are served by the backend" (Why:
-  frontend repo is private and has no releases; the backend is the one host
-  every app reaches) and "Phones verify SHA-256, storage keyed by BLAKE3" (Why:
-  stdlib only on Android).
-- `CHANGELOG.md` `[Unreleased]`: "Added: app-release hosting for in-app updates
-  (`/app-releases/latest`, download, admin upload and App Releases page)."
+- None, unless a step differs from README "Setting up admin sign-in" /
+  "Updating the server": then fix the README.
 
 ### Done when
-- [ ] `uv run alembic upgrade head` creates `app_releases`; `test_normalization.py` passes.
-- [ ] All tests above pass; full `uv run pytest` and `-m integration` green.
-- [ ] A curl upload of a real APK shows up on `/admin/app-releases` (screenshot) and downloads with the versioned filename.
-- [ ] Dashboard shows the App Releases tile with its own icon.
-- [ ] Docs and changelog updated; ruff and metadata clean.
-
-## 25. Add a one-click backend update to the admin panel
-
-**[Blocking for 1.0]**
-
-**Why:** updating the server today means going to the machine, stopping
-`uv run be` in its console, `git pull`, `uv sync`, `uv run alembic upgrade
-head`, and starting it again — five manual steps, any of which is easy to
-forget (a skipped migration surfaces later as 500s). The user wants an
-**Update** button in the admin panel that does all of it. Independent of
-item 24; either can ship first.
-
-**Goal:** a new **Server Update** page in the admin panel shows the running
-version and commit, whether `origin/master` has newer commits (with their
-one-line messages and the version they'd bring), and an **Update** button. One
-press pulls, syncs dependencies, migrates, restarts the server, and the page
-reports the outcome when the server is back.
-
-### Behaviour
-- `GET /admin/update` shows: running version (`main.backend_version()`),
-  branch, short commit SHA, and the result of a fresh check: `git fetch origin
-  master` (30 s timeout), then `git log --oneline HEAD..origin/master` and the
-  `version` from `git show origin/master:pyproject.toml`.
-- **Up to date** (0 commits behind): "Up to date" with a green pill; Update
-  button disabled and visibly greyed out (dimmed background and label).
-- **Update available**: list of incoming commits (max 50 shown, then "and N
-  more"); enabled primary button "Update to <version>" (or "Update (N
-  commits)" when the version didn't change).
-- **Blocked** — button disabled with the reason shown right above it:
-  - Working tree dirty (`git status --porcelain` not empty) → lists the dirty
-    paths. Why: a second editor often has uncommitted work in this checkout; a
-    pull would either fail or mix it with the update, and the rollback below
-    relies on a clean tree.
-  - Not on `master` → "Checked out on <branch>; switch to master to update."
-  - Local commits not on origin (`git rev-list origin/master..HEAD` non-empty)
-    → "Local commits not pushed; update would need a merge." Only
-    fast-forwards are allowed so an update never creates a merge commit.
-  - `git fetch` fails or times out → the error text, plus "Retry" link; never
-    shown as "Up to date".
-  - Another update already running (lock file present) → "An update is already in progress."
-- Pressing **Update** asks `confirm("Update and restart the server? Connected
-  apps reconnect automatically.")` (a decision dialog, so the browser's own
-  is fine), then POSTs `/admin/update`. The server re-checks every blocking
-  condition (the page may be stale), spawns the helper, answers 202, and the
-  page switches to "Updating… the server restarts; this page reloads when it's
-  back" with the custom spinner style used elsewhere in the admin panel (a CSS
-  spinner, no browser default), polling `GET /` every 2 s.
-- The helper (separate process, runs outside the project venv so `uv sync`
-  can replace files the server has open — on Windows a loaded `.pyd` can't be
-  overwritten):
-  1. Writes `logs/self-update-last.json` `{"status": "running", ...}` and takes
-     `logs/self-update.lock` (exclusive create; a lock older than 15 min is
-     treated as stale and replaced, logged at WARNING).
-  2. Waits for the server to stop gracefully: the worker, after sending the
-     202, signals the uvicorn supervisor (Windows: `os.kill(0,
-     signal.CTRL_C_EVENT)` — the helper is started with
-     `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` so it doesn't receive it;
-     POSIX: `os.kill(<supervisor pid>, signal.SIGINT)`). uvicorn's
-     `timeout_graceful_shutdown=5` closes SSE streams. If the supervisor PID
-     is still alive after 30 s, `taskkill /PID <pid> /T /F` (POSIX `SIGKILL`),
-     logged at WARNING.
-  3. `git pull --ff-only origin master` → `uv sync --locked` → `uv run alembic upgrade head`.
-  4. Starts `uv run be` again (Windows: `CREATE_NEW_CONSOLE`, so the server gets
-     its own console window like a hand start; POSIX: `start_new_session=True`,
-     stdout/stderr appended to `logs/renar-backend.log`).
-  5. Polls `https://127.0.0.1:8000/` (`ssl` context with hostname check off —
-     loopback liveness only, `# nosec` with that reason) for up to 120 s until
-     it answers with the expected new version.
-  6. Writes the final `self-update-last.json`: `started_at`, `finished_at`,
-     `from_sha`, `to_sha`, `from_version`, `to_version`, `status`
-     (`ok`/`rolled_back`/`failed`), `failed_step`, `log_path`; removes the lock.
-- Any step 3–5 failing → rollback: `git reset --hard <from_sha>` (safe: the
-  tree was clean by precondition), `uv sync --locked`, start the old version,
-  status `rolled_back` with the failing step. A failed `alembic upgrade`
-  leaves the schema unchanged because `alembic/env.py` runs all pending
-  revisions in one transaction (no `transaction_per_migration`) and Postgres
-  DDL is transactional. If the rollback itself fails → status `failed` and
-  the log path; the server may be down — say so on the page.
-- Every command's full stdout/stderr goes to
-  `logs/self-update-<YYYYmmdd-HHMMSS>.log`; the helper logs with the same
-  `"%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"` format.
-- After the server is back, `/admin/update` shows a result banner from
-  `self-update-last.json`: green "Updated 0.19.8 → 0.20.0", amber "Update
-  failed at <step>; rolled back to 0.19.8" with the log path, or red "Update
-  failed and rollback failed" with the log path. Page times out after 180 s of
-  polling → "Server didn't come back in 3 minutes; check `<log path>` on the
-  host."
-- The old console window (where the user ran `uv run be`) ends with uvicorn's
-  normal shutdown lines; the new server runs in a new window. This is the one
-  case where the backend restarts itself — the user still starts it by hand
-  normally.
-
-### Out of scope
-- Updating renar-frontend (handled by its own in-app update, renar-frontend `TODO.md` item 31).
-- Choosing a branch/commit or downgrading; it's always fast-forward to `origin/master`.
-- Scheduled/automatic updates without a click.
-- Running under a service manager (systemd/NSSM); the backend runs from a console today.
-
-### Implementation
-1. `src/renar_backend/__main__.py`: in `run()`, before `uvicorn.run`, write
-   `os.getpid()` (the supervisor, since `reload=True` runs workers as its
-   children) to `logs/be.pid`; delete it in a `finally`.
-2. `src/renar_backend/self_update.py` (new, **stdlib only** — it runs under
-   `uv run --no-project --isolated python -I`, outside the venv): the helper's
-   steps 1–6 and rollback as functions (`stop_server`, `pull`, `sync`,
-   `migrate`, `start_server`, `wait_healthy`, `rollback`, `write_status`) plus
-   `main(argv)` taking `--repo`, `--pid`, `--from-sha`, `--expected-version`.
-   One `_run(cmd, step)` wrapper that tees output to the log and raises
-   `StepFailed(step)` on non-zero exit, so no step can fail silently.
-3. `src/renar_backend/update_check.py` (new): `check() -> UpdateStatus`
-   dataclass (`branch`, `head_sha`, `behind: list[str]`, `remote_version`,
-   `blocked_reason: str | None`, `dirty_paths`), running git via
-   `subprocess.run(..., timeout=30, check=False)` and turning each failure into
-   a `blocked_reason`; `launch(status)` spawns step 2's helper with the right
-   creation flags and returns; `last_result()` reads `self-update-last.json`
-   (missing → `None`; corrupt → logged ERROR and shown as such).
-4. `src/renar_backend/routers/admin/update.py` (new): `GET /update` (renders
-   from `check()` + `last_result()`), `POST /update` (re-check → 409 with the
-   reason if blocked → `launch` → 202 → `BackgroundTasks` callback that sends
-   the stop signal after the response is flushed). Admin auth on both.
-5. `src/renar_backend/routers/admin/__init__.py`: include the router; docstring entry.
-6. `src/renar_backend/routers/admin/dashboard.py`: **Server Update** tile, desc
-   "Pull the latest version and restart", a refresh/arrow-circle icon used by
-   no other tile.
-7. `src/renar_backend/routers/admin/_html.py`: add a disabled-button style
-   (opacity 0.4 on background and label, `cursor: not-allowed`) if none
-   exists, and the CSS spinner if none exists.
-8. `ruff format` / `ruff check` on every edited `.py`; `metadata -c`/`-m`.
-
-### Tests
-- `tests/test_update_check.py` (new; each test builds a real throwaway git
-  repo pair in `tmp_path` — a bare "origin" and a clone — so git behaviour is
-  real, not mocked):
-  - `test_up_to_date`, `test_behind_lists_commits_and_remote_version`,
-    `test_dirty_tree_blocks_with_paths`, `test_wrong_branch_blocks`,
-    `test_local_commits_block`, `test_fetch_failure_blocks_not_up_to_date`
-    (origin path removed), `test_lock_blocks_second_update`,
-    `test_stale_lock_is_replaced`.
-- `tests/test_self_update.py` (new; same tmp repo pair, `uv`/server steps
-  replaced by small fake scripts on `PATH` so the sequence is real):
-  - `test_happy_path_writes_ok_status` (from/to sha and versions recorded).
-  - `test_migrate_failure_rolls_back_to_from_sha` (HEAD back at `from_sha`, status `rolled_back`, `failed_step == "migrate"`).
-  - `test_rollback_failure_reports_failed`.
-  - `test_every_step_output_is_in_log`.
-  - `test_helper_imports_only_stdlib` (parse the module's imports; it must run outside the venv).
-- `tests/test_admin.py`: `test_update_page_requires_admin`,
-  `test_update_page_renders_each_state` (monkeypatched `check()` per state:
-  disabled button markup for up-to-date/blocked, enabled for available),
-  `test_update_post_rechecks_and_409s_when_blocked`,
-  `test_update_post_launches_and_returns_202` (launch monkeypatched),
-  `test_update_page_shows_last_result_banner` for ok/rolled_back/failed/corrupt json.
-- `tests/test_devserver.py` (or a new test next to it): `run()` writes and removes `logs/be.pid`.
-- Manual, on the real host: one real update across a commit that adds a
-  migration, and one with a deliberately failing migration on a scratch
-  branch pushed to a scratch remote (then delete the scratch branch).
-
-### Docs
-- `docs/README.md`: "Updating the server" — the button, its preconditions, and the manual fallback commands.
-- `README.md` run/deploy section: mention the admin update and that it restarts the server in a new console.
-- `docs/design-decisions.md`: "Self-update runs in a helper outside the venv"
-  (Why: Windows file locks on loaded `.pyd`s) and "Fast-forward only, clean
-  tree only" (Why: safe rollback with `reset --hard`, concurrent editor's WIP).
-- `CHANGELOG.md` `[Unreleased]`: "Added: one-click server update from the
-  admin panel (pull, sync, migrate, restart, automatic rollback)."
-
-### Done when
-- [ ] All listed tests pass; full `uv run pytest` green.
-- [ ] Screenshots of `/admin/update` in up-to-date, update-available and dirty-tree states.
-- [ ] A real update on the host goes from one commit to the next and the page shows the green result banner.
-- [ ] A forced migration failure ends `rolled_back` with the server running the old version.
-- [ ] Docs and changelog updated; ruff and metadata clean.
-
-## 26. Replace the admin panel's Basic-auth popup with a login page and authenticator-app codes
-
-**[Blocking for 1.0]** · Area: Admin / security
-
-**Why:** the admin panel is guarded only by HTTP Basic: `require_admin` in
-`src/renar_backend/users/auth.py:30` compares one shared
-`ADMIN_USERNAME`/`ADMIN_PASSWORD` pair from `.env`, and every admin route in
-`routers/admin/*.py` depends on it (about 45 `Depends(_require_admin)` sites).
-Opening `<ADMIN_PATH>` shows the browser's native grey credentials popup, there
-is no way to log out short of closing the browser, and a leaked password alone
-opens the panel. Prod now runs publicly on the Hetzner VPS, so one password
-between the internet and user deletion, bans and settings is not enough for
-1.0. A failed attempt is only logged (`auth.py:36`), never struck or banned,
-so the password can be guessed at whatever rate the generic rate limiter
-allows. The user asked for a "more classical" login with an OTP. The OTP is a
-TOTP code from an authenticator app (Aegis, Google Authenticator, 1Password),
-not an emailed code, because the admin is not a `User` row and has no email,
-and TOTP keeps working when SMTP is down (chosen by the user on 2026-11-09).
-
-**Goal:** opening `<ADMIN_PATH>` while logged out shows a renar-styled login
-page (same Gruvbox look as the rest of the panel) with Username, Password and
-a 6-digit "Authenticator code" field and a **Sign in** button. A correct
-triple sets a session cookie and lands on the page that was requested; every
-admin page's top bar gains a **Log out** button.
-
-### Behaviour
-- Not configured (any of `ADMIN_USERNAME`, `ADMIN_PASSWORD`,
-  `ADMIN_TOTP_SECRET` empty): every admin route, the login page included,
-  returns 503 "Admin panel not configured" as today. Why: keeps the existing
-  "no way to expose it by accident" rule; TOTP is mandatory, not optional,
-  otherwise the second factor is one missing line in `.env` away from gone.
-- `ADMIN_TOTP_SECRET` set but not valid base32: the server refuses to start
-  with a clear `ValueError` from the settings validator (fail loudly at boot,
-  not with a 503 at login time).
-- Logged out, `GET` on any admin page: `303` to
-  `<ADMIN_PATH>/login?next=<original path+query>`. `next` is honoured only
-  when it equals `<ADMIN_PATH>` or starts with `<ADMIN_PATH>/`; anything else
-  (`//evil.com`, `https://…`) falls back to `<ADMIN_PATH>`. Why: open redirect.
-- Logged out, `POST` on any admin action: `401` HTML "Session expired —
-  sign in again" with a link to the login page, no redirect. Why: a redirect
-  would silently drop the form data and make the action look done.
-- `GET <ADMIN_PATH>/login` while already logged in: `303` to `<ADMIN_PATH>`.
-- `POST <ADMIN_PATH>/login` (form fields `username`, `password`, `code`,
-  `next`):
-  - All three correct: set the cookie, `303` to `next`. Log
-    `INFO admin login ok ip=<ip>`.
-  - Any wrong: re-render the login page with HTTP 401 and one generic error
-    "Wrong username, password or code." (never say which one was wrong), the
-    username field kept, password and code cleared. Log
-    `WARNING admin login failed ip=<ip> username=<repr>` and record a strike
-    via `security.strike_and_maybe_ban(ip, "admin login failed")`, **unless
-    the IP is in `site_settings.exempt_ips`** (check it first, exactly like
-    the middleware at `users/security.py:418`; a missed check once nearly
-    banned localhost on `/svc`). If the strike result calls for a temp ban or
-    permaban, apply it the same way the middleware does.
-  - Accepted codes: current 30 s step ±1 step (`valid_window=1`) to tolerate
-    clock drift. Spaces are stripped ("123 456" works).
-  - Replay: a code whose time step is ≤ the last successfully used step is
-    rejected as wrong, even if otherwise valid. Keep the last used step in a
-    module-level variable guarded by a `threading.Lock` (single uvicorn
-    process; a restart forgetting it only re-opens a ≤90 s window).
-- Session cookie `renar_admin`: a JWT signed with `settings.secret_key`
-  (PyJWT, already a dependency), claims `sub=<admin username>`,
-  `aud="renar-admin"` (so an app user's access token can never pass as an
-  admin session, nor the reverse), `iat`, `exp=iat+8h`, and `cred` = first 16
-  hex chars of `blake3(username + "\0" + password + "\0" + totp_secret)`.
-  Each request recomputes `cred` from current settings; a mismatch counts as
-  logged out. Why: rotating any admin credential in `.env` instantly ends
-  every existing session without a session table. Cookie flags: `HttpOnly`,
-  `SameSite=Strict`, `Path=<ADMIN_PATH>`, `Secure` when
-  `request.url.scheme == "https"` (tests and plain-http local runs use http).
-  No sliding renewal: 8 h after sign-in the next request redirects to login.
-- **Log out**: a `POST <ADMIN_PATH>/logout` form button in every admin top
-  bar, right of the existing "Admin" pill, styled like `.admin-pill`. It
-  deletes the cookie and `303`s to the login page. POST, not GET, so a stray
-  `<img src=…/logout>` can't log the admin out; `GET` answers 405.
-- CSRF: the panel's form POSTs now ride a cookie, whereas today's
-  bearer/Basic model made CSRF moot (see `OriginCheckMiddleware`'s docstring
-  at `users/security.py:545`). `SameSite=Strict` plus the existing Origin
-  check cover it; update that docstring to say so.
-- Login page: no external assets (admin CSP is `default-src 'self'`), inline
-  CSS from `_BASE_CSS`; `autocomplete="username"`, `"current-password"` and
-  `"one-time-code"` with `inputmode="numeric" pattern="[0-9 ]{6,7}"` on the
-  code field, so phones show the number pad and password managers autofill.
-  Usable at 360 px width without horizontal scroll.
-- Honeypot unchanged: with a renamed `ADMIN_PATH`, `/admin/login` is still
-  under the bait prefix and permabans.
-
-### Out of scope
-- Per-account admin/mod roles (item 19): still one operator.
-- Emailed OTP, recovery codes, WebAuthn/passkeys. Lost authenticator means
-  generating a new secret with the script below and editing `.env` on the host.
-- Any change to the app's own user login (`/auth/login`).
-
-### Implementation
-1. `pyproject.toml`: add `pyotp>=2.9` (TOTP) and `segno>=1.6` (terminal QR
-   code, pure Python, no deps) with `uv add pyotp segno`; never hand-edit the
-   lock. Add `admin-totp = "renar_backend.admin_totp:main"` under
-   `[project.scripts]`.
-2. `src/renar_backend/config.py`: add `admin_totp_secret: str = ""` next to
-   `admin_password` (line 74) with a `field_validator` that, when non-empty,
-   strips spaces, uppercases, and checks `base64.b32decode` succeeds, raising
-   `ValueError("ADMIN_TOTP_SECRET is not valid base32")` otherwise.
-3. `src/renar_backend/admin_totp.py` (new, header via `metadata -c`): `main()`
-   generates `pyotp.random_base32()` and writes to stdout the secret, the
-   `otpauth://totp/renar:<ADMIN_USERNAME or "admin">?secret=…&issuer=renar`
-   URI, a terminal QR (`segno.make(uri).terminal(compact=True)`) and the
-   `ADMIN_TOTP_SECRET=…` line to paste into `.env`. Output goes through
-   `sys.stdout.write` because it is the command's result, not a log line;
-   errors go through `logging`.
-4. `src/renar_backend/users/admin_session.py` (new): the one module owning the
-   admin session: `admin_configured()`, `verify_login(username, password,
-   code) -> bool` (constant-time compares as today, TOTP, replay lock),
-   `issue_session(username) -> str`, `read_session(token) -> str | None`
-   (`None` on any `jwt.InvalidTokenError` or `cred` mismatch, logged at DEBUG
-   because an expired cookie is normal), `_cred_fingerprint()` and
-   `COOKIE_NAME`. Keeps `auth.py` about app users (single responsibility).
-5. `src/renar_backend/users/auth.py`: rewrite `require_admin(request)` to read
-   the cookie through `admin_session.read_session`: 503 when not configured;
-   logged out raises a small `AdminLoginRequired` exception carrying method
-   and path. Remove `HTTPBasic`/`_basic`. Keep the name and the return value
-   (admin username) so the ~45 `Depends(_require_admin)` call sites and their
-   `admin_user` audit logging stay untouched.
-6. `src/renar_backend/main.py`: register an exception handler for
-   `AdminLoginRequired` returning the `303` (GET/HEAD) or `401` (other
-   methods) described above.
-7. `src/renar_backend/routers/admin/login.py` (new): `GET /login`,
-   `POST /login`, `POST /logout`, the safe-`next` helper and the strike logic
-   (exempt-IP check first; client IP from the same helper the middleware
-   uses). Login HTML built from the `_html` constants.
-8. `src/renar_backend/routers/admin/__init__.py`: include `login.router` and
-   add it to the docstring's sub-module layout.
-9. `src/renar_backend/routers/admin/_html.py`: add `_logout_button()` returning
-   the `<form method="post" action="{_P}/logout">` button and use it in
-   `_usage_page`'s top bar. Add it to every other hand-built top bar too:
-   `dashboard.py:202`, `invites.py:325`, `moderation.py:118` and `:201`,
-   `periodic_tasks.py`, `premium.py`, `settings.py`, `users.py` (two); find
-   them with `grep -n 'class="topbar"' src/renar_backend/routers/admin/*.py`
-   (10 today). Include item 25's update page if it landed first.
-10. `src/renar_backend/users/security.py`: update `OriginCheckMiddleware`'s
-    docstring (line ~545) for the cookie session.
-11. `tests/conftest.py`: `ADMIN_BASIC` becomes `ADMIN_CREDS`; `admin_enabled`
-    also sets `settings.admin_totp_secret` to a fixed test secret and resets
-    the replay state; new fixture `admin_session(client, admin_enabled)` posts
-    a valid login (code from `pyotp.TOTP(secret).now()`) so the client's
-    cookie jar holds the session.
-12. Replace every `auth=BASIC` with the `admin_session` fixture in
-    `tests/test_admin.py`, `test_account_deletion.py`,
-    `test_email_confirmation.py`, `test_fuzz.py`, `test_premium.py`,
-    `test_ranking.py`, `test_reviews.py`, `test_security.py`, `test_usage.py`
-    (`grep -rn "auth=BASIC\|ADMIN_BASIC" tests`). Two logins inside one test
-    need a fresh time step because of replay protection: patch `time.time`
-    in the replay tests only.
-13. `ruff format` then `ruff check` on every edited `.py` (fix by hand, never
-    `--fix`); `metadata -m` on edited files, `-c` on the three new ones.
-
-### Tests
-- `tests/test_admin_login.py` (new, on the real Postgres test schema):
-  - `test_unconfigured_returns_503`: each of the three settings empty in turn gives 503 on `/admin` and `/admin/login`.
-  - `test_get_redirects_to_login_with_next`: `/admin/users?q=a` gives 303 to `/admin/login?next=%2Fadmin%2Fusers%3Fq%3Da`.
-  - `test_post_without_session_is_401`: logged-out `POST /admin/users/<id>/delete` gives 401 and the user still exists.
-  - `test_login_success_sets_cookie_and_redirects`: cookie is HttpOnly, SameSite=Strict, Path=/admin; lands on `next`.
-  - `test_wrong_password`, `test_wrong_username`, `test_wrong_code`: 401, same generic message, no cookie.
-  - `test_code_with_space_accepted`, `test_code_previous_step_accepted` (drift window).
-  - `test_code_two_steps_old_rejected`.
-  - `test_code_replay_rejected`: the same code twice, second fails.
-  - `test_unsafe_next_ignored`: `next=//evil.com` and `next=https://evil.com` redirect to `/admin`.
-  - `test_failed_login_records_strike` and `test_failed_login_exempt_ip_no_strike` (IP in `exempt_ips` leaves no `Strike` row).
-  - `test_expired_session_redirects`: `exp` in the past gives 303 to login.
-  - `test_rotated_password_kills_session`: changing `settings.admin_password` makes the next request redirect.
-  - `test_user_access_token_not_admin_session`: an app JWT in the `renar_admin` cookie redirects (audience check).
-  - `test_logout_clears_cookie`: POST logout clears the cookie and `/admin` then redirects; `GET /admin/logout` gives 405.
-  - `test_logged_in_get_login_redirects_home`.
-  - `test_every_admin_page_has_logout_button`: GET each admin page and assert the logout form is present.
-- Settings test (existing config tests, or a new `tests/test_config.py`): invalid base32 `ADMIN_TOTP_SECRET` raises `ValueError`.
-- `tests/test_security.py`: `/admin/login` still permabans when `ADMIN_PATH` is renamed.
-- Existing admin tests (step 12) all pass through the new fixture, proving no route lost its guard.
-- `tests/test_zzz_render_check.py`: if it renders admin pages, add the login page.
-- Rendered check: run `uv run be`, open `<ADMIN_PATH>` in Playwright, screenshot the login page at 1280 px and 360 px, the error state, and the dashboard with Log out; review by eye.
-
-### Docs
-- `docs/environment-variables.md` "Admin panel" table: rewrite the
-  `ADMIN_USERNAME` / `ADMIN_PASSWORD` row (login page, not HTTP Basic) and add
-  an `ADMIN_TOTP_SECRET` row (required, base32, generate with
-  `uv run admin-totp`, rotating it logs every session out).
-- `README.md` line ~134: "`GET /admin` — HTML admin panel behind a login page
-  (password + authenticator code); 503 until `ADMIN_USERNAME`,
-  `ADMIN_PASSWORD` and `ADMIN_TOTP_SECRET` are set". Add a short "Setting up
-  admin 2FA" note with the `uv run admin-totp` command.
-- `docs/design-decisions.md`: retitle "Admin panel: server-rendered HTML behind
-  HTTP Basic, not a JSON API + SPA" (line 892) to say login form + TOTP, and
-  add "Admin session: stateless JWT cookie bound to a credential fingerprint"
-  with the Why lines above (no session table, rotation revokes, `aud`
-  separation, TOTP over emailed code).
-- `docs/anti-abuse.md`: failed admin logins now strike (exempt IPs skipped).
-- `.env` on both hosts (dev PC and the Hetzner VPS): add `ADMIN_TOTP_SECRET`
-  before deploying, or the panel goes 503.
-- Changelog: "Admin panel: classic sign-in page with authenticator-app (TOTP) codes, session cookie and Log out button, replacing the HTTP Basic popup."
-
-### Done when
-- [ ] Logged out, `<ADMIN_PATH>` shows the login page, not the browser popup (screenshot).
-- [ ] Sign-in needs username + password + a live authenticator code; every wrong one gives the same generic error and a strike (none for exempt IPs).
-- [ ] Reused and two-step-old codes are rejected.
-- [ ] Log out button on every admin page; afterwards `<ADMIN_PATH>` redirects to login.
-- [ ] Changing any of the three admin env values logs existing sessions out.
-- [ ] `uv run admin-totp` prints a secret, URI and scannable QR; scanning it in an authenticator app yields codes the login accepts.
-- [ ] All listed tests pass; full `uv run pytest` green; ruff and metadata clean.
-- [ ] Docs and changelog updated; `ADMIN_TOTP_SECRET` set on the dev and prod hosts.
+- [ ] Both panels show the login page, and a live authenticator code signs in.
+- [ ] Operator IP in Exempt IPs on both.
+- [ ] `uv run build apk --split --publish` uploads to prod with the token.
+- [ ] Prod `/opt/renar-backend` is a clean git checkout; the Update page shows "Up to date".
+- [ ] A real update ends with the green "Updated A → B" banner; a forced migration failure ends "rolled back" with the old version running.

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.135465 )
-[//]: # (+ Revised: 	2026/07/29 17:42:13.299280 )
+[//]: # (+ Revised: 	2026/11/09 23:36:38.252741 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Anti-abuse system
@@ -111,6 +111,14 @@ temporary ban into a permanent one (same mechanism as the honeypot bans in
 layer 1). Rows untouched for 30 days are pruned automatically so the table
 doesn't grow unbounded from one-off offenders. Manage strikes/permabans
 from `<ADMIN_PATH>/bans`.
+
+A failed admin sign-in (`POST <ADMIN_PATH>/login`: wrong username, password
+or authenticator code) records a strike too, through the same escalation,
+and its temp ban applies from the very next request. An IP in Exempt IPs
+never gets one, so keep the operator's own IP there. Locked out anyway (an
+IP that changed, say)? `uv run admin-unban <ip>` on the server host deletes
+the IP's `banned_ips` and `strikes` rows; then restart the server, which
+holds a copy of active bans in memory.
 
 ## Supporting middleware (not rate limiting, but same file's territory)
 
