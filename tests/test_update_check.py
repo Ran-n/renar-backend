@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:19.074462
-Revised: 2026/11/10 16:17:28.475594
+Revised: 2026/11/11 11:11:07.267149
 
 update_check in tarball mode (a project without .git): every state the
 Server Update page can show against a fake release feed, prepare()'s
@@ -347,3 +347,20 @@ def test_launch_without_uv_raises(project, monkeypatch):
     monkeypatch.setattr(update_check.shutil, "which", lambda name: None)
     with pytest.raises(RuntimeError, match="uv not found"):
         update_check.launch(update_check.UpdateStatus(current_version="0.1.0"), project)
+
+
+def test_mark_result_seen_keeps_the_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(update_check, "REPO", tmp_path)
+    (tmp_path / "logs").mkdir()
+    path = tmp_path / "logs" / self_update.STATUS_FILE
+    path.write_text('{"status": "ok", "from_version": "0.1.0", "to_version": "0.2.0"}', encoding="utf-8")
+    assert update_check.last_result().seen is False
+    update_check.mark_result_seen()
+    result = update_check.last_result()
+    assert (result.status, result.from_version, result.to_version, result.seen) == ("ok", "0.1.0", "0.2.0", True)
+
+
+def test_mark_result_seen_logs_when_missing(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(update_check, "REPO", tmp_path)
+    update_check.mark_result_seen()
+    assert "could not mark" in caplog.text

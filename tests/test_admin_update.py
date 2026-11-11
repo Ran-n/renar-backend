@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:19.233482
-Revised: 2026/11/10 16:17:28.131846
+Revised: 2026/11/11 11:11:07.168952
 
 The admin Server Update page and its routes: each state's rendering (the
 Update button enabled only when an update is available), the POST re-check,
@@ -331,3 +331,40 @@ def test_dashboard_has_server_update_tile(client, admin_enabled, state):
     page = client.get("/admin/", headers=admin_enabled).text
     assert 'href="/admin/update"' in page
     assert update_page.SERVER_UPDATE_ICON_PATHS in page
+
+
+@pytest.mark.parametrize(
+    ("record", "needle"),
+    [
+        ('{"status": "ok", "from_version": "0.1.0", "to_version": "0.2.0"}', "Updated 0.1.0 &rarr; 0.2.0"),
+        ('{"status": "rolled_back", "from_version": "0.1.0", "failed_step": "migrate"}', "rolled back to 0.1.0"),
+    ],
+)
+def test_finished_update_banner_shows_only_once(client, admin_enabled, state, logs, record, needle):
+    (logs / self_update.STATUS_FILE).write_text(record, encoding="utf-8")
+    assert needle in client.get("/admin/update", headers=admin_enabled).text
+    again = client.get("/admin/update", headers=admin_enabled).text
+    assert needle not in again
+    assert 'class="banner' not in again
+
+
+@pytest.mark.parametrize(
+    ("record", "needle"),
+    [
+        ('{"status": "failed", "failed_step": "sync"}', "rollback failed too"),
+        ('{"status": "running"}', "stopped without finishing"),
+        ("{corrupt", "unreadable"),
+    ],
+)
+def test_problem_banner_stays_until_resolved(client, admin_enabled, state, logs, record, needle):
+    (logs / self_update.STATUS_FILE).write_text(record, encoding="utf-8")
+    for _ in range(2):
+        assert needle in client.get("/admin/update", headers=admin_enabled).text
+
+
+def test_new_update_result_shows_again_after_a_seen_one(client, admin_enabled, state, logs):
+    path = logs / self_update.STATUS_FILE
+    path.write_text('{"status": "ok", "from_version": "0.1.0", "to_version": "0.2.0"}', encoding="utf-8")
+    client.get("/admin/update", headers=admin_enabled)
+    path.write_text('{"status": "ok", "from_version": "0.2.0", "to_version": "0.3.0"}', encoding="utf-8")
+    assert "Updated 0.2.0 &rarr; 0.3.0" in client.get("/admin/update", headers=admin_enabled).text

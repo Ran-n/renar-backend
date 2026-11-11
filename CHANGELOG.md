@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/11/10 16:51:06.462137 )
+[//]: # (+ Revised: 	2026/11/11 11:11:07.365672 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Fixed
+
+- The admin Server Update page shows the "Updated X → Y" (or "rolled back")
+  banner once, instead of on every visit forever; failure banners that need
+  attention still stay until a later update
+- A bare `pytest` run no longer aborts at collection on certbot's
+  unreadable `certs/` symlinks; tests are collected from `tests/` only
 
 ## [0.22.0] - 2026-11-10
 
