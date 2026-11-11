@@ -63,6 +63,9 @@ include = [
 exclude = ["__pycache__", "*.pyc"]
 
 [tool.pytest.ini_options]
+# Collect only tests/: a bare `pytest` otherwise walks into certs/, whose
+# certbot live/ symlinks are unreadable on Windows and abort collection.
+testpaths = ["tests"]
 filterwarnings = [
     # starlette's TestClient warns on every import that httpx should be
     # replaced by "httpx2" — that package isn't published on PyPI yet, so

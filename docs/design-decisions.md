@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/11/10 16:22:09.419668 )
+[//]: # (+ Revised: 	2026/11/11 16:51:04.925021 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -1024,6 +1024,20 @@ page's script.
 endpoint would be a second path that renders the same state and could
 drift from the page. The time stamp makes a manual check visible even when
 the answer ("Up to date") doesn't change.
+
+### Server Update: finished-update banners show once
+
+The "Updated X → Y" and "rolled back" banners appear on the first page
+load after the update finishes; that load sets `"seen": true` in the
+result file, and later loads skip them. A failed rollback, a helper that
+died mid-way and an unreadable result file keep their banner until the
+next update writes a fresh record.
+
+**Why:** the result file outlives the update, so without a flag the
+success banner showed forever. The outcomes that need no action are
+reported once; the ones that leave the server needing attention keep
+saying so. The flag sits in the existing result file, which the next
+update replaces, so there's no second state file to keep in sync.
 
 ### No reverse proxy in front of uvicorn
 

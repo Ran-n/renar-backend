@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:18.387223
-Revised: 2026/11/10 16:17:27.444492
+Revised: 2026/11/11 11:11:06.973859
 
 The server's side of the admin panel's one-click update: whether an update
 is available or blocked (``check``), getting it ready (``prepare``),
@@ -567,6 +567,13 @@ class LastResult:
     error: str | None = None
     log_path: str = ""
     finished_at: str | None = None
+    seen: bool = False  # the admin page has already shown this outcome once
+
+
+# Outcomes that need no further action: the page reports them once, then drops
+# the banner. A failed rollback, a helper that died and an unreadable result
+# file keep theirs until a later update replaces the record.
+ONE_SHOT_RESULTS = frozenset({"ok", "rolled_back"})
 
 
 def last_result(repo: Path | None = None) -> LastResult | None:
@@ -581,9 +588,25 @@ def last_result(repo: Path | None = None) -> LastResult | None:
             error=data.get("error"),
             log_path=str(data.get("log_path") or ""),
             finished_at=data.get("finished_at"),
+            seen=bool(data.get("seen", False)),
         )
     except FileNotFoundError:
         return None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         _log.error("corrupt %s: %s", path, exc)
         return LastResult(status="corrupt", error=str(exc), log_path=str(path))
+
+
+def mark_result_seen(repo: Path | None = None) -> None:
+    """Flag the last result as shown, so its banner appears only once. The
+    next update's helper writes a fresh record without the flag. Failure is
+    logged, not fatal: the banner just shows again on the next visit."""
+    path = logs_dir(repo) / self_update.STATUS_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["seen"] = True
+        tmp = path.with_name(f"{path.name}.seen.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, ValueError, TypeError):
+        _log.exception("could not mark %s as seen; its banner will show again", path)

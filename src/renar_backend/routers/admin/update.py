@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:18.560391
-Revised: 2026/11/10 16:20:16.229616
+Revised: 2026/11/11 11:11:07.066719
 
 Admin Server Update: shows the running version and what's newer (the
 incoming commits on origin/master for a git checkout, the latest release
@@ -155,7 +155,7 @@ def _running_version() -> str:
 def _banner(result: update_check.LastResult | None, running: bool) -> str:
     if running:
         return ""
-    if result is None:
+    if result is None or (result.seen and result.status in update_check.ONE_SHOT_RESULTS):
         return ""
     log = f" Log: <code>{html.escape(result.log_path)}</code>" if result.log_path else ""
     if result.status == "ok":
@@ -306,7 +306,11 @@ def render_page(st: update_check.UpdateStatus, result: update_check.LastResult |
 def admin_update_page(_: str = Depends(_require_admin)):
     version = _running_version()
     st = update_check.check(version)
-    return HTMLResponse(render_page(st, update_check.last_result(), version))
+    result = update_check.last_result()
+    page = render_page(st, result, version)
+    if result is not None and not result.seen and result.status in update_check.ONE_SHOT_RESULTS:
+        update_check.mark_result_seen()  # shown once; a reload or Check now drops it
+    return HTMLResponse(page)
 
 
 @router.get("/update/status", include_in_schema=False)

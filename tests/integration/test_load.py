@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:29:43.383581
-Revised: 2026/08/18 17:29:43.383581
+Revised: 2026/11/11 17:42:29.053514
 
 Load test: drives a short headless locust run (tests/load/locustfile.py)
 against a live_server and asserts the backend survived it — zero failed
@@ -62,6 +62,8 @@ def test_backend_survives_a_short_burst_of_concurrent_load(live_server):
         rows = list(csv.DictReader(stats_file.read_text(encoding="utf-8").splitlines()))
         aggregated = next(r for r in rows if r["Name"] == "Aggregated")
         failure_count = int(aggregated["Failure Count"])
+        if int(aggregated["Request Count"]) == 0:  # locust writes "N/A" percentiles then
+            pytest.fail(f"locust sent no requests:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
         p95 = float(aggregated["95%"])
 
         assert failure_count == 0, f"{failure_count} failed requests under load:\n{result.stdout}"
