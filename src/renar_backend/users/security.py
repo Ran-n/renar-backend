@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/11/09 23:36:41.135366
+Revised: 2026/11/14 00:43:56.542381
 
 In-app defenses against the scanner/bot traffic a publicly exposed server
 attracts, tuned so that legitimate users are never banned:
@@ -58,8 +58,9 @@ _HOUR = 3600.0
 # Endpoints where each request is a credential guess.
 _AUTH_PATHS = ("/auth/login", "/auth/register")
 # High-frequency infrastructure endpoints (load balancer health checks)
-# that must never eat into a client's budget.
-_UNCOUNTED_PATHS = ("/health", "/robots.txt")
+# that must never eat into a client's budget, and the browser's automatic
+# favicon fetch.
+_UNCOUNTED_PATHS = ("/health", "/robots.txt", "/favicon.ico")
 
 # Paths only vulnerability scanners request. A hit means a PERMANENT ban,
 # persisted to the database (lifted only via the admin panel). The app must
@@ -165,6 +166,15 @@ def note_temp_ban(ip: str, until: float) -> None:
 _last_strike_cleanup = 0.0
 
 
+def _escalate(strike: Strike, reason: str, now_dt: datetime) -> None:
+    """Count one more offense on an existing strike row. A day with no new
+    offense forgives the streak (count resets to 1). last_offense_at is a
+    timestamptz column, so it always comes back timezone-aware."""
+    strike.count = 1 if now_dt - strike.last_offense_at > timedelta(hours=24) else strike.count + 1
+    strike.reason = reason
+    strike.last_offense_at = now_dt
+
+
 def strike_and_maybe_ban(ip: str, reason: str) -> tuple[int, float | None]:
     """Record an offense for `ip`, returning (strike count, temp-ban-until).
 
@@ -194,19 +204,9 @@ def strike_and_maybe_ban(ip: str, reason: str) -> tuple[int, float | None]:
                     if strike is None:
                         _log.error("strike for %s neither insertable nor findable after race", ip)
                         return 1, time.time() + site_settings.current().ban_minutes * _MINUTE
-                    last = strike.last_offense_at
-                    if last.tzinfo is None:
-                        last = last.replace(tzinfo=UTC)
-                    strike.count = 1 if now_dt - last > timedelta(hours=24) else strike.count + 1
-                    strike.reason = reason
-                    strike.last_offense_at = now_dt
+                    _escalate(strike, reason, now_dt)
             else:
-                last = strike.last_offense_at
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=UTC)
-                strike.count = 1 if now_dt - last > timedelta(hours=24) else strike.count + 1
-                strike.reason = reason
-                strike.last_offense_at = now_dt
+                _escalate(strike, reason, now_dt)
             count = strike.count
             ss = site_settings.current()
             if count >= ss.strike_ban_threshold:
@@ -545,7 +545,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             )
         else:
             response.headers["Referrer-Policy"] = "no-referrer"
-            response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+            # The root is the one API reply people open in a browser tab.
+            # Firefox applies the page's CSP to its tab icon, so the root
+            # alone may load same-origin images (the favicon); every other
+            # reply stays at "nothing".
+            images = " img-src 'self';" if request.url.path == "/" else ""
+            response.headers["Content-Security-Policy"] = f"default-src 'none';{images} frame-ancestors 'none'"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 

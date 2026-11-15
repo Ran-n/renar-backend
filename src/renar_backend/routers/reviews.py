@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:36:40.138297
-Revised: 2026/09/02 16:41:42.184866
+Revised: 2026/11/15 02:45:09.460360
 
 Reviews: longer, considered write-ups on a title, distinct from the casual
 Comments thread — restricted to a hand-picked whitelist of reviewers (see
@@ -19,8 +19,11 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
-from ..models import MediaType, Review, ReviewWhitelist, User
-from ..schemas import ReviewCreate, ReviewOut, ReviewUpdate
+from ..models import MediaType, Review, ReviewLike, ReviewReport, ReviewWhitelist, User
+from ..schemas import ReportCreate, ReviewCreate, ReviewOut, ReviewUpdate
+from ..social.blocks import blocked_pair_ids
+from ..social.reactions import DISLIKE, LIKE, clear_reaction, reaction_counts, set_reaction
+from ..social.reports import add_report, remove_report
 from ..users.auth import get_current_user
 from ..users.premium import flair
 
@@ -65,6 +68,8 @@ def _review_out(review: Review, me: User, is_reviewer: bool) -> dict:
         "created_at": review.created_at,
         "updated_at": review.updated_at,
         "mine": review.user_id == me.id,
+        **reaction_counts(review.likes, me.id),
+        "reported_by_me": any(r.reporter_id == me.id for r in review.reports),
     }
 
 
@@ -93,13 +98,17 @@ def list_reviews(
     target = find_title(db, media_type, tmdb_id, title)
     if target is None:  # nobody has tracked or reviewed this title yet
         return []
-    reviews = (
+    query = (
         db.query(Review)
-        .options(selectinload(Review.author))
+        # likes and reports too: one extra query each for the whole list,
+        # not one per review
+        .options(selectinload(Review.author), selectinload(Review.likes), selectinload(Review.reports))
         .filter(Review.title_id == target.id)
-        .order_by(Review.created_at.desc())
-        .all()
     )
+    blocked = blocked_pair_ids(db, me.id)
+    if blocked:
+        query = query.filter(Review.user_id.notin_(blocked))
+    reviews = query.order_by(Review.created_at.desc()).all()
     rev_ids = reviewer_ids(db, {r.user_id for r in reviews})
     return [_review_out(r, me, r.user_id in rev_ids) for r in reviews]
 
@@ -169,3 +178,73 @@ def delete_review(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     db.delete(review)
     db.commit()
+
+
+def _set_reaction(db: Session, review_id: int, me: User, value: int) -> None:
+    """Set the caller's reaction (see social/reactions.py) on a review that
+    must exist. Any signed-in user may react, own reviews included, same as
+    comments: reading is open to everyone, so reacting is too."""
+    if db.get(Review, review_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    set_reaction(db, ReviewLike, ReviewLike.review_id, review_id, me.id, value)
+
+
+@router.post("/reviews/{review_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+def like_review(
+    review_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    _set_reaction(db, review_id, me, LIKE)
+
+
+@router.delete("/reviews/{review_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+def unlike_review(
+    review_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    clear_reaction(db, ReviewLike, ReviewLike.review_id, review_id, me.id, LIKE)
+
+
+@router.post("/reviews/{review_id}/dislike", status_code=status.HTTP_204_NO_CONTENT)
+def dislike_review(
+    review_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    _set_reaction(db, review_id, me, DISLIKE)
+
+
+@router.delete("/reviews/{review_id}/dislike", status_code=status.HTTP_204_NO_CONTENT)
+def undislike_review(
+    review_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    clear_reaction(db, ReviewLike, ReviewLike.review_id, review_id, me.id, DISLIKE)
+
+
+@router.post("/reviews/{review_id}/report", status_code=status.HTTP_204_NO_CONTENT)
+def report_review(
+    review_id: int,
+    data: ReportCreate | None = None,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    review = db.get(Review, review_id)
+    if review is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    if review.user_id == me.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You can't report your own review")
+    reason = data.reason if data else ""
+    add_report(db, ReviewReport, ReviewReport.review_id, review_id, ReviewReport.reporter_id, me.id, reason)
+
+
+@router.delete("/reviews/{review_id}/report", status_code=status.HTTP_204_NO_CONTENT)
+def unreport_review(
+    review_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    remove_report(db, ReviewReport, ReviewReport.review_id, review_id, ReviewReport.reporter_id, me.id)

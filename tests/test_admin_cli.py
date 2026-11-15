@@ -2,11 +2,11 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:21:23.920913
-Revised: 2026/11/09 23:36:44.820288
+Revised: 2026/11/15 11:56:19.623150
 
-The server-side admin commands: ``admin-totp`` (new authenticator secret)
-and ``admin-unban`` (lift every ban on an IP), on the real Postgres test
-schema.
+The server-side admin commands: ``admin-totp`` (new authenticator secret),
+``admin-password`` (the Argon2id hash line for ``.env``) and ``admin-unban``
+(lift every ban on an IP), on the real Postgres test schema.
 """
 
 import logging
@@ -81,3 +81,69 @@ def test_unban_requires_argument():
     with pytest.raises(SystemExit) as exc:
         admin_cli.unban_main([])
     assert exc.value.code == 2
+
+
+# ---------- admin-password ----------
+
+
+def _typed(monkeypatch, *entries):
+    answers = iter(entries)
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": next(answers))
+
+
+def test_password_prints_a_single_quoted_hash_line_that_verifies(monkeypatch, capsys):
+    from argon2 import PasswordHasher
+
+    _typed(monkeypatch, "a long admin password", "a long admin password")
+    assert admin_cli.password_main([]) == 0
+    out = capsys.readouterr().out
+    hashed = re.search(r"^ADMIN_PASSWORD_HASH='(\$argon2id\$[^']+)'$", out, re.MULTILINE).group(1)
+    assert PasswordHasher().verify(hashed, "a long admin password")
+    assert "a long admin password" not in out
+    assert "Put this line in .env and restart the server. This signs out every current admin session." in out
+    # the printed hash is one the server accepts at boot
+    assert Settings(admin_password_hash=hashed).admin_password_hash == hashed
+
+
+def test_password_uses_the_library_default_parameters(monkeypatch, capsys):
+    _typed(monkeypatch, "a long admin password", "a long admin password")
+    admin_cli.password_main([])
+    assert "$argon2id$v=19$m=65536,t=3,p=4$" in capsys.readouterr().out
+
+
+def test_password_hash_differs_each_run(monkeypatch, capsys):
+    """A fresh salt every time: two runs never print the same line."""
+    _typed(monkeypatch, *["a long admin password"] * 4)
+    admin_cli.password_main([])
+    admin_cli.password_main([])
+    assert len(set(re.findall(r"^ADMIN_PASSWORD_HASH='(.+)'$", capsys.readouterr().out, re.MULTILINE))) == 2
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "reason"),
+    [
+        ("", "", "the password is empty"),
+        ("elevenchars", "elevenchars", "the password is shorter than 12 characters"),
+        ("a long admin password", "a long admin passwore", "the two passwords differ"),
+    ],
+)
+def test_password_refusals_exit_1_and_print_no_hash(monkeypatch, capsys, first, second, reason):
+    _typed(monkeypatch, first, second)
+    assert admin_cli.password_main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"admin-password: {reason}\n"
+    assert "argon2" not in captured.err
+
+
+def test_password_accepts_exactly_twelve_characters(monkeypatch, capsys):
+    _typed(monkeypatch, "twelve chars", "twelve chars")
+    assert admin_cli.password_main([]) == 0
+    assert "ADMIN_PASSWORD_HASH='$argon2id$" in capsys.readouterr().out
+
+
+def test_password_entry_point_exits_with_the_command_result(monkeypatch):
+    monkeypatch.setattr(admin_cli, "password_main", lambda: 1)
+    with pytest.raises(SystemExit) as exc:
+        admin_cli.password()
+    assert exc.value.code == 1

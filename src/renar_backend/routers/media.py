@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/11/09 15:59:24.804352
+Revised: 2026/11/14 00:43:56.364122
 """
 
 import logging
@@ -13,7 +13,7 @@ from sqlalchemy import Date, and_, cast, exists, func, inspect, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from ..catalog.progress import resolve_status
+from ..catalog.progress import completed_seasons, resolve_status, season_is_complete
 from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, escape_like, find_or_create_title, find_title
 from ..database import get_db
 from ..events import publish as publish_event
@@ -26,6 +26,7 @@ from ..models import (
     EpisodeWatch,
     LibraryEntry,
     MediaType,
+    SeasonRating,
     Title,
     TmdbCache,
     User,
@@ -38,6 +39,7 @@ from ..schemas import (
     CustomPosterSet,
     EpisodeBulk,
     EpisodeListOut,
+    EpisodeRatingOut,
     EpisodeSet,
     EpisodeStillOut,
     LibraryEntryCreate,
@@ -55,6 +57,7 @@ from ..schemas import (
 from ..tmdb.tmdb_http import TMDB_KIND
 from ..tmdb.tmdb_store import (
     cached_tmdb,
+    ensure_seasons_synced,
     localized_titles,
     refresh_title_details,
     sync_show_episodes,
@@ -247,7 +250,7 @@ def list_media(
             found = translations.get(entry.title_id)
             if found:
                 entry._display_title = found
-            elif entry.title_id not in missing_ids:
+            else:  # one entry per title per user (uq_user_title): no duplicates
                 missing_ids.append(entry.title_id)
         if missing_ids:
             background_tasks.add_task(warm_title_translations, missing_ids[:_MAX_WARMUP_PER_REQUEST], lang)
@@ -451,6 +454,37 @@ def episode_ratings(
     return {"average": round(agg.rating_sum / agg.rating_count), "count": agg.rating_count}
 
 
+@router.get("/episode-ratings/show", response_model=list[EpisodeRatingOut])
+def show_episode_ratings(
+    tmdb_id: int = Query(ge=1),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Renar average+count for every rated episode of one show, ordered by
+    season then episode: the whole-show form of `episode_ratings`, for a
+    caller that shows a grade per episode (the episode-grade share card)
+    and must not fire one request per episode. Episodes nobody has rated
+    are simply absent; an unknown show is an empty list."""
+    title_id = db.query(Title.id).filter(Title.media_type == MediaType.tv_show, Title.tmdb_id == tmdb_id).scalar()
+    if title_id is None:
+        return []
+    rows = (
+        db.query(EpisodeRatingAggregate)
+        .filter(EpisodeRatingAggregate.title_id == title_id, EpisodeRatingAggregate.rating_count > 0)
+        .order_by(EpisodeRatingAggregate.season, EpisodeRatingAggregate.episode)
+        .all()
+    )
+    return [
+        {
+            "season": r.season,
+            "episode": r.episode,
+            "average": round(r.rating_sum / r.rating_count),
+            "count": r.rating_count,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/{item_id}", response_model=LibraryEntryOut)
 def get_media(
     item_id: int,
@@ -490,8 +524,6 @@ def _mark_all_aired_watched(item: LibraryEntry, db: Session) -> None:
     end) uses the same aired-only count as its completion threshold, so an
     ended show keeps the "completed" status the caller just set, while a
     still-airing one settles on "watching" (catalog/progress.py)."""
-    if item.title_ref is None:
-        return
     sync_show_episodes(db, item.title_ref)
     aired = (
         db.query(Episode)
@@ -925,6 +957,8 @@ def list_episodes(
         .order_by(EpisodeWatch.season, EpisodeWatch.episode)
         .all()
     )
+    # completed_seasons (below) compares these watches against the catalog
+    ensure_seasons_synced(db, item.title_ref, {w.season for w in watches})
     # is_initial=True events are first-watch events; only non-initial events
     # count as rewatches (NULL for old rows = rewatch, for backward compat).
     rewatch_counts = {
@@ -969,6 +1003,11 @@ def list_episodes(
             for w in watches
         ],
         "custom_stills": custom_stills,
+        "season_ratings": [
+            {"season": r.season, "rating": r.rating}
+            for r in db.query(SeasonRating).filter(SeasonRating.media_item_id == item.id).order_by(SeasonRating.season)
+        ],
+        "completed_seasons": completed_seasons(db, item),
         **_ratings_summary(item, db),
     }
 
@@ -1253,8 +1292,6 @@ def _assert_not_future_episode(item: LibraryEntry, season: int, episode_number: 
     (treat as possibly aired or untracked). Unset on the unwatch path — only
     called when marking an episode as watched.
     """
-    if item.title_id is None:
-        return
     ep = (
         db.query(Episode)
         .filter(Episode.title_id == item.title_id, Episode.season == season, Episode.episode_number == episode_number)
@@ -1271,8 +1308,6 @@ def _assert_no_future_episodes(item: LibraryEntry, season: int, episode_numbers:
     """Batch form of `_assert_not_future_episode` for marking a whole season
     at once — one query for every episode in the batch instead of one query
     per episode (up to ~24 for a full season)."""
-    if item.title_id is None or not episode_numbers:
-        return
     future = (
         db.query(Episode)
         .filter(
@@ -1362,6 +1397,12 @@ def _write_rating(
             cache_watch.rating = rating
 
 
+def _just_completed(db: Session, item: LibraryEntry, season: int, was_complete: bool) -> bool:
+    """Whether an episode write took `season` from not fully watched (the
+    `was_complete` the caller read before writing) to fully watched."""
+    return not was_complete and season_is_complete(db, item, season)
+
+
 @router.put("/{item_id}/episodes/{season}/{episode}", response_model=RatingsSummaryOut)
 def set_episode(
     item_id: int,
@@ -1372,6 +1413,8 @@ def set_episode(
     user: User = Depends(get_current_user),
 ):
     item = _get_owned_item(item_id, user, db)
+    ensure_seasons_synced(db, item.title_ref, {season})
+    was_complete = season_is_complete(db, item, season)
     watch = (
         db.query(EpisodeWatch)
         .filter(
@@ -1408,7 +1451,7 @@ def set_episode(
     db.commit()
     _sync_progress(item, db)
     publish_event(user.id, "library_changed")
-    return _ratings_summary(item, db)
+    return _ratings_summary(item, db) | {"season_completed": _just_completed(db, item, season, was_complete)}
 
 
 @router.post("/{item_id}/episodes/bulk", response_model=RatingsSummaryOut)
@@ -1425,6 +1468,8 @@ def bulk_episodes(
     # loop, so it never reflects an earlier iteration's own uncommitted add)
     # — fuzz-discovered.
     episodes = list(dict.fromkeys(data.episodes))
+    ensure_seasons_synced(db, item.title_ref, {data.season})
+    was_complete = season_is_complete(db, item, data.season)
     if data.watched:
         _assert_no_future_episodes(item, data.season, episodes, db)
     existing = {
@@ -1456,4 +1501,4 @@ def bulk_episodes(
     db.commit()
     _sync_progress(item, db)
     publish_event(user.id, "library_changed")
-    return _ratings_summary(item, db)
+    return _ratings_summary(item, db) | {"season_completed": _just_completed(db, item, data.season, was_complete)}

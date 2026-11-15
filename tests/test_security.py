@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/11/09 23:36:43.146415
+Revised: 2026/11/14 00:43:56.793813
 
 AbuseGuardMiddleware + login backoff: what gets stopped, and — just as
 important for a commercial deployment — what must never be flagged.
@@ -10,6 +10,8 @@ important for a commercial deployment — what must never be flagged.
 The main app runs with the guard disabled (see conftest), so these tests
 build a minimal app of their own with the middleware attached.
 """
+
+from pathlib import Path
 
 import jwt
 import pytest
@@ -39,6 +41,10 @@ def make_client() -> TestClient:
 
     @app.get("/health")
     def health():
+        return {"ok": True}
+
+    @app.get("/favicon.ico")
+    def favicon():
         return {"ok": True}
 
     @app.get("/media/{item_id}")
@@ -403,6 +409,17 @@ def test_api_routes_send_no_referrer():
     assert r.headers["Content-Security-Policy"].startswith("default-src 'none'")
 
 
+def test_only_the_api_root_may_load_its_own_images():
+    """The root's CSP lets the browser load the same-origin favicon (Firefox
+    applies the page CSP to the tab icon); every other API reply still
+    allows nothing at all."""
+    client = make_headers_client()
+    assert client.get("/").headers["Content-Security-Policy"] == (
+        "default-src 'none'; img-src 'self'; frame-ancestors 'none'"
+    )
+    assert client.get("/titles").headers["Content-Security-Policy"] == "default-src 'none'; frame-ancestors 'none'"
+
+
 def test_turnstile_widget_csp_allows_cloudflare_script():
     """Regression: the blanket `default-src 'none'` on every non-admin route
     silently blocked the widget page's own inline <script> and Cloudflare's
@@ -765,3 +782,84 @@ def test_flood_ban_escalates_to_permaban_at_threshold():
 
     # Confirm in-memory mirror was updated
     assert "testclient" in security._permabanned
+
+
+# --- favicon ---------------------------------------------------------------
+
+
+def test_favicon_served(client):
+    """The real app serves a multi-size ICO, cacheable for a day."""
+    import io
+
+    from PIL import Image
+
+    r = client.get("/favicon.ico")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/x-icon"
+    assert "max-age=86400" in r.headers["cache-control"]
+    assert Image.open(io.BytesIO(r.content)).info["sizes"] == {(16, 16), (32, 32), (48, 48), (64, 64)}
+
+
+def test_favicon_is_the_dark_renar_tile(client):
+    """Not just any icon: a dark tile (#17191a) with the light mark on it."""
+    import io
+
+    from PIL import Image
+
+    icon = Image.open(io.BytesIO(client.get("/favicon.ico").content))
+    icon.size = (64, 64)
+    raw = icon.convert("RGBA").tobytes()
+    pixels = [tuple(raw[i : i + 4]) for i in range(0, len(raw), 4)]
+    opaque = [p[:3] for p in pixels if p[3] == 255]
+    assert sum(1 for p in opaque if max(abs(p[0] - 0x17), abs(p[1] - 0x19), abs(p[2] - 0x1A)) <= 6) > len(opaque) // 2
+    assert any(min(p) > 200 for p in opaque)  # the light spiral
+
+
+def test_favicon_not_in_openapi_schema():
+    from renar_backend.main import app
+
+    paths = app.openapi()["paths"]
+    assert "/health" in paths
+    assert "/favicon.ico" not in paths
+
+
+def test_favicon_never_counts_as_probe():
+    """A browser re-fetching the icon far past the probe threshold never
+    gets the client banned."""
+    client = make_client()
+    for _ in range(settings.probe_ban_threshold + 5):
+        assert client.get("/favicon.ico").status_code == 200
+    assert client.get("/").status_code == 200
+
+
+def test_favicon_not_rate_limited(monkeypatch):
+    """Icon fetches don't eat into the per-minute budget: ten of them at a
+    limit of 3 all succeed, and the budget is still whole afterwards."""
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 3)
+    client = make_client()
+    assert [client.get("/favicon.ico").status_code for _ in range(10)] == [200] * 10
+    assert [client.get("/").status_code for _ in range(3)] == [200] * 3
+    assert client.get("/").status_code == 429
+
+
+def test_missing_favicon_file_fails_at_import(tmp_path, monkeypatch):
+    """A packaging bug (static/ not shipped) stops the app at import with
+    the path in the error, instead of serving a broken icon."""
+    import importlib
+
+    from renar_backend.routers.admin import _html
+
+    real_read_text = Path.read_text
+
+    def missing(self, *args, **kwargs):
+        if self.name == "renar-mark-dark.svg":
+            raise FileNotFoundError(str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", missing)
+    try:
+        with pytest.raises(FileNotFoundError, match="renar-mark-dark.svg"):
+            importlib.reload(_html)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(_html)

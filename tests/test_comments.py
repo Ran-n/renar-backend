@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.125706
-Revised: 2026/09/02 10:57:39.269950
+Revised: 2026/11/14 00:22:50.355354
 
 Comments on titles: create, list, like/unlike, delete, replies, reports.
 """
@@ -493,3 +493,43 @@ def test_delete_reported_comment_removes_reports(client, alice, bob):
     comment = _post_comment(client, alice_headers)
     assert client.post(f"/comments/{comment['id']}/report", headers=bob_headers).status_code == 204
     assert client.delete(f"/comments/{comment['id']}", headers=alice_headers).status_code == 204
+
+
+def _list_ids(client, headers, **params) -> list[int]:
+    r = client.get("/comments", params={"media_type": "film", "tmdb_id": 949, **params}, headers=headers)
+    assert r.status_code == 200, r.text
+    return [c["id"] for c in r.json()]
+
+
+def test_list_default_sort_is_newest_first(client, alice):
+    """No `sort` keeps the behaviour clients already rely on: newest first."""
+    _, headers = alice
+    ids = [_post_comment(client, headers, text=f"c{i}")["id"] for i in range(3)]
+    assert _list_ids(client, headers) == ids[::-1]
+    assert _list_ids(client, headers, sort="desc") == ids[::-1]
+
+
+def test_list_sort_asc_is_oldest_first(client, alice):
+    """`sort=asc` returns the top-level comments in the order they were posted."""
+    _, headers = alice
+    ids = [_post_comment(client, headers, text=f"c{i}")["id"] for i in range(3)]
+    assert _list_ids(client, headers, sort="asc") == ids
+
+
+def test_list_sort_keeps_replies_oldest_first(client, alice, bob):
+    """`sort` only orders top-level comments: replies read oldest first under
+    their parent in both directions."""
+    _, a = alice
+    _, b = bob
+    root = _post_comment(client, a)
+    replies = [_post_comment(client, b, parent_id=root["id"], text=f"r{i}")["id"] for i in range(3)]
+    for sort in ("asc", "desc"):
+        listed = client.get("/comments", params={"media_type": "film", "tmdb_id": 949, "sort": sort}, headers=a).json()
+        assert [r["id"] for r in listed[0]["replies"]] == replies
+
+
+def test_list_sort_invalid_rejected(client, alice):
+    """An unknown `sort` value is a 422, not a silent fallback to the default."""
+    _, headers = alice
+    r = client.get("/comments", params={"media_type": "film", "tmdb_id": 949, "sort": "random"}, headers=headers)
+    assert r.status_code == 422

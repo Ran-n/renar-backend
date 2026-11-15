@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.713668
-Revised: 2026/11/10 09:48:06.601691
+Revised: 2026/11/13 15:35:12.612656
 
 Watch-time and library statistics for the current user.
 """
@@ -20,6 +20,7 @@ from ..catalog.titles import WITH_TITLE_GENRES
 from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import AppCounters, EpisodeWatch, LibraryEntry, MediaType, User, WatchStatus
+from ..schemas import RankingMetricOut, RankingOut, StatsOut
 from ..users.auth import get_current_user, require_premium
 from ..users.premium import feature_enabled
 
@@ -35,9 +36,9 @@ def _runtime_or_default(runtime_minutes: int | None, default: int) -> int:
     return default if runtime_minutes is None else runtime_minutes
 
 
-def _as_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
+def _as_utc(dt: datetime) -> datetime:
+    """watched_at is timezone-aware in Postgres, but a naive value (e.g. one
+    set in Python before the row round-trips) is taken as UTC."""
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
@@ -61,7 +62,7 @@ def _streaks(days: list[date]) -> tuple[int, int]:
     return current, longest
 
 
-@router.get("")
+@router.get("", response_model=StatsOut)
 def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     items: list[LibraryEntry] = (
         db.query(LibraryEntry).options(*WITH_TITLE_GENRES).filter(LibraryEntry.user_id == user.id).all()
@@ -69,7 +70,7 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
     items_by_id = {item.id: item for item in items}
     # only the timestamp is used below — selecting the one column skips ORM
     # hydration of every watch row, which dominated this endpoint's time
-    watched_ats: list[datetime | None] = list(
+    watched_ats: list[datetime] = list(
         db.scalars(
             select(EpisodeWatch.watched_at)
             .join(LibraryEntry, EpisodeWatch.media_item_id == LibraryEntry.id)
@@ -99,7 +100,7 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
             if item.status == WatchStatus.completed:
                 films_watched += 1
                 film_minutes += _runtime_or_default(item.runtime_minutes, DEFAULT_FILM_RUNTIME)
-        elif item.media_type == MediaType.tv_show:
+        else:  # MediaType.tv_show, the only other media type
             if item.status == WatchStatus.completed:
                 shows_completed += 1
             elif item.status == WatchStatus.watching:
@@ -123,8 +124,6 @@ def get_stats(db: Session = Depends(get_db), user: User = Depends(get_current_us
 
     for watched_at in watched_ats:
         ts = _as_utc(watched_at)
-        if ts is None:
-            continue
         watch_days.add(ts.date())
         weekday_counter[ts.strftime("%A")] += 1
         if ts >= week_ago:
@@ -192,9 +191,10 @@ def _total_watch_minutes_by_user(db: Session, user_id: int | None = None) -> dic
     if user_id is not None:
         query = query.filter(LibraryEntry.user_id == user_id)
     for item in query.all():
-        if item.media_type == MediaType.film and item.status == WatchStatus.completed:
-            totals[item.user_id] += _runtime_or_default(item.runtime_minutes, DEFAULT_FILM_RUNTIME)
-        elif item.media_type == MediaType.tv_show:
+        if item.media_type == MediaType.film:
+            if item.status == WatchStatus.completed:
+                totals[item.user_id] += _runtime_or_default(item.runtime_minutes, DEFAULT_FILM_RUNTIME)
+        else:  # MediaType.tv_show
             eps = item.episodes_watched or 0
             if item.status == WatchStatus.completed and eps == 0 and item.total_episodes:
                 eps = item.total_episodes
@@ -281,7 +281,7 @@ def _all_rankings(db: Session, user: User) -> list[dict]:
     return rankings
 
 
-@router.get("/ranking/metrics")
+@router.get("/ranking/metrics", response_model=list[RankingMetricOut])
 def get_ranking_metrics(db: Session = Depends(get_db), user: User = Depends(require_premium)):
     """Which leaderboards exist, so the frontend can offer a metric picker
     without hardcoding the list."""
@@ -290,7 +290,7 @@ def get_ranking_metrics(db: Session = Depends(get_db), user: User = Depends(requ
     return [{"key": r["metric"], "label": r["label"], "unit": r["unit"]} for r in _all_rankings(db, user)]
 
 
-@router.get("/ranking")
+@router.get("/ranking", response_model=RankingOut)
 def get_ranking(metric: str | None = None, db: Session = Depends(get_db), user: User = Depends(require_premium)):
     """Where a premium user stands against everyone else on the given metric —
     defaults to whichever metric they're best positioned on. Premium-gated at

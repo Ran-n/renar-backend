@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 12:20:00.000000
-Revised: 2026/11/09 11:49:58.976079
+Revised: 2026/11/15 11:01:43.465681
 """
 
 """add email confirmation
@@ -33,13 +33,62 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from renar_backend.db_triggers import USER_COUNT_TRIGGER_SQL
-
 # revision identifiers, used by Alembic.
 revision: str = "ee151fb9d02c"
 down_revision: str | Sequence[str] | None = "a1f5e8c3d629"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+# Frozen copy of the trigger SQL as it stood when this migration was written.
+# Never import it from renar_backend.db_triggers: that module holds today's
+# SQL, which may name columns a later migration adds, so replaying the
+# history on an empty database would fail here (it did; see
+# tests/test_migrations.py).
+_USER_COUNT_TRIGGER_SQL = """
+CREATE OR REPLACE FUNCTION trg_users_count() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.email_confirmed THEN
+            UPDATE app_counters SET total_users = total_users + 1 WHERE id = 1;
+        END IF;
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        IF OLD.email_confirmed THEN
+            UPDATE app_counters SET total_users = total_users - 1 WHERE id = 1;
+        END IF;
+        RETURN OLD;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION trg_users_email_confirmed() RETURNS trigger AS $$
+BEGIN
+    IF NEW.email_confirmed AND NOT OLD.email_confirmed THEN
+        UPDATE app_counters SET total_users = total_users + 1 WHERE id = 1;
+    ELSIF OLD.email_confirmed AND NOT NEW.email_confirmed THEN
+        UPDATE app_counters SET total_users = total_users - 1 WHERE id = 1;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+INSERT INTO app_counters (id, total_users)
+VALUES (1, (SELECT COUNT(*) FROM users WHERE email_confirmed))
+ON CONFLICT (id) DO NOTHING;
+
+DROP TRIGGER IF EXISTS users_count_iud ON users;
+CREATE TRIGGER users_count_iud
+AFTER INSERT OR DELETE ON users
+FOR EACH ROW EXECUTE FUNCTION trg_users_count();
+
+DROP TRIGGER IF EXISTS users_email_confirmed_update ON users;
+CREATE TRIGGER users_email_confirmed_update
+AFTER UPDATE ON users
+FOR EACH ROW
+WHEN (OLD.email_confirmed IS DISTINCT FROM NEW.email_confirmed)
+EXECUTE FUNCTION trg_users_email_confirmed();
+"""
 
 # Pre-this-migration trigger: total_users counted every user, not just
 # confirmed ones. Inlined here (not imported — db_triggers.py now only holds
@@ -88,7 +137,7 @@ def upgrade() -> None:
 
     # Replaces trg_users_count (INSERT/DELETE) with the confirmed-only
     # version and adds trg_users_email_confirmed (UPDATE) — see db_triggers.py.
-    op.execute(USER_COUNT_TRIGGER_SQL)
+    op.execute(_USER_COUNT_TRIGGER_SQL)
     # The seed INSERT inside USER_COUNT_TRIGGER_SQL is ON CONFLICT DO NOTHING
     # and app_counters already has its id=1 row from a prior migration, so the
     # counter still holds the old "all users" total until reset explicitly.

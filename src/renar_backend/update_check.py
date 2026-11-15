@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:18.387223
-Revised: 2026/11/11 11:11:06.973859
+Revised: 2026/11/13 15:35:13.349410
 
 The server's side of the admin panel's one-click update: whether an update
 is available or blocked (``check``), getting it ready (``prepare``),
@@ -535,16 +535,20 @@ def launch(status: UpdateStatus, stage: Path | None, repo: Path | None = None) -
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
     }
-    if os.name == "nt":
-        # Own process group, no console: survives the worker being replaced
-        # and never receives the console's Ctrl+C.
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
+    kwargs.update(_detach_kwargs(windows=os.name == "nt"))
     subprocess.Popen(cmd, **kwargs)  # nosec B603 -- fixed argv, no shell
     target = status.remote_sha[:8] if status.mode == MODE_GIT else status.latest_version
     _log.warning("self-update (%s) started: %s -> %s, log %s", status.mode, status.current_version, target, log_path)
     return log_path
+
+
+def _detach_kwargs(*, windows: bool) -> dict:
+    """Popen options that let the helper outlive the worker that starts it."""
+    if windows:
+        # Own process group, no console: survives the worker being replaced
+        # and never receives the console's Ctrl+C.
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+    return {"start_new_session": True}
 
 
 def _source_args(status: UpdateStatus, stage: Path | None) -> list[str]:

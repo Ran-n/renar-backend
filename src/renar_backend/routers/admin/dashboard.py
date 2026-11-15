@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/11/09 23:36:39.789889
+Revised: 2026/11/15 02:45:11.044239
 
 Admin dashboard: the tile-grid landing page at /admin (or the configured
 admin path).
@@ -88,6 +88,32 @@ _SERVICES = [
             '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
             ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
             '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'
+            "</svg>"
+        ),
+    },
+    {
+        "name": "Reported Reviews",
+        "desc": "Reviews flagged by users; delete the bad ones",
+        "href": f"{_P}/reported-reviews",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
+            ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+            '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/>'
+            '<line x1="4" y1="22" x2="4" y2="15"/>'
+            "</svg>"
+        ),
+    },
+    {
+        "name": "Reported Users",
+        "desc": "Profiles flagged by users, with the reasons given",
+        "href": f"{_P}/reported-users",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
+            ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+            '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>'
+            '<circle cx="9" cy="7" r="4"/>'
+            '<line x1="19" y1="8" x2="19" y2="13"/>'
+            '<line x1="19" y1="17" x2="19.01" y2="17"/>'
             "</svg>"
         ),
     },

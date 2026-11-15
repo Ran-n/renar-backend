@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 14:33:20.294880
-Revised: 2026/11/10 11:04:48.190435
+Revised: 2026/11/15 11:56:17.023801
 
 Opt-in server for integration tests that need the real app reachable over
 real HTTP, not the in-process ASGI transport TestClient uses: this repo's
@@ -29,11 +29,25 @@ import argparse
 import atexit
 import datetime
 import os
+import signal
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 _PG_BASE_URL = "postgresql+psycopg://reska:reska@127.0.0.1:5432/reska"
+
+
+def _exit_cleanly(signum: int, frame: object) -> None:
+    """SIGBREAK handler: a normal interpreter exit, so atexit runs.
+
+    The integration fixtures stop this server with CTRL_BREAK. uvicorn
+    catches it and shuts down gracefully, then restores the handler that was
+    there before and re-raises the signal. With Windows' default handler
+    that kills the process on the spot, skipping every atexit hook: the
+    schema drop below and coverage's data save (pyproject.toml's
+    patch = ["subprocess"]), which left this module at 0% coverage."""
+    sys.exit(0)
 
 
 def main() -> None:
@@ -64,10 +78,13 @@ def main() -> None:
     # renar-frontend's build command uses). Never the real ADMIN_* values
     # from a developer's shell or .env.
     os.environ["ADMIN_USERNAME"] = ""
-    os.environ["ADMIN_PASSWORD"] = ""  # nosec B105 -- empty, disables the panel sign-in
+    os.environ["ADMIN_PASSWORD_HASH"] = ""  # nosec B105 -- empty, disables the panel sign-in
+    os.environ["ADMIN_PASSWORD"] = ""  # nosec B105 -- a leftover plain one in .env would stop the boot
     os.environ["ADMIN_TOTP_SECRET"] = ""  # nosec B105 -- empty, disables the panel sign-in
     os.environ["ADMIN_API_TOKEN"] = os.environ.get("ITEST_ADMIN_API_TOKEN", "")
     os.environ["ADMIN_PATH"] = "/admin"
+    os.environ["CF_ACCESS_TEAM_DOMAIN"] = ""
+    os.environ["CF_ACCESS_AUD"] = ""
     # Single-IP traffic from the frontend test process would otherwise trip
     # the guard partway through a run, same reasoning as tests/conftest.py.
     os.environ["ABUSE_GUARD_ENABLED"] = "false"
@@ -92,12 +109,11 @@ def main() -> None:
 
     @app.post("/_itest/drop_schema", include_in_schema=False)
     def _drop_schema_now() -> dict:
-        # The caller can't rely on this process's own atexit-on-shutdown
-        # path actually running (observed: CTRL_BREAK on Windows sometimes
-        # exits without it firing, leaking the schema) — calling this while
-        # still up, right before the caller stops the process, is the
-        # guaranteed alternative. No caller-supplied name: only ever drops
-        # this instance's own schema.
+        # Belt and braces for the atexit drop: CTRL_BREAK used to kill this
+        # process before atexit ran (fixed by _exit_cleanly), and a hard kill
+        # after a stop timeout still skips it. Calling this while still up,
+        # right before the caller stops the process, always works. No
+        # caller-supplied name: only ever drops this instance's own schema.
         atexit.unregister(_drop_schema)
         _drop_schema()
         return {"dropped": schema}
@@ -160,7 +176,7 @@ def main() -> None:
     @app.post("/_itest/set_premium/{username}", include_in_schema=False)
     def _set_premium(username: str, days: int = 30) -> dict:
         # No payment processor is wired up yet (Paddle integration is still
-        # backlog — see TODO.md's Monetization section), so this is
+        # backlog — see BACKLOG.md's Monetization section), so this is
         # the only way to get a premium account for a test run. Mirrors
         # renar-backend's own tests/test_stats.py::_set_premium.
         db = SessionLocal()
@@ -193,6 +209,9 @@ def main() -> None:
 
     import uvicorn
 
+    # Windows only; elsewhere uvicorn's SIGTERM path already exits normally.
+    if hasattr(signal, "SIGBREAK"):  # pragma: no branch
+        signal.signal(signal.SIGBREAK, _exit_cleanly)
     uvicorn.run(
         asgi_app,
         host="127.0.0.1",

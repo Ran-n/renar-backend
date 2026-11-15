@@ -13,7 +13,7 @@ dependencies = [
     "alembic>=1.13",
     "pydantic[email]>=2.9",
     "pydantic-settings>=2.6",
-    "PyJWT>=2.9",
+    "pyjwt[crypto]>=2.9",
     "bcrypt>=4.2",
     "python-multipart>=0.0.17",
     "httpx>=0.28",
@@ -23,11 +23,13 @@ dependencies = [
     "py7zr>=0.22",
     "pyotp>=2.9",
     "segno>=1.6",
+    "argon2-cffi>=23.1",
 ]
 
 [project.scripts]
 be = "renar_backend.__main__:run"
 admin-totp = "renar_backend.admin_cli:totp"
+admin-password = "renar_backend.admin_cli:password"
 admin-unban = "renar_backend.admin_cli:unban"
 
 [dependency-groups]
@@ -80,6 +82,7 @@ markers = [
     "fuzz: hypothesis-driven fuzz test feeding malformed/random input at an API endpoint",
     "snapshot: compares a derived value against a checked-in baseline (tests/snapshots/); re-run with UPDATE_SNAPSHOTS=1 to accept an intentional change",
     "security: SAST (bandit) + dependency vulnerability (pip-audit) scan — hits the network, kept out of the default run",
+    "contract: every documented JSON endpoint declares a response_model that matches what its handler returns (renar-frontend validates live responses against it)",
     "load: headless locust run against a live_server (tests/integration/, tests/load/locustfile.py)",
 ]
 # Spins up a real uvicorn process per session — seconds, not milliseconds —
@@ -92,14 +95,22 @@ addopts = "-m \"not integration and not security\""
 [tool.coverage.run]
 source = ["src/renar_backend"]
 branch = true
+# Measure the Python subprocesses the suite spawns too: _test_server.py
+# only ever runs as `python -m renar_backend._test_server` (the integration
+# fixtures' live server), so in-process measurement would report it at 0%.
+patch = ["subprocess"]
 
 [tool.coverage.report]
-# Baseline measurement per TODO.md's Testing entry — no threshold
-# enforced yet (`pytest --cov` is meant to be read, not gated on, until the
-# missing per-router property/fuzz/unit coverage it names is actually
-# written). Run: `pytest --cov --cov-report=term-missing`.
+# Gated on a full run, which also measures the integration tests' live
+# server: `uv run pytest -m "not security" --cov` (see README.md's Tests).
+# Not in addopts, so running one test file isn't held to the floor. Never
+# lower fail_under: test new code, or delete it if it can't run.
+fail_under = 100
 show_missing = true
 skip_empty = true
+# A module run as a script is exercised by calling its entry function
+# directly; the guard line itself never runs under pytest.
+exclude_also = ["if __name__ == .__main__.:"]
 
 [tool.bandit]
 # B608 (hardcoded_sql_expressions) false-positives on db_triggers.py's

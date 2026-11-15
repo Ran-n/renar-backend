@@ -2,12 +2,12 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/11/09 16:20:34.181708
+Revised: 2026/11/15 02:45:08.297585
 """
 
 import re
 from datetime import date, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -502,6 +502,17 @@ class TitleRatingOut(BaseModel):
     count: int
 
 
+class EpisodeRatingOut(BaseModel):
+    """Renar community average+count for one episode of a show — one
+    element of GET /media/episode-ratings/show. Only rated episodes are
+    listed, so `count` is at least 1 and `average` is always set."""
+
+    season: int
+    episode: int
+    average: int
+    count: int
+
+
 # ---------- episodes ----------
 
 
@@ -548,6 +559,23 @@ class RatingsSummaryOut(BaseModel):
     item_episodes_watched: int
     item_current_season: int | None = None
     item_current_episode: int | None = None
+    # True only in the reply to an episode write (single or bulk) that just
+    # took its season from not fully watched to fully watched: the cue to
+    # offer rating the season. It says nothing about any rating value.
+    season_completed: bool = False
+
+
+class SeasonRatingSet(BaseModel):
+    rating: int = Field(ge=1, le=100)
+
+
+class SeasonRatingOut(BaseModel):
+    """The caller's grade for one season: the reply to PUT
+    /media/{item_id}/seasons/{season}/rating and one element of
+    EpisodeListOut.season_ratings."""
+
+    season: int
+    rating: int
 
 
 class EpisodeWatchOut(BaseModel):
@@ -580,6 +608,11 @@ class EpisodeListOut(RatingsSummaryOut):
     # empty (not omitted) while the owner isn't premium — stills are kept but
     # not served once premium lapses, same rule as poster/backdrop overrides
     custom_stills: list[EpisodeCustomStillOut] = []
+    # the caller's season grades, and the seasons they may rate right now
+    # (every aired episode watched); a rated season can be missing from
+    # completed_seasons when an episode was unwatched or a new one aired
+    season_ratings: list[SeasonRatingOut] = []
+    completed_seasons: list[int] = []
 
 
 # ---------- lists ----------
@@ -668,6 +701,7 @@ class PublicUserOut(BaseModel):
     total_watch_minutes: int = 0
     is_following: bool = False
     is_me: bool = False
+    reported_by_me: bool = False
 
 
 class FeedEntryOut(BaseModel):
@@ -854,6 +888,11 @@ class ReviewOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     mine: bool
+    likes: int = 0
+    dislikes: int = 0
+    liked_by_me: bool = False
+    disliked_by_me: bool = False
+    reported_by_me: bool = False
 
 
 # ---------- comments ----------
@@ -869,7 +908,10 @@ class CommentCreate(BaseModel):
     text: SafeStr = Field(min_length=1, max_length=2000)
 
 
-class CommentReportCreate(BaseModel):
+class ReportCreate(BaseModel):
+    """Optional free-text reason sent with a report on a comment, a review
+    or a profile (the three share one body shape)."""
+
     reason: SafeStr = Field(default="", max_length=500)
 
 
@@ -1053,6 +1095,30 @@ class UpcomingItemOut(BaseModel):
     episode_name: str | None = None
 
 
+# ---------- diary ----------
+
+
+class DiaryEntryOut(BaseModel):
+    """One watch in GET /diary: a watched episode (`type` "episode", with
+    `season`/`episode` and the episode's name when the catalog has it) or a
+    watched film (`type` "film", those three null). `title` is the show's or
+    film's display name, `item_id` the caller's library entry for it, and
+    `rating` the caller's own 1-100 grade for that episode or film."""
+
+    type: Literal["film", "episode"]
+    item_id: int
+    title_id: int
+    tmdb_id: int | None = None
+    media_type: MediaType
+    title: str
+    poster_url: str | None = None
+    watched_at: datetime
+    rating: int | None = None
+    season: int | None = None
+    episode: int | None = None
+    episode_name: str | None = None
+
+
 # ---------- svc ----------
 
 
@@ -1091,3 +1157,102 @@ class AppReleaseOut(BaseModel):
     notes: str | None
     uploaded_at: datetime
     download_url: str
+
+
+# ---------- stats ----------
+
+
+class MostWatchedShowOut(BaseModel):
+    """One row of StatsOut.most_watched_shows."""
+
+    title: str
+    episodes: int
+    minutes: int
+    poster_url: str | None = None
+
+
+class GenreCountOut(BaseModel):
+    """One row of StatsOut.top_genres."""
+
+    genre: str
+    count: int
+
+
+class StatsOut(BaseModel):
+    """Shape returned by GET /stats. Dict-valued fields are keyed by a
+    label: `rating_distribution` by decile ("1-10" … "91-100"),
+    `activity_by_weekday` by English weekday name, `by_status` and `by_type`
+    by the WatchStatus / MediaType value. Keys with no entries are left out."""
+
+    total_watch_minutes: int
+    film_minutes: int
+    tv_minutes: int
+    films_watched: int
+    episodes_watched: int
+    shows_completed: int
+    shows_watching: int
+    total_items: int
+    favorites: int
+    avg_rating: int | None = None
+    rating_distribution: dict[str, int]
+    episodes_last_7_days: int
+    episodes_last_30_days: int
+    current_streak_days: int
+    longest_streak_days: int
+    most_active_day: str | None = None
+    activity_by_weekday: dict[str, int]
+    most_watched_shows: list[MostWatchedShowOut]
+    by_status: dict[str, int]
+    by_type: dict[str, int]
+    top_genres: list[GenreCountOut]
+
+
+class RankingMetricOut(BaseModel):
+    """One leaderboard the frontend can offer — shape of each item in
+    GET /stats/ranking/metrics. `unit` is "minutes" or "count"."""
+
+    key: str
+    label: str
+    unit: str
+
+
+class RankingOut(BaseModel):
+    """Shape returned by GET /stats/ranking: the selected metric's standing
+    plus every available metric. `percentile` is None while nobody counts
+    toward the total (no confirmed users yet)."""
+
+    metric: str
+    label: str
+    unit: str
+    rank: int
+    total_users: int
+    value: int
+    percentile: float | None = None
+    metrics: list[RankingMetricOut]
+
+
+# ---------- premium ----------
+
+
+class PaletteOut(BaseModel):
+    """Shape returned by GET /premium/palette: the hex colors (`#RRGGBB`)
+    the premium color pickers offer."""
+
+    colors: list[str]
+
+
+# ---------- service ----------
+
+
+class HealthOut(BaseModel):
+    """Shape returned by GET /health (liveness probe): always "ok"."""
+
+    status: str
+
+
+class RootOut(HealthOut):
+    """Shape returned by GET /: lets a browser confirm the server address,
+    plus the running backend version."""
+
+    message: str
+    version: str

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/21 00:00:00.000000
-Revised: 2026/08/05 21:48:04.042386
+Revised: 2026/11/15 02:45:13.165457
 
 Builds a user's personal-data export (GDPR Art. 20 — the right to data
 portability): every account, library and social fact Renar stores about
@@ -29,7 +29,7 @@ import py7zr
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import settings
-from ..models import Comment, ExportJob, Follow, LibraryEntry, Title, User
+from ..models import Comment, ExportJob, Follow, LibraryEntry, Title, User, UserBlock
 from ..social.comment_threads import resolve_root_scope
 
 EXPORTS_ROOT = Path(settings.media_dir) / "exports"
@@ -113,6 +113,7 @@ def _library_entry(item: LibraryEntry) -> dict:
             }
             for w in item.episode_watches
         ],
+        "season_ratings": [{"season": r.season, "rating": r.rating} for r in item.season_ratings],
     }
 
 
@@ -172,7 +173,7 @@ def build_export(user: User, db: Session) -> bytes:
     # library size.
     entries = (
         db.query(LibraryEntry)
-        .options(selectinload(LibraryEntry.episode_watches))
+        .options(selectinload(LibraryEntry.episode_watches), selectinload(LibraryEntry.season_ratings))
         .filter(LibraryEntry.user_id == user.id)
         .all()
     )
@@ -198,7 +199,17 @@ def build_export(user: User, db: Session) -> bytes:
     ]
 
     profile["exported_at"] = _iso(datetime.now(UTC))
-    social = {"following": following, "followers": followers}
+    # The user's own block list (GDPR Art. 20: it's data they provided).
+    # Blocks made BY others against this user are not theirs to export.
+    blocked_users = [
+        {"username": username, "blocked_at": _iso(blocked_at)}
+        for username, blocked_at in db.query(User.username, UserBlock.created_at)
+        .join(UserBlock, UserBlock.blocked_id == User.id)
+        .filter(UserBlock.blocker_id == user.id)
+        .order_by(UserBlock.created_at)
+        .all()
+    ]
+    social = {"following": following, "followers": followers, "blocked_users": blocked_users}
 
     buf = io.BytesIO()
     with py7zr.SevenZipFile(buf, "w") as zf:

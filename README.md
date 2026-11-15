@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/11/10 16:20:53.458916 )
+[//]: # (+ Revised: 	2026/11/15 11:56:14.287872 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Renar Backend
@@ -98,6 +98,12 @@ uv run alembic revision --autogenerate -m "describe the change"
 uv run alembic upgrade head
 ```
 
+A migration never imports `renar_backend`: copy any SQL it needs into the
+file. When trigger SQL in `db_triggers.py` changes, add a migration that
+applies the new version. `tests/test_migrations.py` replays every
+migration on an empty schema and fails if the result differs from the
+models or from the triggers `create_all()` installs.
+
 API docs: http://127.0.0.1:8000/docs
 
 ## Endpoints
@@ -156,13 +162,34 @@ API docs: http://127.0.0.1:8000/docs
   (defaults to the metric the user ranks best on)
 - `GET/PUT/POST /media/{id}/episodes...` — per-episode watched/rating tracking
   (`PUT .../episodes/{season}/{episode}`, `POST .../episodes/bulk`); responses include
-  overall grade, episode average and combined score
+  overall grade, episode average and combined score, plus `season_completed`
+  when the write just finished a season
+- `PUT/DELETE /media/{id}/seasons/{season}/rating` — grade (1-100) for a season;
+  only once every aired episode of it is watched (409 otherwise)
+- `GET /media/episode-ratings/show?tmdb_id=...` — community average of every
+  rated episode of a show, in one call
+- `GET /diary?page=&page_size=&type=film|episode&from=&to=&utc_offset=&utc_offset_to=` — the
+  account's watch log, newest first: one dated row per watched episode or
+  completed film. `from`/`to` are UTC days unless `utc_offset` (minutes east
+  of UTC, at the start of `from`; `utc_offset_to` at the end of `to`) gives
+  the caller's own
 - `GET /users/search`, `GET /users/{id}[/followers|/following|/media]`,
   `POST/DELETE /users/{id}/follow`, `GET /feed` — social graph and activity feed
+- `POST/DELETE /users/{id}/block`, `GET /users/blocked` — block a user (neither
+  side sees the other's comments, reviews, profile or library, and a blocked
+  profile answers 404 like a missing one), undo it, and list your own blocks
+- `POST/DELETE /users/{id}/report`, `POST/DELETE /media/reviews/{id}/report` —
+  report a profile or a review to the moderators (optional `reason`), or take
+  the report back; `reported_by_me` on the profile and review responses
 - `GET/POST /comments`, `DELETE /comments/{id}`, `POST/DELETE /comments/{id}/like`,
   `POST/DELETE /comments/{id}/report` — comments (global per title via TMDB id)
   with likes, nested replies and retractable reports; a reply's title/season/episode
-  scope is resolved from its thread root, not stored per-reply
+  scope is resolved from its thread root, not stored per-reply. `GET /comments`
+  takes `sort=desc|asc` (newest or oldest thread first; default `desc`)
+- `POST/DELETE /media/reviews/{id}/like` and `.../dislike` — like or dislike a
+  review; a user holds at most one of the two per review
+- `GET /favicon.ico` — the renar icon, for the browser tab on the API root and
+  the admin panel
 - `GET /premium/palette` — suggested color swatches for every premium color picker
   (not an enforced allowlist — any well-formed hex is accepted)
 - `PATCH /premium/style` — premium: set avatar ring color / username color /
@@ -187,7 +214,7 @@ API docs: http://127.0.0.1:8000/docs
   which is honeypot bait
 - `GET /admin` — HTML admin panel behind a login page (password +
   authenticator code, then an 8-hour session cookie; Log out on every page);
-  returns 503 until `ADMIN_USERNAME`, `ADMIN_PASSWORD` and `ADMIN_TOTP_SECRET`
+  returns 503 until `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` and `ADMIN_TOTP_SECRET`
   are set in `.env` (see [Setting up admin sign-in](#setting-up-admin-sign-in)).
   Tiles:
   - **User manager** (`/users`) — per-user usage stats (logins, requests, last
@@ -228,12 +255,20 @@ API docs: http://127.0.0.1:8000/docs
 
 On the server host (over SSH on prod):
 
-1. `uv run admin-totp` prints a new secret, a QR code and the
+1. Set `ADMIN_USERNAME` in `.env`.
+2. `uv run admin-password` asks for the password twice (12 characters or
+   more) and prints the `ADMIN_PASSWORD_HASH='…'` line. Put it in `.env`
+   with its single quotes. The server stores only this Argon2id hash,
+   and refuses to start while a plain `ADMIN_PASSWORD` line is there.
+3. `uv run admin-totp` prints a new secret, a QR code and the
    `ADMIN_TOTP_SECRET=…` line. Scan the QR with an authenticator app
    (Aegis, Google Authenticator, 1Password, …) and put the line in `.env`.
-2. For `--publish` uploads, also set `ADMIN_API_TOKEN` (see
+4. For `--publish` uploads, also set `ADMIN_API_TOKEN` (see
    [docs/environment-variables.md](docs/environment-variables.md#admin-panel)).
-3. Restart the server.
+5. Restart the server.
+
+On prod the admin path can also sit behind Cloudflare Access; see
+[docs/anti-abuse.md](docs/anti-abuse.md#cloudflare-access-in-front-of-the-admin-path).
 
 Every failed sign-in is an abuse strike (temp ban, then a permanent ban),
 except from an IP in Exempt IPs. Locked yourself out? `uv run admin-unban
@@ -256,7 +291,7 @@ uv run pytest
 The suite spins up the app against a throwaway schema on the local Postgres
 server (no `.env` or API keys needed) and covers every endpoint's happy and
 error paths. That default run is the fast unit suite plus a few always-on
-categories (`property`, `fuzz`, `snapshot`); everything that spins up a real
+categories (`property`, `fuzz`, `snapshot`, `contract`); everything that spins up a real
 process or hits the network is gated behind its own marker and selected
 explicitly:
 
@@ -266,6 +301,15 @@ uv run pytest -m smoke              # fastest post-boot sanity check
 uv run pytest -m regression         # curated critical-path subset
 uv run pytest -m security           # bandit (SAST) + pip-audit (needs network)
 uv run pytest -m load               # short headless locust burst
+```
+
+Coverage is measured on a full run: every marker except `security`, so the
+integration tests' live server (a subprocess) is measured too. The run fails
+if branch coverage drops below `fail_under` (100%) in `pyproject.toml`; new
+code needs tests, or goes if it can't run:
+
+```powershell
+uv run pytest -m "not security" --cov
 ```
 
 Mutation testing (`mutmut`, config in `pyproject.toml`'s `[tool.mutmut]`)

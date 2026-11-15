@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/11/09 14:05:43.286533 )
-[//]: # (+ Revised: 	2026/11/09 14:05:43.365405 )
+[//]: # (+ Revised: 	2026/11/14 16:40:51.451903 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Contributing
@@ -49,9 +49,13 @@ Open an issue with:
 
 ## Backlog
 
-Planned work lives in [`TODO.md`](TODO.md). Each item is self-contained;
-the first item in the file is the next to do. See the top of that file for
-how to add and implement items.
+Planned work lives in [`TODO.md`](TODO.md): everything there blocks 1.0.
+Each item is self-contained; the first item in the file is the next to do.
+See the top of that file for how to add and implement items.
+
+Ideas that don't block 1.0 live in [`BACKLOG.md`](BACKLOG.md) as light
+`B<n>` items (why, goal, notes). Nothing there is picked up as "next"; an
+item gets its full write-up when it is promoted to `TODO.md`.
 
 ---
 

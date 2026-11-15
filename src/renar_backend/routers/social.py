@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/09/17 10:04:40.045106
+Revised: 2026/11/15 02:45:09.958614
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -17,8 +17,10 @@ from sqlalchemy.orm import Session
 from ..catalog.titles import WITH_TITLE_GENRES, escape_like
 from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
-from ..models import Follow, LibraryEntry, MediaType, Title, User, WatchStatus
-from ..schemas import FeedEntryOut, LibraryEntryOut, PublicUserOut
+from ..models import Follow, LibraryEntry, MediaType, Title, User, UserReport, WatchStatus
+from ..schemas import FeedEntryOut, LibraryEntryOut, PublicUserOut, ReportCreate
+from ..social.blocks import blocked_pair_ids
+from ..social.reports import add_report, remove_report
 from ..users.auth import get_current_user
 from ..users.premium import flair
 from .reviews import reviewer_ids
@@ -36,6 +38,16 @@ _DEFAULT_LIST_LIMIT = 60
 def _user_or_404(user_id: int, db: Session) -> User:
     target = db.get(User, user_id)
     if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return target
+
+
+def visible_user_or_404(user_id: int, me: User, db: Session) -> User:
+    """The user, unless they don't exist or a block stands between them and
+    `me` (either direction): both answer the same 404, so a block can't be
+    detected by probing."""
+    target = _user_or_404(user_id, db)
+    if user_id in blocked_pair_ids(db, me.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return target
 
@@ -84,9 +96,9 @@ def _total_watch_minutes(user_id: int, db: Session) -> int:
     return int(total)
 
 
-def _public_users_batch(targets: list[User], me: User, db: Session) -> list[dict]:
+def public_users_batch(targets: list[User], me: User, db: Session) -> list[dict]:
     """All the per-profile counters for a whole list of users in a fixed
-    5 queries, not 5*N: each of followers/following/items/watch-minutes/
+    handful of queries, not 5*N: each of followers/following/items/watch-minutes/
     is-following used to be its own scalar subquery *per target user*, so a
     followers/following list with N entries fired 5*N queries."""
     if not targets:
@@ -129,6 +141,14 @@ def _public_users_batch(targets: list[User], me: User, db: Session) -> list[dict
             select(Follow.followed_id).where(Follow.follower_id == me.id, Follow.followed_id.in_(target_ids))
         ).all()
     }
+    reported_ids = {
+        row[0]
+        for row in db.execute(
+            select(UserReport.reported_user_id).where(
+                UserReport.reporter_id == me.id, UserReport.reported_user_id.in_(target_ids)
+            )
+        ).all()
+    }
     rev_ids = reviewer_ids(db, target_ids)
 
     return [
@@ -144,13 +164,14 @@ def _public_users_batch(targets: list[User], me: User, db: Session) -> list[dict
             "total_watch_minutes": int(watch_minutes_by_id.get(target.id, 0)),
             "is_following": target.id in following_ids,
             "is_me": target.id == me.id,
+            "reported_by_me": target.id in reported_ids,
         }
         for target in targets
     ]
 
 
 def _public_user(target: User, me: User, db: Session) -> dict:
-    return _public_users_batch([target], me, db)[0]
+    return public_users_batch([target], me, db)[0]
 
 
 @router.get("/users/search", response_model=list[PublicUserOut])
@@ -159,10 +180,12 @@ def search_users(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    users = (
-        db.query(User).filter(User.username.ilike(f"%{escape_like(q)}%", escape="\\"), User.id != me.id).limit(20).all()
-    )
-    return _public_users_batch(users, me, db)
+    query = db.query(User).filter(User.username.ilike(f"%{escape_like(q)}%", escape="\\"), User.id != me.id)
+    blocked = blocked_pair_ids(db, me.id)
+    if blocked:
+        query = query.filter(User.id.notin_(blocked))
+    users = query.limit(20).all()
+    return public_users_batch(users, me, db)
 
 
 @router.get("/users/{user_id}", response_model=PublicUserOut)
@@ -171,7 +194,7 @@ def get_user(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    return _public_user(_user_or_404(user_id, db), me, db)
+    return _public_user(visible_user_or_404(user_id, me, db), me, db)
 
 
 @router.post("/users/{user_id}/follow", status_code=status.HTTP_204_NO_CONTENT)
@@ -182,7 +205,7 @@ def follow_user(
 ):
     if user_id == me.id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You cannot follow yourself")
-    _user_or_404(user_id, db)
+    visible_user_or_404(user_id, me, db)
     if not _is_following(me.id, user_id, db):
         db.add(Follow(follower_id=me.id, followed_id=user_id))
         try:
@@ -203,6 +226,30 @@ def unfollow_user(
         db.commit()
 
 
+@router.post("/users/{user_id}/report", status_code=status.HTTP_204_NO_CONTENT)
+def report_user(
+    user_id: int,
+    data: ReportCreate | None = None,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    """Flag a profile (username, avatar, background) for the moderators."""
+    if user_id == me.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You can't report yourself")
+    visible_user_or_404(user_id, me, db)
+    reason = data.reason if data else ""
+    add_report(db, UserReport, UserReport.reported_user_id, user_id, UserReport.reporter_id, me.id, reason)
+
+
+@router.delete("/users/{user_id}/report", status_code=status.HTTP_204_NO_CONTENT)
+def unreport_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    remove_report(db, UserReport, UserReport.reported_user_id, user_id, UserReport.reporter_id, me.id)
+
+
 @router.get("/users/{user_id}/following", response_model=list[PublicUserOut])
 def list_following(
     user_id: int,
@@ -211,13 +258,16 @@ def list_following(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    _user_or_404(user_id, db)
+    visible_user_or_404(user_id, me, db)
     limit = _DEFAULT_LIST_LIMIT if limit is None else limit
-    query = db.query(Follow).filter(Follow.follower_id == user_id).order_by(Follow.created_at.desc(), Follow.id.desc())
-    query = query.offset(offset).limit(limit)
+    query = db.query(Follow).filter(Follow.follower_id == user_id)
+    blocked = blocked_pair_ids(db, me.id)
+    if blocked:
+        query = query.filter(Follow.followed_id.notin_(blocked))
+    query = query.order_by(Follow.created_at.desc(), Follow.id.desc()).offset(offset).limit(limit)
     follows = query.all()
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_([f.followed_id for f in follows]))}
-    return _public_users_batch([users_by_id[f.followed_id] for f in follows], me, db)
+    return public_users_batch([users_by_id[f.followed_id] for f in follows], me, db)
 
 
 @router.get("/users/{user_id}/followers", response_model=list[PublicUserOut])
@@ -228,13 +278,16 @@ def list_followers(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    _user_or_404(user_id, db)
+    visible_user_or_404(user_id, me, db)
     limit = _DEFAULT_LIST_LIMIT if limit is None else limit
-    query = db.query(Follow).filter(Follow.followed_id == user_id).order_by(Follow.created_at.desc(), Follow.id.desc())
-    query = query.offset(offset).limit(limit)
+    query = db.query(Follow).filter(Follow.followed_id == user_id)
+    blocked = blocked_pair_ids(db, me.id)
+    if blocked:
+        query = query.filter(Follow.follower_id.notin_(blocked))
+    query = query.order_by(Follow.created_at.desc(), Follow.id.desc()).offset(offset).limit(limit)
     follows = query.all()
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_([f.follower_id for f in follows]))}
-    return _public_users_batch([users_by_id[f.follower_id] for f in follows], me, db)
+    return public_users_batch([users_by_id[f.follower_id] for f in follows], me, db)
 
 
 @router.get("/users/{user_id}/media", response_model=list[LibraryEntryOut])
@@ -243,7 +296,7 @@ def user_media(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    _user_or_404(user_id, db)
+    visible_user_or_404(user_id, me, db)
     return (
         db.query(LibraryEntry)
         .options(*WITH_TITLE_GENRES)

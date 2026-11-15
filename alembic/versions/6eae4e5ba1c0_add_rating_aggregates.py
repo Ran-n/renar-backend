@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/17 00:00:00.000000
-Revised: 2026/08/17 00:00:00.000000
+Revised: 2026/11/15 11:01:43.816430
 """
 
 """add rating aggregates
@@ -33,13 +33,122 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from renar_backend.db_triggers import RATING_AGGREGATES_TRIGGER_SQL, RATING_AGGREGATES_TRIGGER_TEARDOWN_SQL
-
 # revision identifiers, used by Alembic.
 revision: str = "6eae4e5ba1c0"
 down_revision: str | Sequence[str] | None = "a4d8e1f39c62"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+# Frozen copy of the trigger SQL as it stood when this migration was written.
+# Never import it from renar_backend.db_triggers: that module holds today's
+# SQL, which may name columns a later migration adds, so replaying the
+# history on an empty database would fail here (it did; see
+# tests/test_migrations.py).
+_RATING_AGGREGATES_TRIGGER_SQL = """
+CREATE OR REPLACE FUNCTION trg_media_items_rating() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.rating IS NOT NULL THEN
+            UPDATE titles SET rating_sum = rating_sum - OLD.rating, rating_count = rating_count - 1
+            WHERE id = OLD.title_id;
+        END IF;
+        RETURN OLD;
+    ELSIF TG_OP = 'INSERT' THEN
+        IF NEW.rating IS NOT NULL THEN
+            UPDATE titles SET rating_sum = rating_sum + NEW.rating, rating_count = rating_count + 1
+            WHERE id = NEW.title_id;
+        END IF;
+        RETURN NEW;
+    ELSE -- UPDATE, rating changed (guarded by the trigger's own WHEN clause)
+        UPDATE titles
+        SET rating_sum = rating_sum + COALESCE(NEW.rating, 0) - COALESCE(OLD.rating, 0),
+            rating_count = rating_count
+                + (CASE WHEN NEW.rating IS NOT NULL THEN 1 ELSE 0 END)
+                - (CASE WHEN OLD.rating IS NOT NULL THEN 1 ELSE 0 END)
+        WHERE id = NEW.title_id;
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS media_items_rating_iud ON media_items;
+CREATE TRIGGER media_items_rating_iud
+AFTER INSERT OR DELETE ON media_items
+FOR EACH ROW EXECUTE FUNCTION trg_media_items_rating();
+
+DROP TRIGGER IF EXISTS media_items_rating_update ON media_items;
+CREATE TRIGGER media_items_rating_update
+AFTER UPDATE ON media_items
+FOR EACH ROW
+WHEN (OLD.rating IS DISTINCT FROM NEW.rating)
+EXECUTE FUNCTION trg_media_items_rating();
+
+CREATE OR REPLACE FUNCTION trg_episode_watches_rating() RETURNS trigger AS $$
+DECLARE
+    v_title_id integer;
+    v_season integer;
+    v_episode integer;
+    delta_sum integer;
+    delta_count integer;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.rating IS NULL THEN
+            RETURN OLD;
+        END IF;
+        SELECT title_id INTO v_title_id FROM media_items WHERE id = OLD.media_item_id;
+        v_season := OLD.season;
+        v_episode := OLD.episode;
+        delta_sum := -OLD.rating;
+        delta_count := -1;
+    ELSIF TG_OP = 'INSERT' THEN
+        IF NEW.rating IS NULL THEN
+            RETURN NEW;
+        END IF;
+        SELECT title_id INTO v_title_id FROM media_items WHERE id = NEW.media_item_id;
+        v_season := NEW.season;
+        v_episode := NEW.episode;
+        delta_sum := NEW.rating;
+        delta_count := 1;
+    ELSE -- UPDATE, rating changed (guarded by the trigger's own WHEN clause)
+        SELECT title_id INTO v_title_id FROM media_items WHERE id = NEW.media_item_id;
+        v_season := NEW.season;
+        v_episode := NEW.episode;
+        delta_sum := COALESCE(NEW.rating, 0) - COALESCE(OLD.rating, 0);
+        delta_count := (CASE WHEN NEW.rating IS NOT NULL THEN 1 ELSE 0 END)
+                      - (CASE WHEN OLD.rating IS NOT NULL THEN 1 ELSE 0 END);
+    END IF;
+
+    INSERT INTO episode_rating_aggregates (title_id, season, episode, rating_sum, rating_count)
+    VALUES (v_title_id, v_season, v_episode, delta_sum, delta_count)
+    ON CONFLICT (title_id, season, episode) DO UPDATE
+    SET rating_sum = episode_rating_aggregates.rating_sum + EXCLUDED.rating_sum,
+        rating_count = episode_rating_aggregates.rating_count + EXCLUDED.rating_count;
+
+    RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS episode_watches_rating_iud ON episode_watches;
+CREATE TRIGGER episode_watches_rating_iud
+AFTER INSERT OR DELETE ON episode_watches
+FOR EACH ROW EXECUTE FUNCTION trg_episode_watches_rating();
+
+DROP TRIGGER IF EXISTS episode_watches_rating_update ON episode_watches;
+CREATE TRIGGER episode_watches_rating_update
+AFTER UPDATE ON episode_watches
+FOR EACH ROW
+WHEN (OLD.rating IS DISTINCT FROM NEW.rating)
+EXECUTE FUNCTION trg_episode_watches_rating();
+"""
+
+_RATING_AGGREGATES_TRIGGER_TEARDOWN_SQL = """
+DROP TRIGGER IF EXISTS episode_watches_rating_update ON episode_watches;
+DROP TRIGGER IF EXISTS episode_watches_rating_iud ON episode_watches;
+DROP FUNCTION IF EXISTS trg_episode_watches_rating();
+DROP TRIGGER IF EXISTS media_items_rating_update ON media_items;
+DROP TRIGGER IF EXISTS media_items_rating_iud ON media_items;
+DROP FUNCTION IF EXISTS trg_media_items_rating();
+"""
 
 
 def upgrade() -> None:
@@ -87,12 +196,12 @@ def upgrade() -> None:
         """
     )
 
-    op.execute(RATING_AGGREGATES_TRIGGER_SQL)
+    op.execute(_RATING_AGGREGATES_TRIGGER_SQL)
 
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.execute(RATING_AGGREGATES_TRIGGER_TEARDOWN_SQL)
+    op.execute(_RATING_AGGREGATES_TRIGGER_TEARDOWN_SQL)
 
     op.drop_index("ix_episode_rating_aggregates_title_id", table_name="episode_rating_aggregates")
     op.drop_table("episode_rating_aggregates")

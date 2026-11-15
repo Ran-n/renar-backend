@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/24 12:37:50.106302
-Revised: 2026/11/09 23:36:42.986568
+Revised: 2026/11/14 00:22:50.969246
 
 Reviews: whitelist-gated create, edit/delete own, one-per-title,
 ownership, and the admin whitelist toggle.
@@ -243,5 +243,190 @@ def test_delete_account_removes_reviews_and_whitelist(client, alice):
         assert db.query(Review).count() == 0
         assert db.query(ReviewWhitelist).count() == 0
         assert db.get(User, user["id"]) is None
+    finally:
+        db.close()
+
+
+# ---------- like / dislike ----------
+
+
+def _reviewed(client, alice) -> tuple[dict, dict]:
+    """A review by alice; returns (review, alice's headers)."""
+    user, headers = alice
+    _whitelist(user["id"])
+    r = _post_review(client, headers)
+    assert r.status_code == 201, r.text
+    return r.json(), headers
+
+
+def _listed(client, headers) -> dict:
+    r = client.get("/media/reviews", params={"media_type": "film", "tmdb_id": 949}, headers=headers)
+    assert r.status_code == 200, r.text
+    return r.json()[0]
+
+
+def test_new_review_has_no_reactions(client, alice):
+    review, headers = _reviewed(client, alice)
+    for body in (review, _listed(client, headers)):
+        assert (body["likes"], body["dislikes"]) == (0, 0)
+        assert body["liked_by_me"] is False
+        assert body["disliked_by_me"] is False
+
+
+def test_review_like_unlike_roundtrip(client, alice, bob):
+    """A like shows in the count for everyone and as `liked_by_me` only for
+    the user who left it; un-liking removes it; repeating either is a no-op."""
+    review, a = _reviewed(client, alice)
+    _, b = bob
+    for _ in range(2):  # the second like must not add a second row
+        assert client.post(f"/media/reviews/{review['id']}/like", headers=b).status_code == 204
+    assert _listed(client, b)["likes"] == 1
+    assert _listed(client, b)["liked_by_me"] is True
+    assert _listed(client, a)["likes"] == 1
+    assert _listed(client, a)["liked_by_me"] is False
+    for _ in range(2):
+        assert client.delete(f"/media/reviews/{review['id']}/like", headers=b).status_code == 204
+    assert _listed(client, b)["likes"] == 0
+    assert _listed(client, b)["liked_by_me"] is False
+
+
+def test_review_dislike_undislike_roundtrip(client, alice, bob):
+    review, _ = _reviewed(client, alice)
+    _, b = bob
+    assert client.post(f"/media/reviews/{review['id']}/dislike", headers=b).status_code == 204
+    listed = _listed(client, b)
+    assert (listed["likes"], listed["dislikes"], listed["disliked_by_me"]) == (0, 1, True)
+    assert client.delete(f"/media/reviews/{review['id']}/dislike", headers=b).status_code == 204
+    assert _listed(client, b)["dislikes"] == 0
+
+
+def test_review_like_and_dislike_are_mutually_exclusive(client, alice, bob):
+    """Reacting the other way flips the one row; un-liking never retracts a
+    dislike (and the reverse)."""
+    review, _ = _reviewed(client, alice)
+    _, b = bob
+    client.post(f"/media/reviews/{review['id']}/like", headers=b)
+    client.post(f"/media/reviews/{review['id']}/dislike", headers=b)
+    listed = _listed(client, b)
+    assert (listed["likes"], listed["dislikes"]) == (0, 1)
+    assert listed["liked_by_me"] is False
+    assert listed["disliked_by_me"] is True
+    client.delete(f"/media/reviews/{review['id']}/like", headers=b)  # wrong kind: no-op
+    assert _listed(client, b)["dislikes"] == 1
+    client.post(f"/media/reviews/{review['id']}/like", headers=b)
+    listed = _listed(client, b)
+    assert (listed["likes"], listed["dislikes"]) == (1, 0)
+    client.delete(f"/media/reviews/{review['id']}/dislike", headers=b)  # wrong kind: no-op
+    assert _listed(client, b)["likes"] == 1
+
+
+def test_review_reactions_count_every_user(client, alice, bob, make_user):
+    review, a = _reviewed(client, alice)
+    _, b = bob
+    _, c = make_user("carol")
+    client.post(f"/media/reviews/{review['id']}/like", headers=a)  # own review: allowed
+    client.post(f"/media/reviews/{review['id']}/like", headers=b)
+    client.post(f"/media/reviews/{review['id']}/dislike", headers=c)
+    listed = _listed(client, a)
+    assert (listed["likes"], listed["dislikes"]) == (2, 1)
+
+
+def test_review_reaction_on_missing_review_not_found(client, alice):
+    _, headers = alice
+    assert client.post("/media/reviews/9999/like", headers=headers).status_code == 404
+    assert client.post("/media/reviews/9999/dislike", headers=headers).status_code == 404
+    # removing a reaction that cannot exist is a no-op, same as comments
+    assert client.delete("/media/reviews/9999/like", headers=headers).status_code == 204
+    assert client.delete("/media/reviews/9999/dislike", headers=headers).status_code == 204
+
+
+def test_review_reactions_need_auth(client, alice):
+    review, _ = _reviewed(client, alice)
+    for method in (client.post, client.delete):
+        for kind in ("like", "dislike"):
+            assert method(f"/media/reviews/{review['id']}/{kind}").status_code == 401
+
+
+def test_review_reactions_survive_edit_and_die_with_review(client, alice, bob):
+    """Editing a review keeps its reactions (and returns them); deleting it
+    removes their rows."""
+    from renar_backend.models import ReviewLike
+
+    review, a = _reviewed(client, alice)
+    _, b = bob
+    client.post(f"/media/reviews/{review['id']}/like", headers=b)
+    r = client.patch(f"/media/reviews/{review['id']}", json={"text": "Still great.", "rating": 90}, headers=a)
+    assert r.status_code == 200, r.text
+    assert r.json()["likes"] == 1
+    assert client.delete(f"/media/reviews/{review['id']}", headers=a).status_code == 204
+    db = SessionLocal()
+    try:
+        assert db.query(ReviewLike).count() == 0
+    finally:
+        db.close()
+
+
+def test_review_like_value_constraint(client, alice, bob):
+    """The table itself refuses anything but +1/-1."""
+    from sqlalchemy.exc import IntegrityError
+
+    from renar_backend.models import ReviewLike
+
+    review, _ = _reviewed(client, alice)
+    user_b, _ = bob
+    db = SessionLocal()
+    try:
+        db.add(ReviewLike(review_id=review["id"], user_id=user_b["id"], value=5))
+        with pytest.raises(IntegrityError):
+            db.commit()
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_review_like_concurrent_integrity_error_is_noop(client, alice, bob, monkeypatch):
+    """Two simultaneous likes from one user: the loser's INSERT hits the
+    unique constraint and is swallowed as "already liked" (204, no 500)."""
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.orm import Session
+
+    from renar_backend.models import ReviewLike
+
+    review, _ = _reviewed(client, alice)
+    _, b = bob
+    original_commit = Session.commit
+
+    def patched_commit(self):
+        if any(isinstance(obj, ReviewLike) for obj in self.new):
+            raise IntegrityError("INSERT INTO review_likes", {}, Exception("unique violation"))
+        return original_commit(self)
+
+    monkeypatch.setattr(Session, "commit", patched_commit)
+    assert client.post(f"/media/reviews/{review['id']}/like", headers=b).status_code == 204
+
+
+def test_delete_account_removes_review_reactions_both_ways(client, alice, bob):
+    """Deleting an account removes the reactions it left on others' reviews
+    and the reactions others left on its reviews (no orphan rows, no FK
+    error from the bulk review delete)."""
+    from conftest import hard_delete
+
+    from renar_backend.models import Review, ReviewLike
+
+    review, a = _reviewed(client, alice)
+    user_a, _ = alice
+    user_b, b = bob
+    _whitelist(user_b["id"])
+    r = _post_review(client, b, tmdb_id=950, title="Collateral")
+    assert r.status_code == 201, r.text
+    client.post(f"/media/reviews/{review['id']}/like", headers=b)  # bob on alice's
+    client.post(f"/media/reviews/{r.json()['id']}/dislike", headers=a)  # alice on bob's
+
+    hard_delete(user_a["id"])
+
+    db = SessionLocal()
+    try:
+        assert db.query(ReviewLike).count() == 0
+        assert db.query(Review).count() == 1
     finally:
         db.close()

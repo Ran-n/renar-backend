@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/11/11 16:51:04.925021 )
+[//]: # (+ Revised: 	2026/11/15 11:56:15.714319 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -334,6 +334,12 @@ the show's overall rating) or a deliberate, documented redundancy (e.g.
 through it). Widening any allowlist is a design decision and belongs in
 this file.
 
+Two entries were added with the review reactions and season grades:
+`review_likes.user_id` vs. `reviews.user_id` (who reacted vs. who wrote the
+review: different people, the same split `comment_likes` already has) and
+`season_ratings.rating` vs. `media_items.rating` (a grade for one season
+vs. the grade for the whole show).
+
 Facts cached from an *external* system (TMDB's `next_episode_air_date`,
 `release_date`, etc. on `titles` — see [`/upcoming` reads pre-synced Title
 columns](#upcoming-reads-pre-synced-title-columns-never-fetches-tmdb-live))
@@ -653,6 +659,36 @@ reply's scope explicitly (previously an O(1) column read); both are
 low-traffic paths (one validation per comment created, one render per
 admin page view), not the hot `GET /comments` read path.
 
+### Comment and review reactions share one helper (`social/reactions.py`)
+
+`comment_likes` and `review_likes` have the same shape: one row per
+(target, user) with `value` 1 (like) or -1 (dislike), a unique constraint
+on the pair and a CHECK on the value. `set_reaction`, `clear_reaction` and
+`reaction_counts` in `social/reactions.py` do the work for both; the
+routers only name the model and the target column.
+
+**Why one row with a value, not two tables:** a like and a dislike by the
+same user on the same target exclude each other. One row makes that a
+property of the schema; switching is an update of `value`.
+
+**Why a shared helper:** the review endpoints would otherwise be a copy of
+the comment ones, and the two would drift (the race on a double tap, which
+`set_reaction` resolves by catching the unique violation, is easy to fix in
+one place and forget in the other).
+
+Reviews can't be shared by link yet, only as an image card built by the
+app, so the backend has no share endpoint for them.
+
+### `GET /comments?sort=asc|desc` orders root comments only
+
+`sort` picks the order of the thread roots by `created_at`, newest first
+by default (what the endpoint always did), with `id` as a tie-break so two
+comments in the same microsecond page the same way every time. Replies
+keep their oldest-first order under their parent in both modes.
+
+**Why replies don't flip:** a reply answers what is above it; reversing
+them would put answers before the questions.
+
 ### Comment reports: one row per (comment, reporter), resolved by deletion
 
 `POST /comments/{id}/report` upserts nothing and stores no state machine:
@@ -666,6 +702,69 @@ its reports) — there is no dismiss/ack workflow.
 **Why:** the report is a moderation *signal*, not a ticket; at this scale a
 count next to the comment in the existing admin table is the whole
 workflow, and the unique constraint keeps one user from inflating it.
+
+### Review and profile reports: the comment-report shape, reused
+
+`POST`/`DELETE /media/reviews/{id}/report` and `/users/{id}/report` work
+like the comment ones: one `review_reports` / `user_reports` row per
+(target, reporter), an optional `reason` (500 characters), repeat reports
+are no-ops, and `ReviewOut` / `PublicUserOut` carry `reported_by_me`. All
+three go through `social/reports.py` (`add_report` / `remove_report`), which
+logs ids only, never the reason text. Reporting your own review or profile
+is a 400. The admin panel lists them on "Reported reviews" (count, latest
+reasons, Delete) and "Reported users" (count, latest reasons, a link to the
+user's admin page, where ban and edit already are).
+
+Reports go to the moderators only: nothing is hidden or removed
+automatically after N reports.
+
+**Why:** Google Play's user-generated content policy expects users to be
+able to report content and users from inside the app. Auto-hiding was left
+out because in a small user base it is easy to abuse: a handful of accounts
+could silence anyone. A separate table per target kind (instead of one
+polymorphic `reports` table) keeps real foreign keys, the same choice as
+`comment_likes` / `review_likes`.
+
+### Blocking is symmetric and looks like a missing user
+
+`POST`/`DELETE /users/{id}/block` and `GET /users/blocked` (`routers/blocks.py`).
+`user_blocks` stores one row per (blocker, blocked): the direction is kept
+because only the blocker may undo it, but the *effect* is symmetric. When A
+blocks B, neither sees the other's comments (the reply subtree under a
+hidden comment goes with it), reviews, profile or library; neither can
+follow or reply to the other; and any follow between them is deleted in the
+same transaction (unblocking doesn't restore it). Every router asks one
+helper, `social/blocks.py`'s `blocked_pair_ids`, so the rule lives in one
+place. Reaction totals still count everyone (anonymous aggregates), and
+admin pages aren't filtered.
+
+To the other side a block is indistinguishable from an account that doesn't
+exist: `GET /users/{id}`, its `/media`, `/followers`, `/following`,
+`POST .../follow`, `POST .../report` and a reply to their comment all answer
+the same 404 an unknown id gets.
+
+**Why:** a one-way hide still lets the blocked person keep reading and
+replying to the person who blocked them, which is the thing a block is
+for. The 404 means a block can't be detected by probing, so blocking
+someone doesn't hand them a signal to retaliate. Someone who was blocked
+can still block back (the block endpoint checks plain existence), since
+they have the same right to a list they control. Google Play's content
+rating asks whether the app can block users, and Apple's guideline 1.2
+requires it for user-generated content.
+
+The data export lists the account's own blocks (`social.json`,
+`blocked_users`), and importing a Renar export re-applies them before it
+restores follows, so a follow across a block is skipped. Without that, an
+export and re-import would quietly put blocked people back in view.
+
+The report tables name the reporter column `reporter_id`
+(`review_reports`, `user_reports`), not `user_id`: next to
+`reviews.user_id` (the author) the generic name reads as a copy, which is
+what the normalization guard flags.
+
+`routers/blocks.py` is included in `main.py` before `routers/social.py`:
+`GET /users/blocked` must match ahead of `GET /users/{user_id}`, or
+"blocked" is parsed as a user id (422).
 
 ### `email_confirmed` is authoritative; `email_confirmation_bypassed` is a footnote
 
@@ -956,6 +1055,21 @@ variants and never off-palette values.
 visually consistent with the app, and pinning to the named values in
 `themes.py` gives a single source of truth to check new admin CSS against.
 
+The favicon and the mark on the sign-in and session-expired pages are the
+app's dark icon tile (`#17191a`, mark `#e9e5da`, dot `#c99b6c`). The icon is
+served from `GET /favicon.ico` (`static/favicon.ico`, 16/32/48/64 px) and
+the mark is inlined from `static/renar-mark-dark.svg`; both files are read
+once at import, so a wheel that lacks them fails at startup with the path
+in the error.
+
+**Why a route and not a data URI:** the admin CSP is `default-src 'self'`,
+which blocks a `data:` icon in browsers that apply CSP to favicons
+(Firefox). A same-origin URL passes it, and also gives the API root a tab
+icon. For that, the root's own CSP is `default-src 'none'; img-src 'self';
+frame-ancestors 'none'`: Firefox applies a page's CSP to its tab icon, and
+`default-src 'none'` alone blocked it there. Only `/` gets `img-src
+'self'`; every other API reply keeps allowing nothing.
+
 ### `ADMIN_PATH` is configurable, and the default becomes a honeypot
 
 Moving the admin panel off `/admin` is the primary defense for that
@@ -963,6 +1077,59 @@ endpoint (it hides the login page from scanners altogether; the sign-in's
 strikes then only ever see someone who already knew the path). Once moved, the *original* `/admin` path is added to
 the honeypot list automatically — nothing legitimate should ever request it
 again, so any request there is unambiguously a scanner.
+
+### Admin password stored as an Argon2id hash
+
+`.env` holds `ADMIN_PASSWORD_HASH`, made by `uv run admin-password`; the
+sign-in verifies against it with `argon2-cffi`. A plain `ADMIN_PASSWORD`
+stops the server at boot.
+
+**Why:** `.env` (and every backup of it) used to give the admin password
+outright, and the TOTP secret sits in the same file, so one leaked file was
+a full admin login. With a hash, the file gives the second factor but not
+the first. Argon2id rather than the bcrypt app users have: it is
+memory-hard, it is OWASP's first choice today, and it has no 72-byte limit;
+there is one admin, so the 64 MiB a sign-in costs is irrelevant. The
+library defaults (RFC 9106 low-memory profile) are used as they are: tuned
+parameters would be one more thing to get wrong for no measurable gain at
+one sign-in a day. The plain variable is refused, not ignored, so an old
+`.env` can't leave the panel silently unconfigured or the password lying
+around. `Settings` hides input values in validation errors
+(`hide_input_in_errors`), or that refusal would print the password. The
+password is verified even when the username is wrong, so timing doesn't
+tell which half failed, and a hash that can't be parsed fails closed with
+an error in the log.
+
+### Prod admin panel behind Cloudflare Access, and the origin checks its signed header
+
+Prod's admin path is meant to sit behind a Cloudflare Access application
+(one-time PIN to the operator's address; a service token for the APK
+upload). When `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set,
+`CloudflareAccessMiddleware` (`users/cf_access.py`) requires the
+`Cf-Access-Jwt-Assertion` header on every request under `ADMIN_PATH` and
+checks its RS256 signature against the team's keys, its audience, issuer
+and expiry (60 s of clock skew).
+
+**Why Access:** it checks who someone is before a request reaches the
+server at all. `ADMIN_PATH` stays as a second layer, but it is a secret
+that can leak (history, a screenshot, a log line). A service token for
+`--publish` because a script can't read a mailed code. Dev isn't covered:
+its DNS record is unproxied, so Cloudflare never sees that traffic.
+
+**Why the origin checks the header too:** accepting only Cloudflare's IP
+ranges doesn't prove a request passed *this* zone's policy; anyone can
+point their own proxied record at the VPS and arrive from a Cloudflare IP.
+The signature and audience do prove it.
+
+**Why a 404 and no strike:** a refusal must look like a path that doesn't
+exist, and a stale browser tab whose Access session ran out must not get
+the operator banned. The middleware sits inside `AbuseGuardMiddleware`
+(bans still apply first); its 404 isn't counted as a probe because the
+guard only counts paths that match no route. If the keys can't be fetched
+the answer is a 503, never a pass; a token naming a key the fetched set
+doesn't have is treated as forged (404), so an attacker can't use it to
+tell the admin path from any other. One middleware rather than a
+dependency on each admin router, so no route can be missed.
 
 ### Self-update reloads in place; the helper runs outside the venv
 
@@ -2054,6 +2221,84 @@ wrong caller sends a type-inapplicable field — from silently corrupting
 data again, including once more media types (e.g. books) exist and bring
 their own type-only fields.
 
+### `GET /diary`: one dated row per watched episode or film, built at read time
+
+The diary is a union of two things that already exist: `episode_watches`
+rows (one per watched episode, dated by `watched_at`) and completed films
+(dated by `last_watched_at`). It is paged (`page`, `page_size` up to 100),
+filterable by `type` (`film` or `episode`) and by a day range (`from` and
+`to`, inclusive), newest first.
+
+**The day range follows the caller's clock.** `from`/`to` are UTC days by
+default; `utc_offset` (minutes east of UTC, -840 to 840) moves the midnight
+they are cut at. The app lists entries under the viewer's local day, so it
+sends its own offset. Without it a watch at 00:30 local time in UTC+2 (22:30
+UTC the day before) was listed under one day and filtered as another.
+Offsets, not a time zone name, because the device's offset is all the
+client knows on every platform. `utc_offset` is the offset at the midnight
+that opens `from`, and `utc_offset_to` the one at the midnight that closes
+`to`, so a range crossing a daylight-saving change is exact at both ends.
+
+**Why no diary table:** every fact in it is already stored once. A table
+would be a second copy to keep in step on every watch, unwatch, import and
+account deletion.
+
+**Rewatches appear once.** A rewatched film or episode shows at its latest
+watch date, because `episode_watches` holds one row per episode and a film
+has one `last_watched_at`. Listing each rewatch as its own entry would
+need the per-event `WatchEvent` rows joined in; that is a follow-up item in
+`TODO.md`, not part of this endpoint.
+
+### Season grades: only for a fully watched season, stored per season
+
+`season_ratings` holds one grade (1-100) per (library entry, season).
+`PUT /media/{id}/seasons/{season}/rating` answers 409 unless every aired
+episode of that season in the catalog is watched, and 422 for a film.
+`GET /media/{id}/episodes` returns `season_ratings` and
+`completed_seasons`, and the episode write endpoints return
+`season_completed` when the write just finished a season, so the app can
+offer the grade at that moment.
+
+Those endpoints first make sure the season is in the episode catalog
+(`ensure_seasons_synced`), since a show added moments ago has no rows yet.
+Only seasons 1 to the show's `total_seasons` count as missing: that is all
+`sync_show_episodes` fetches, so specials (season 0) or a stray season
+number would otherwise start a TMDB sync on every episode toggle.
+
+**Why gate on completion:** a season grade is a verdict on the whole
+season. Allowing it earlier would mix "so far" opinions with final ones in
+any later average.
+
+**Why a season with no catalog episodes is never complete:** with no
+episode list there is nothing to compare against, and "zero of zero
+watched" would let any season number be graded.
+
+**The catalog is synced on demand.** The episode catalog is otherwise
+filled by the Upcoming feed and the notifier job, so a show added moments
+ago has no rows and none of its seasons could count as complete.
+`tmdb_store.ensure_seasons_synced` runs before every completion check (the
+episode writes, the episode list, the season grade): one indexed read when
+the season's rows exist, a TMDB sync bounded to 3 seconds when they don't.
+If TMDB is down the write still succeeds and the season completes on a
+later call.
+
+**Why the grade stays when an episode is unwatched later:** the user gave
+it on a complete season; deleting it on an accidental untick would lose
+their input. Changing it needs the season complete again; clearing it is
+always allowed.
+
+The grade is personal. There is no community season average yet (a
+follow-up in `TODO.md`). Grades travel in the `.renar` export and import;
+on import an existing grade wins and a malformed row is skipped and
+logged.
+
+### `GET /media/episode-ratings/show`: every episode's community average in one call
+
+Returns the Renar average and vote count for every rated episode of a
+show, keyed by season and episode. The app's whole-show grade grid needs
+all seasons at once; the per-season endpoint would mean one request per
+season.
+
 ### `POST /media/ratings/batch` alongside the existing single-title `GET /media/ratings`
 
 Explore's result grid (renar-frontend) needs a Renar community rating per
@@ -2119,6 +2364,22 @@ another directory — hot-reload watched a nonexistent `src`, settings fell
 back to defaults, media landed in a stray folder. None of them errored;
 they just behaved differently depending on where the command was typed.
 
+### Finished import progress leaves memory after 10 minutes
+
+Each importer keeps `{user_id: progress}` in memory so a status poll during
+a run needs no database read. `users/import_progress.py` stamps an entry
+when its run finishes and drops it once it is 10 minutes old, the next time
+any import starts. `GET /import/status` then answers from the durable
+`ImportJob` row with the same outcome.
+
+**Why prune on job start, not on a timer:** the dict only grows when a job
+starts, so that is the one moment pruning is needed; no background task to
+start, stop and test.
+
+**Why 10 minutes:** much longer than any client's polling interval, so the
+poll that sees "finished" and the few after it are still served from
+memory.
+
 ### `timeout_graceful_shutdown=5` prevents an indefinite Ctrl+C hang
 
 uvicorn's `__main__.py:run()` passes `timeout_graceful_shutdown=5` to
@@ -2160,6 +2421,22 @@ can't outlive their reloader).
 ---
 
 ## Observability
+
+### Console log lines are built for skimming; files stay plain
+
+`logging_setup.ConsoleFormatter` formats the console handler only:
+time of day, a 5-wide level (`INFO`, `WARN`, `ERROR`), the logger name
+without the `renar_backend.` prefix in a 21-wide column, then the message.
+On a terminal the level is coloured and a WARNING or worse colours its
+whole message. The log files keep the full line (date, full level, full
+logger name).
+
+**Why two formats:** the console is read live by a person looking for the
+few lines that matter; the files are searched with grep and read by tools,
+where a date, a full logger name and no escape codes are what is wanted.
+
+**Why colour only on a TTY and never with `NO_COLOR`:** escape codes in a
+redirected console or a service manager's journal are noise.
 
 ### Crash/error visibility: a split local log file, not Sentry
 
@@ -2279,7 +2556,10 @@ fast:
   `ast`, then checks each `(METHOD, path)` against this backend's live
   OpenAPI schema. Needs `ENABLE_DOCS=true` on the *test* server only (see
   renar-frontend's `tests/integration/conftest.py`'s `live_backend`
-  fixture) — production still defaults `enable_docs` to `False`.
+  fixture) — production still defaults `enable_docs` to `False`. This
+  repo's half is `tests/test_response_models.py` (`pytest -m contract`,
+  in the default run): every documented JSON endpoint must declare a
+  `response_model`, so the schema the frontend validates against is real.
 - **property** (`tests/test_property.py`) — hypothesis-driven invariants on
   pure validation/normalization functions (`_password_fits_bcrypt`,
   `_HEX_COLOR_RE`, `normalize_title_key`, `_normalize_email`) across a
@@ -2503,6 +2783,73 @@ where they already are and keep being added where they're cheap (the admin
 earlier. The handler is the floor, not a replacement for them.
 
 ---
+
+### 2026-11-13: the coverage item closed, and a coverage floor
+
+The last blocking Testing item closed with every module at 100% branch
+coverage:
+
+- **Every documented JSON endpoint has a `response_model`.** The last four
+  (`GET /stats`, `/stats/ranking`, `/stats/ranking/metrics`,
+  `/premium/palette`) plus `/` and `/health` got one.
+  `tests/test_response_models.py` now enforces it: an endpoint without a
+  JSON schema fails unless it answers 204 or is on an explicit list of
+  non-JSON bodies (SSE, images, zip, APK), and that list fails when an entry
+  goes stale. `stats.py` builds its response dict by hand, and
+  `response_model` silently drops undeclared keys, so the same file checks
+  that the handler's keys equal `StatsOut`'s and `RankingOut`'s fields.
+- **Subprocess coverage via coverage.py's `patch = ["subprocess"]`, not
+  per-module omits.** `_test_server.py` only ever runs as
+  `python -m renar_backend._test_server`, so it showed 0%. With the patch,
+  every Python child the suite starts is measured. That alone didn't work:
+  uvicorn catches CTRL_BREAK, shuts down, then restores the default handler
+  and re-raises the signal, and Windows' default handler kills the process
+  before `atexit` runs. So no coverage data was saved, and the schema drop
+  that the old comment called flaky never ran either.
+  `_test_server._exit_cleanly` turns the re-raised SIGBREAK into
+  `sys.exit(0)`, which fixes both.
+- **Race branches staged deterministically.** `catalog/titles.py`'s
+  "another worker inserted it first" fallbacks commit the competing row from
+  a second session, then make this session miss it once: a `do_orm_execute`
+  hook blanks one `Genre` SELECT, or `find_title` is stubbed. The INSERT,
+  the unique-index `IntegrityError`, the savepoint rollback and the
+  re-query all run for real (`tests/test_titles_races.py`).
+- **`_devserver.py`'s platform helpers are tested in-process** with
+  `subprocess.run`/`os.kill`/`sys.platform` stubbed, plus the watchdog body
+  with a fake parent. The real orphan-subprocess test stays for the
+  end-to-end behaviour.
+- **The floor is `fail_under = 100` on a full run (`-m "not security"`)**, not
+  the default run: the default run skips the integration tests, so it
+  can't measure the live server. `security` stays out because it needs the
+  network. `--cov` isn't in `addopts`, so a single-file run isn't gated.
+- **Shared reset of process-wide guard state.** `conftest._fresh_db` clears
+  the in-memory permaban set as well as the temp-ban queue. One test
+  permabanning `testclient` made a later test's guarded app answer 403 to
+  everything, but only when the full suite ran them in that order.
+- **One `# pragma: no branch`, one `exclude_also`.** The pragma marks
+  `_test_server.py`'s `hasattr(signal, "SIGBREAK")`, whose other side only
+  runs off Windows. `exclude_also` drops every `if __name__ == "__main__":`
+  guard, the only lines allowed to stay unmeasured.
+- **Untestable branches were deleted, not excluded.** Checks that a
+  foreign key, unique index or `min_length` already rule out (`media.py`'s
+  `title_id is None` returns, `tvtime_import`'s re-checks of a row it just
+  found, `stats.py`'s `ts is None` skip) are gone; `elif` chains over an
+  enum end in `else` with a comment naming the remaining member.
+- **Small seams instead of patching globals.** `main.install_middleware()`
+  and `update_check._detach_kwargs(windows=...)` let tests build an app with
+  the abuse guard on, and check both platforms' detach flags, without
+  patching `settings` or `os.name` (which breaks `pathlib`).
+  `security._escalate()` is shared by the normal and race paths.
+  `tests/_race_helpers.py` (`commit_elsewhere`, `hide_selects`) stages every
+  race test the same way.
+- **Two real bugs turned up.** A `.renar` import crashed outright when a
+  library entry it was updating was deleted mid-import; it now skips that
+  entry and counts it in `library_skipped`. `self_update.main()` closed its
+  log file handler without detaching it, so a second run in the same
+  process logged to a closed file.
+
+Mutation testing is the one configured type that has never run. It needs
+WSL or Linux and stays a `[Future]` item in `TODO.md`.
 
 ## Release scope (1.0)
 
@@ -2777,3 +3124,34 @@ unexpected error even though the ban was already active.
 **Fix:** unconditionally `db.add(BannedIP(…))` inside a `begin_nested()`
 savepoint; catch `IntegrityError` silently. The in-memory set is the
 authoritative gate; the DB write is only persistence.
+
+### Migrations carry a frozen copy of trigger SQL; `db_triggers.py` is only today's version
+
+Three migrations (`a7c2e9f4b816`, `ee151fb9d02c`, `6eae4e5ba1c0`) used to
+import their trigger SQL from `renar_backend.db_triggers`, so one definition
+served both Alembic and `create_all()`. Each now holds a literal copy of the
+SQL as it stood when the migration was written, and no migration imports
+application code.
+
+**Why:** a migration is a fact about one moment. `a7c2e9f4b816` ran the
+imported user-count SQL, which later grew a reference to
+`users.email_confirmed`, a column `ee151fb9d02c` adds afterwards; from then
+on `alembic upgrade head` on an empty database failed (found 2026-11-15).
+Existing databases never noticed, and neither did the tests, which build
+their schema with `create_all()`. The original worry, two copies drifting
+apart, is now covered by a test instead of by sharing:
+`tests/test_migrations.py` replays the whole history on an empty schema and
+requires (1) it reaches head, (2) the result has no difference from the
+models, (3) its functions and triggers equal the ones `create_all()`
+installs, and (4) no file in `alembic/versions/` imports `renar_backend`.
+
+**How to apply:** changing SQL in `db_triggers.py` needs a new migration
+that applies the new version from its own literal copy; test (3) fails
+without one. Two models were corrected to describe what the migrations
+really built (the composite `ix_users_total_watch_minutes` index and
+`review_whitelist`'s named unique constraint plus plain index), so
+`alembic check` is clean on real databases too. Downgrading to base is not
+supported or tested: `a3f8c1e97b52` (remove book and youtube media types)
+is irreversible by design. `alembic/env.py` doubles `%` in the database URL,
+because configparser treats it as interpolation and a URL-encoded option
+(`options=-csearch_path%3D...`) would otherwise be rejected.

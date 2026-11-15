@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:18:08.747952
-Revised: 2026/08/18 17:18:08.747952
+Revised: 2026/11/14 00:52:06.484734
 
 Snapshot tests: the derived value (API surface, a schema's field set) is
 compared against a checked-in baseline in tests/snapshots/ instead of
@@ -41,15 +41,28 @@ def _check(name: str, value) -> None:
     assert serialized == expected, f"snapshot {name!r} changed — if intentional, re-run with UPDATE_SNAPSHOTS=1"
 
 
+def _all_routes():
+    """Every route with its full path. FastAPI >= 0.139 keeps an included
+    router as one nested entry in ``app.routes``; its effective contexts
+    carry the prefixed paths. Without this the snapshot held only the
+    routes declared on the app itself and never saw a router's endpoints."""
+    for route in app.routes:
+        if hasattr(route, "effective_route_contexts"):
+            yield from route.effective_route_contexts()
+        else:
+            yield route
+
+
 def test_api_surface_snapshot():
     """Every (METHOD, path) the app actually serves, HEAD excluded (FastAPI
     adds it to every GET automatically — not a route anyone declared)."""
-    routes = sorted(
+    routes = sorted({
         f"{method} {route.path}"
-        for route in app.routes
-        for method in getattr(route, "methods", set())
+        for route in _all_routes()
+        for method in getattr(route, "methods", None) or set()
         if method != "HEAD"
-    )
+    })
+    assert len(routes) > 100, "the route walk found almost nothing: the snapshot would guard nothing"
     _check("api_surface", routes)
 
 

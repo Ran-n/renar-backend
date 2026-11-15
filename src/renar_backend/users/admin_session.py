@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:21:23.494179
-Revised: 2026/11/09 23:36:44.478479
+Revised: 2026/11/15 11:56:18.661581
 
 The admin panel's sign-in: username + password + an authenticator-app (TOTP)
 code, held as a stateless session cookie.
@@ -10,10 +10,14 @@ code, held as a stateless session cookie.
 The cookie is a JWT signed with ``settings.secret_key`` whose audience
 (``renar-admin``) keeps an app user's access token from ever passing as an
 admin session, and the reverse. It carries ``cred``, a fingerprint of the
-current admin username, password and TOTP secret, recomputed on every
+current admin username, password hash and TOTP secret, recomputed on every
 request: changing any of them in ``.env`` ends every session at once without
 a session table. There is no sliding renewal: 8 hours after sign-in the next
 request goes back to the login page.
+
+The password itself is never stored: ``.env`` holds its Argon2id hash
+(``ADMIN_PASSWORD_HASH``, made by ``uv run admin-password``), so a leaked
+``.env`` gives the TOTP secret but not the password.
 
 Scripts that can't type a code (the APK upload) use ``ADMIN_API_TOKEN``
 instead, see ``api_token_ok``.
@@ -27,6 +31,8 @@ import time
 import blake3
 import jwt
 import pyotp
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 from ..config import settings
 
@@ -37,6 +43,9 @@ AUDIENCE = "renar-admin"
 SESSION_SECONDS = 8 * 60 * 60
 _ALGORITHM = "HS256"
 _TOTP_STEP = 30
+# Library defaults: Argon2id, RFC 9106 low-memory profile (64 MiB, 3 passes,
+# 4 lanes). Verifying reads the parameters from the hash itself.
+_HASHER = PasswordHasher()
 
 # Replay guard: a code whose time step is not newer than the last one used
 # is refused. Process-local on purpose (one uvicorn worker); a restart
@@ -46,11 +55,11 @@ _last_used_step = -1
 
 
 def admin_configured() -> bool:
-    return bool(settings.admin_username and settings.admin_password and settings.admin_totp_secret)
+    return bool(settings.admin_username and settings.admin_password_hash and settings.admin_totp_secret)
 
 
 def _cred_fingerprint() -> str:
-    material = "\0".join((settings.admin_username, settings.admin_password, settings.admin_totp_secret))
+    material = "\0".join((settings.admin_username, settings.admin_password_hash, settings.admin_totp_secret))
     return blake3.blake3(material.encode()).hexdigest()[:16]
 
 
@@ -64,13 +73,27 @@ def _matching_step(code: str, now: float) -> int | None:
     return None
 
 
+def _password_matches(password: str) -> bool:
+    """Whether ``password`` is the one behind ADMIN_PASSWORD_HASH. A hash
+    that can't be checked at all fails closed and is logged, never a 500."""
+    try:
+        return _HASHER.verify(settings.admin_password_hash, password)
+    except VerifyMismatchError:
+        return False
+    except (VerificationError, InvalidHashError):
+        _log.error("admin login refused: ADMIN_PASSWORD_HASH could not be verified", exc_info=True)
+        return False
+
+
 def verify_login(username: str, password: str, code: str, now: float | None = None) -> bool:
     """Every part must match; the TOTP step must not have been used before."""
     global _last_used_step
     if not admin_configured():
         return False
     user_ok = secrets.compare_digest(username.encode(), settings.admin_username.encode())
-    password_ok = secrets.compare_digest(password.encode(), settings.admin_password.encode())
+    # Always verified, also when the username is wrong, so the response
+    # time doesn't tell which half failed.
+    password_ok = _password_matches(password)
     code = code.replace(" ", "")
     step = _matching_step(code, time.time() if now is None else now) if code.isdigit() and len(code) == 6 else None
     if not (user_ok and password_ok and step is not None):

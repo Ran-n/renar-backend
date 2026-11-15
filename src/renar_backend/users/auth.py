@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.008319
-Revised: 2026/11/09 23:36:40.975282
+Revised: 2026/11/15 11:56:18.981707
 """
 
 import logging
@@ -39,7 +39,7 @@ class AdminLoginRequired(Exception):
 
 def _not_configured() -> HTTPException:
     return HTTPException(
-        status_code=503, detail="Admin panel not configured (ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_TOTP_SECRET)"
+        status_code=503, detail="Admin panel not configured (ADMIN_USERNAME, ADMIN_PASSWORD_HASH, ADMIN_TOTP_SECRET)"
     )
 
 

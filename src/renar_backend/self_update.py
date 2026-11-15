@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:18.223079
-Revised: 2026/11/10 13:53:25.298678
+Revised: 2026/11/13 15:35:13.262401
 
 The admin panel's one-click server update, as a detached helper process.
 
@@ -430,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         result = "failed"
     finally:
         updater.release_lock()
+        _log.removeHandler(handler)  # closed but still attached, it would reopen the file
         handler.close()
     return 0 if result == "ok" else 1
 

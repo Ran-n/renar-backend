@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/11/11 17:44:24.405898 )
+[//]: # (+ Revised: 	2026/11/15 11:56:13.939658 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- Users can block each other: neither sees the other's comments, reviews
+  or profile (`POST`/`DELETE /users/{id}/block`, `GET /users/blocked`).
+  A block also ends the follows between the two, and the block list is
+  part of the data export and is restored when that export is imported
+- Reviews and profiles can be reported to the moderators, not just
+  comments (`POST`/`DELETE /media/reviews/{id}/report` and
+  `/users/{id}/report`); the admin panel has "Reported reviews" and
+  "Reported users" pages
+- The privacy policy is published at renar.app/privacy. It now names the
+  services that process data (Hetzner, Cloudflare and Turnstile, Brevo),
+  says what is public, gives the 30-day deletion grace period, and covers
+  storage in the EU under the GDPR
+- `GET /diary`: the account's watch log, newest first, one dated row per
+  watched episode or completed film, with paging and filters by type and
+  date range; `utc_offset` makes the range follow the caller's local
+  days, and `utc_offset_to` keeps it exact across a daylight-saving
+  clock change
+- Reviews can be liked and disliked (`POST`/`DELETE`
+  `/media/reviews/{id}/like` and `/dislike`); review responses carry the
+  counts and the caller's own reaction
+- `GET /comments` takes `sort=asc|desc` to list threads oldest or newest
+  first
+- A season can be graded once every aired episode of it is watched
+  (`PUT`/`DELETE` `/media/{id}/seasons/{season}/rating`); the grades are
+  listed with the episodes and included in the `.renar` export and import
+- `GET /media/episode-ratings/show`: the community average of every rated
+  episode of a show in one call
+- Serve the renar logo as `/favicon.ico` on every page, and show it on the
+  admin sign-in page
+
+### Changed
+
+- The admin password is stored as an Argon2id hash (`ADMIN_PASSWORD_HASH`,
+  made with `uv run admin-password`); a plain `ADMIN_PASSWORD` stops the
+  server at boot
+- The Terms of Service are written for publication: Spanish law, EU
+  consumer protections, Hetzner as host, and the EU Digital Services Act
+  for takedown notices
+- Every dependency is up to date, including FastAPI 0.163, SQLAlchemy
+  2.1, Pydantic 2.14, Starlette 1.10 and Alembic 1.20; no code change
+  was needed
+- Console log lines are shorter and aligned (time, level, short logger
+  name, message), with colour on a terminal; the log files are unchanged
+- `GET /stats`, `/stats/ranking`, `/stats/ranking/metrics`,
+  `/premium/palette`, `/` and `/health` now describe their response in the
+  OpenAPI schema, like every other JSON endpoint; a new test fails any
+  future JSON endpoint that doesn't
+- A full test run with coverage (`uv run pytest -m "not security" --cov`)
+  also measures the integration test server, and fails below the coverage
+  floor of 100% branch coverage set in `pyproject.toml`
+
+### Security
+
+- When Cloudflare Access is configured (`CF_ACCESS_TEAM_DOMAIN`,
+  `CF_ACCESS_AUD`), admin routes require its signed header; requests that
+  bypass Access get a 404
+- Settings validation errors no longer print the offending value
+
+### Fixed
+
+- `alembic upgrade head` works on an empty database again: three old
+  migrations imported today's trigger SQL, which names a column added
+  later. Each now carries its own copy, and a new test replays the whole
+  history and compares the result with the models
+- `alembic check` no longer reports differences on `users` and
+  `review_whitelist`: the models now describe the indexes the migrations
+  built
+- Browsers fetching the favicon no longer count as scanner probes
+- A show added moments ago can have a complete season: its episode list is
+  now synced when a season's completion is first checked, not only by the
+  Upcoming feed and the notifier. Specials and season numbers TMDB doesn't
+  list never start that sync
+- The API surface snapshot test lists every router's endpoints again; since
+  FastAPI 0.139 it only saw the three routes declared on the app itself
+- Finished imports no longer stay in the server's memory until it
+  restarts; their progress is dropped 10 minutes after they end
+- The integration test server now exits cleanly when stopped with
+  Ctrl+Break, so it always drops its throwaway Postgres schema instead of
+  sometimes leaving it behind
+- A `.renar` import no longer fails as a whole when one of the library
+  entries it updates is deleted at the same moment; that entry is skipped
+- The self-updater detaches its log file when it finishes, so a later run
+  in the same process doesn't write to a closed file
 
 ## [0.22.1] - 2026-11-11
 

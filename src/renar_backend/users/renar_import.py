@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/11/09 15:59:25.118676
+Revised: 2026/11/15 02:45:13.667037
 
 Import a Renar-native export (users/export.py's .7z of profile/library/
 comments/social JSON) back into an account — the write side of GDPR Art.
@@ -29,8 +29,10 @@ rather than guessed at — attaching it to an unrelated row by unverifiable
 id coincidence would misrepresent it, and cross-instance ids aren't
 comparable at all. Same documented limitation as the TV Time importer.
 
-Only `following` is restored on the social side: `followers` records other
-accounts' choice to follow this one, which isn't this account's to recreate.
+Only `following` and `blocked_users` are restored on the social side:
+`followers` records other accounts' choice to follow this one, which isn't
+this account's to recreate. Blocks go first, so a follow across a block
+(restored or already standing) is skipped instead of undoing it.
 """
 
 import io
@@ -54,11 +56,14 @@ from ..models import (
     ImportJob,
     LibraryEntry,
     MediaType,
+    SeasonRating,
     Title,
     User,
     WatchStatus,
 )
+from ..social.blocks import block_user, blocked_pair_ids
 from ..tmdb.tmdb_store import refresh_title_details
+from . import import_progress
 
 _log = logging.getLogger(__name__)
 
@@ -155,12 +160,15 @@ def finish_user(user_id: int) -> None:
 
 
 def start_job(user_id: int) -> None:
+    # every new run is the moment to forget long-finished ones (see
+    # import_progress.py): no timer needed, and the dict stays small
+    import_progress.prune_finished(_progress)
     _progress[user_id] = {"stage": "Starting", "done": 0, "total": 0, "finished": False, "error": None, "summary": None}
     _mark_job(user_id, finished=False, error=None, summary=None)
 
 
 def _set(user_id: int, **kw) -> None:
-    _progress.setdefault(user_id, {}).update(kw)
+    import_progress.update(_progress, user_id, **kw)
 
 
 def _mark_job(user_id: int, *, finished: bool, error: str | None = None, summary: dict | None = None) -> None:
@@ -247,6 +255,21 @@ def _sync_progress(item: LibraryEntry, db: Session) -> None:
         item.status = caught_up_status(item)
 
 
+def _import_season_ratings(db: Session, item_id: int, rows: list) -> None:
+    """Add the export's season grades the account doesn't have yet. An
+    existing grade wins (same "never overwrite" rule as the entry's own
+    rating); a malformed row is skipped. No commit."""
+    seen = {s for (s,) in db.query(SeasonRating.season).filter(SeasonRating.media_item_id == item_id)}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        season, rating = row.get("season"), _valid_rating(row.get("rating"))
+        if not isinstance(season, int) or isinstance(season, bool) or season < 0 or season in seen or rating is None:
+            continue
+        seen.add(season)
+        db.add(SeasonRating(media_item_id=item_id, season=season, rating=rating))
+
+
 def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) -> None:
     """Each existing row is locked (`with_for_update`) and committed
     individually rather than batched into one transaction spanning the whole
@@ -309,6 +332,12 @@ def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) 
             summary["library_entries"] += 1
         else:
             entry = db.get(LibraryEntry, item_id, with_for_update=True)
+            if entry is None:
+                # deleted by the user since existing_map was built: nothing
+                # left to fill in, and its watches would point at no entry
+                _log.info("library entry id=%s deleted during import; skipping its row", item_id)
+                summary["library_skipped"] += 1
+                continue
             if _reconcile_library_entry(entry, row):
                 summary["library_updated"] += 1
                 touched_items.add(item_id)
@@ -334,6 +363,7 @@ def _import_library(db: Session, user_id: int, rows: list[dict], summary: dict) 
             )
             touched_items.add(item_id)
             summary["episodes"] += 1
+        _import_season_ratings(db, item_id, row.get("season_ratings") or [])
         db.commit()
 
     for item_id in touched_items:
@@ -435,14 +465,28 @@ def _import_comments(db: Session, user_id: int, rows: list[dict], summary: dict)
     db.commit()
 
 
+def _import_blocks(db: Session, user_id: int, social: dict, summary: dict) -> None:
+    """Re-apply the export's block list. Losing it would quietly put blocked
+    people back in view, so it is restored like any other own decision."""
+    for entry in social.get("blocked_users") or []:
+        username = entry.get("username") if isinstance(entry, dict) else None
+        target = db.query(User.id).filter(User.username == username).scalar() if username else None
+        if target is None or target == user_id:
+            continue  # that account is gone (or renamed): nothing left to block
+        if block_user(db, user_id, target):
+            summary["blocks"] += 1
+
+
 def _import_social(db: Session, user_id: int, social: dict, summary: dict) -> None:
+    _import_blocks(db, user_id, social, summary)
+    blocked = blocked_pair_ids(db, user_id)
     following = social.get("following") or []
     _set(user_id, stage="Restoring follows", done=0, total=len(following))
     for n, username in enumerate(following, 1):
         if n % 50 == 0:
             _set(user_id, done=n)
         target = db.query(User.id).filter(User.username == username).scalar()
-        if target is None or target == user_id:
+        if target is None or target == user_id or target in blocked:
             summary["follows_skipped"] += 1
             continue
         exists = db.query(Follow.id).filter_by(follower_id=user_id, followed_id=target).scalar()
@@ -465,6 +509,7 @@ def run(user_id: int, archive_bytes: bytes) -> None:
         "comments_skipped": 0,
         "follows": 0,
         "follows_skipped": 0,
+        "blocks": 0,
     }
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:

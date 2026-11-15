@@ -1,33 +1,23 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/16 09:19:09.907159 )
-[//]: # (+ Revised: 	2026/11/09 11:49:59.277452 )
-[//]: # ( ---------------------------------------------------------------------- )
-
-[//]: # ( ---------------------------------------------------------------------- )
-[//]: # (+ DRAFT — not yet published. Needs: effective date, hosting provider/  )
-[//]: # (+ jurisdiction, and a legal review before this goes live or gets       )
-[//]: # (+ linked from any app store listing.                                   )
+[//]: # (+ Revised: 	2026/11/15 11:56:16.380726 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Privacy Policy — Renar
 
-**Status: DRAFT.** Company is set (Breren); domain/contact are scoped under
-the app name (renar.app, privacy@renar.app).
-Still open: `[EFFECTIVE DATE]`, `[HOSTING PROVIDER]`, `[JURISDICTION]` —
-fill in once hosting is chosen (see `TODO.md`, Infrastructure /
-Publishing sections). Have a lawyer review before publishing or linking
-this from a store listing — this draft reflects what the app actually does
-today, but isn't a substitute for legal sign-off.
+Published at <https://renar.app/privacy>. This file is the source; the
+page is `renar-frontend/landing/privacy/index.html` and must be updated in
+the same change. Not yet reviewed by a lawyer.
 
-_Last updated: [EFFECTIVE DATE]_
+_Last updated: 15 November 2026_
 
 ## Who we are
 
 Renar ("Renar", "we", "us") is a personal media tracker for films and TV
 shows, operated by Breren. This policy covers
 the Renar mobile apps, web app, and backend service, and is incorporated
-by reference into our [Terms of Service](terms-of-service.md). If you have
+by reference into our Terms of Service. If you have
 questions about this policy or your data, contact us at
 privacy@renar.app.
 
@@ -48,15 +38,41 @@ These are stored so they follow your account across devices.
 
 **Technical and security data.** Your IP address is logged briefly to
 enforce rate limits and detect abuse (e.g. brute-force login attempts,
-scripted registration spam) — see `docs/anti-abuse.md` for the mechanism.
+scripted registration spam).
 We also record login timestamps and coarse, aggregated request counts per
 endpoint to keep the service running reliably; this is operational
 telemetry, not behavioral tracking, and is not shared with or sold to
 anyone.
 
+**Content you post publicly.** Your username, avatar, profile, reviews,
+comments, lists, ratings and the people you follow are visible to other
+Renar users. Don't post anything there you want to keep private.
+
+**Blocks and reports.** If you block another user, we store that you
+blocked them and when, so their content stays hidden from you (and yours
+from them) until you unblock them. If you report a comment, review or
+profile, we store who reported what, when, and any reason you typed, so a
+moderator can look into it. Neither is shown to other users: the person
+you block or report is not told.
+
 **What we don't collect.** We don't use advertising SDKs, third-party
 analytics/tracking pixels, or sell your data to anyone. There is no ad
 network integrated into Renar.
+
+## Service providers that process data for us
+
+- **Hetzner Online GmbH** (Germany) — hosts the server and database where
+  your account and library data are stored.
+- **Cloudflare, Inc.** — all traffic to Renar passes through Cloudflare's
+  network (DNS, TLS, DDoS protection), so Cloudflare sees your IP address
+  and request metadata. Registration and login use **Cloudflare
+  Turnstile**, a bot check that processes your IP address and browser
+  signals to tell humans from bots.
+- **Brevo (Sendinblue SAS)** (France) — sends account email such as
+  confirmation codes. It receives your email address and the message.
+
+We don't sell your data or share it with anyone else, except where the
+law requires us to.
 
 ## Third-party services we use to fetch content metadata
 
@@ -89,8 +105,11 @@ beyond running and securing the app.
 
 Account and library data is kept for as long as your account exists.
 Deleting your account (in-app, or via a request to privacy@renar.app) removes
-your user record and all associated library entries, images, and
-preferences. IP-based security logs (login attempts, rate-limit strikes)
+your user record and all associated library entries, watch history,
+reviews, comments, lists, blocks, reports, images, and preferences. Self-service
+deletion takes effect after a 30-day grace period; logging back in
+during that window cancels it. Data exports you request are deleted
+automatically after a short time. IP-based security logs (login attempts, rate-limit strikes)
 are kept only as long as needed for abuse detection and are not tied to
 your account identity beyond that window.
 
@@ -104,12 +123,13 @@ EU/EEA/UK), you may have the right to:
   in your profile settings)
 - **Delete** your account and associated data — available directly in the
   app, or by contacting privacy@renar.app
-- **Export** your data in a portable format
+- **Export** your data in a portable format (available in the app)
 - **Object to or restrict** certain processing
 
 To exercise any of these, use the in-app options where available or
 contact us at privacy@renar.app. We'll respond within the timeframe required
-by applicable law.
+by applicable law. You also have the right to complain to the data
+protection authority in your country.
 
 ## Children's privacy
 
@@ -123,19 +143,22 @@ privacy@renar.app and we'll remove it.
 
 Passwords are stored as salted hashes, never in plaintext. Authentication
 uses short-lived signed tokens (JWT). Uploaded images and account data are
-stored on infrastructure operated by Breren / [HOSTING PROVIDER],
-located in [JURISDICTION]. We use HTTPS to encrypt data in transit.
+stored on servers operated by Hetzner Online GmbH in Germany (EU). We use
+HTTPS to encrypt data in transit.
 
 No method of storage or transmission is 100% secure; we can't guarantee
 absolute security, but we take reasonable measures to protect your data,
 including rate limiting, brute-force lockouts, and IP banning for abusive
-traffic (see `docs/anti-abuse.md`).
+traffic.
 
 ## International data transfers
 
-[Fill in once hosting region is chosen: state whether data is processed
-outside the user's country/region, and under what safeguard (e.g. Standard
-Contractual Clauses) if applicable.]
+Your account and library data are stored in the EU. Cloudflare runs a
+global network, so your requests may be processed in data centres
+outside your country, including outside the EU/EEA. Cloudflare covers
+those transfers with the EU Standard Contractual Clauses and the EU–US
+Data Privacy Framework. We process your data under the EU General Data
+Protection Regulation (GDPR).
 
 ## Changes to this policy
 

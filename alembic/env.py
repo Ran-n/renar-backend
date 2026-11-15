@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 10:19:09.196421
-Revised: 2026/07/17 10:19:09.196421
+Revised: 2026/11/15 11:01:41.837600
 """
 
 from logging.config import fileConfig
@@ -15,7 +15,9 @@ from renar_backend.config import settings
 from renar_backend.database import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# "%" is configparser's interpolation character: a URL-encoded option
+# (e.g. options=-csearch_path%3Dschema) must have it doubled to survive.
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

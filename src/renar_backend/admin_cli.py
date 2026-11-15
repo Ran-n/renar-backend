@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:21:23.680452
-Revised: 2026/11/09 23:36:43.476603
+Revised: 2026/11/15 11:56:17.346820
 
 Admin command-line tools, run on the server host (over SSH on prod).
 
@@ -10,6 +10,11 @@ Admin command-line tools, run on the server host (over SSH on prod).
 panel's sign-in: it prints the secret, the ``otpauth://`` URI, a QR code for
 the terminal and the ``ADMIN_TOTP_SECRET=…`` line to put in ``.env``.
 Rotating it signs every admin session out.
+
+``uv run admin-password`` asks for the admin password twice (hidden) and
+prints the ``ADMIN_PASSWORD_HASH='…'`` line to put in ``.env``: the server
+only ever stores the Argon2id hash. Changing it signs every admin session
+out.
 
 ``uv run admin-unban <ip>`` lifts every ban on an IP (permanent ban row and
 strike/temp-ban row), e.g. after locking yourself out of the panel with
@@ -26,6 +31,8 @@ import logging
 import sys
 
 _log = logging.getLogger(__name__)
+
+MIN_PASSWORD_LENGTH = 12
 
 
 def totp_main(argv: list[str] | None = None) -> int:
@@ -47,6 +54,44 @@ def totp_main(argv: list[str] | None = None) -> int:
     sys.stdout.write(
         f"\nThen put this line in .env and restart the server:\n\nADMIN_TOTP_SECRET={secret}\n"
         "\nThis signs out every current admin session.\n"
+    )
+    return 0
+
+
+def password_problem(first: str, second: str) -> str | None:
+    """Why this pair of entries can't become the admin password, if so."""
+    if not first:
+        return "the password is empty"
+    if len(first) < MIN_PASSWORD_LENGTH:
+        return f"the password is shorter than {MIN_PASSWORD_LENGTH} characters"
+    if first != second:
+        return "the two passwords differ"
+    return None
+
+
+def password_env_line(password: str) -> str:
+    """The ``.env`` line for ``password``. Single quotes: python-dotenv
+    doesn't interpolate inside them, so the hash's "$" signs survive."""
+    from argon2 import PasswordHasher
+
+    return f"ADMIN_PASSWORD_HASH='{PasswordHasher().hash(password)}'"
+
+
+def password_main(argv: list[str] | None = None) -> int:
+    import getpass
+
+    argparse.ArgumentParser(
+        prog="admin-password", description="Hash a new admin password for ADMIN_PASSWORD_HASH."
+    ).parse_args(argv)
+    first = getpass.getpass("New admin password: ")
+    second = getpass.getpass("Repeat it: ")
+    problem = password_problem(first, second)
+    if problem:
+        sys.stderr.write(f"admin-password: {problem}\n")
+        return 1
+    sys.stdout.write(
+        f"{password_env_line(first)}\n"
+        "\nPut this line in .env and restart the server. This signs out every current admin session.\n"
     )
     return 0
 
@@ -82,6 +127,10 @@ def unban_main(argv: list[str] | None = None) -> int:
 
 def totp() -> None:
     raise SystemExit(totp_main())
+
+
+def password() -> None:
+    raise SystemExit(password_main())
 
 
 def unban() -> None:

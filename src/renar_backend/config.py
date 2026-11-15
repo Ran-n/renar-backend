@@ -2,14 +2,15 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.143586
-Revised: 2026/11/10 13:40:09.811853
+Revised: 2026/11/15 11:56:17.683275
 """
 
 import base64
 import binascii
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
+from pydantic_core import PydanticCustomError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root in the src layout (src/renar_backend/config.py -> two up).
@@ -18,12 +19,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # non-editable install should set both explicitly (absolute) anyway.
 _ROOT = Path(__file__).resolve().parents[2]
 
+# What every hash made by `uv run admin-password` starts with.
+ARGON2ID_PREFIX = "$argon2id$"
+
 
 class Settings(BaseSettings):
     # The CWD `.env` (second entry) wins over the repo one when both exist.
     model_config = SettingsConfigDict(
         env_file=(str(_ROOT / ".env"), ".env"),
         env_file_encoding="utf-8",
+        # A validation error must never print the offending value: these
+        # are secrets (a leftover plain ADMIN_PASSWORD above all).
+        hide_input_in_errors=True,
     )
 
     secret_key: str = "dev-only-secret-change-me-in-production-0000"
@@ -72,11 +79,15 @@ class Settings(BaseSettings):
     email_confirmation_grace_days: int = 7  # days before an unconfirmed account is blocked at login
     unconfirmed_account_cleanup_days: int = 14  # days before an unconfirmed account is deleted
     media_dir: str = "./media"  # root of the content-addressed file store
-    # The admin panel stays 503 until all three are set: username, password
+    # The admin panel stays 503 until all three are set: username, the
+    # Argon2id hash of the password (make it with `uv run admin-password`)
     # and the base32 TOTP secret for the authenticator-app code (generate one
     # with `uv run admin-totp`). Changing any of them signs every admin
     # session out (see users/admin_session.py).
     admin_username: str = ""
+    admin_password_hash: str = ""
+    # No longer read. Kept only so a leftover plain-text ADMIN_PASSWORD stops
+    # the server at boot instead of silently leaving the panel unconfigured.
     admin_password: str = ""
     admin_totp_secret: str = ""
     # Bearer token for the admin routes scripts call (the APK upload from
@@ -86,6 +97,12 @@ class Settings(BaseSettings):
     # Where the admin panel lives. Rename it (e.g. /panel-x7k2) and the
     # default /admin location automatically becomes a honeypot.
     admin_path: str = "/admin"
+    # Cloudflare Access in front of the admin path (prod): the team domain
+    # (e.g. renar.cloudflareaccess.com) and the application's Audience tag.
+    # Both set: admin requests must carry Access's signed header (see
+    # users/cf_access.py). Both empty (dev): no check. One alone stops the boot.
+    cf_access_team_domain: str = ""
+    cf_access_aud: str = ""
     # Shared secret for the frontend web server's own anti-abuse guard to
     # check/report banned_ips over /svc/bans (see routers/svc.py). Empty
     # means the endpoints stay 404 to everyone, same as an unset admin panel.
@@ -133,6 +150,42 @@ class Settings(BaseSettings):
     strike_ban_threshold: int = 5  # persisted offenses (see Strike) before an IP is permabanned
     # honeypot hits (/.env, /wp-login.php, ...) are PERMANENT bans stored in
     # the banned_ips table; lift them from the admin panel
+
+    @field_validator("admin_password")
+    @classmethod
+    def _reject_plain_password(cls, value: str) -> str:
+        if value:
+            # Never echo the value: pydantic would otherwise print it.
+            raise PydanticCustomError(
+                "admin_password_plain",
+                "ADMIN_PASSWORD is no longer read: run `uv run admin-password` and set ADMIN_PASSWORD_HASH instead",
+            )
+        return ""
+
+    @field_validator("admin_password_hash")
+    @classmethod
+    def _check_password_hash(cls, value: str) -> str:
+        value = value.strip()
+        if value and not value.startswith(ARGON2ID_PREFIX):
+            raise PydanticCustomError("admin_password_hash_format", "ADMIN_PASSWORD_HASH is not an Argon2id hash")
+        return value
+
+    @field_validator("cf_access_team_domain")
+    @classmethod
+    def _bare_team_domain(cls, value: str) -> str:
+        """Accept the domain pasted with its scheme or a trailing slash."""
+        return value.strip().removeprefix("https://").removeprefix("http://").strip("/")
+
+    @field_validator("cf_access_aud")
+    @classmethod
+    def _trim_aud(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _cf_access_both_or_neither(self):
+        if bool(self.cf_access_team_domain) != bool(self.cf_access_aud):
+            raise ValueError("set both CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD, or neither")
+        return self
 
     @field_validator("admin_totp_secret")
     @classmethod

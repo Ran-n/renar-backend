@@ -1,25 +1,16 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/08/20 00:00:00.000000 )
-[//]: # (+ Revised: 	2026/11/09 11:49:59.367887 )
-[//]: # ( ---------------------------------------------------------------------- )
-
-[//]: # ( ---------------------------------------------------------------------- )
-[//]: # (+ DRAFT — not yet published. Needs: effective date, hosting provider/  )
-[//]: # (+ jurisdiction, and a legal review before this goes live or gets       )
-[//]: # (+ linked from any app store listing.                                   )
+[//]: # (+ Revised: 	2026/11/15 11:56:16.705411 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Terms of Service — Renar
 
-**Status: DRAFT.** Company is set (Breren); domain/contact are scoped under
-the app name (renar.app, legal@renar.app).
-Still open: `[EFFECTIVE DATE]`, `[HOSTING PROVIDER]`, `[JURISDICTION]`,
-`[GOVERNING LAW]` — fill in once hosting is chosen (see `TODO.md`,
-Infrastructure / Publishing sections). Have a lawyer review before
-publishing or linking this from a store listing.
+To be published at <https://renar.app/terms/>. This file is the source; the
+page is `renar-frontend/landing/terms/index.html` and must be updated in
+the same change. Not yet reviewed by a lawyer.
 
-_Last updated: [EFFECTIVE DATE]_
+_Last updated: 15 November 2026_
 
 ## Who we are
 
@@ -27,7 +18,7 @@ These Terms of Service ("Terms") govern your use of Renar ("Renar", "we",
 "us"), a personal media tracker for films and TV shows, operated by
 Breren. They cover the Renar mobile apps, web app, and backend service.
 By creating an account or using Renar, you agree to these Terms and to our
-[Privacy Policy](privacy-policy.md).
+[Privacy Policy](https://renar.app/privacy/).
 
 ## Eligibility
 
@@ -51,9 +42,10 @@ You agree not to:
 
 - Use Renar to upload, post, or transmit content you don't have the right
   to share (see "Copyright and takedowns" below)
-- Harass, abuse, or impersonate other users in comments or profile fields
+- Harass, abuse, or impersonate other users in comments, reviews or
+  profile fields
 - Attempt to circumvent rate limits, invite gating, or other anti-abuse
-  measures (see `docs/anti-abuse.md`)
+  measures
 - Use automated means to scrape or bulk-extract data from Renar beyond
   the data-export feature we provide
 - Interfere with or disrupt the service's operation or other users'
@@ -64,7 +56,7 @@ discretion and, where practical, with notice.
 
 ## User content
 
-You retain ownership of the comments, custom poster/backdrop images, and
+You retain ownership of the comments, reviews, custom poster/backdrop images, and
 other content you submit to Renar ("User Content"). By submitting User
 Content, you grant us a limited license to store, display, and transmit
 it as needed to operate the service (e.g. showing your comment to other
@@ -75,6 +67,10 @@ to third parties.
 You're solely responsible for your User Content and confirm you have the
 rights necessary to post it.
 
+You can report a comment, a review or a profile from its menu in the app,
+and block any user so you no longer see each other's content. We review
+reports and may remove content or suspend accounts that break these Terms.
+
 ## Copyright and takedowns
 
 If you believe content on Renar (a comment, an uploaded image) infringes
@@ -82,8 +78,10 @@ your copyright, contact us at legal@renar.app with: (1) a
 description of the copyrighted work, (2) the location of the infringing
 material on Renar, (3) your contact information, and (4) a statement that
 you have a good-faith belief the use is unauthorized. We'll review and
-remove infringing content we confirm, consistent with `[DMCA / applicable
-regional takedown regime — confirm once JURISDICTION is set]`.
+remove infringing or otherwise illegal content we confirm, under the
+notice-and-action rules of the EU Digital Services Act (Regulation (EU)
+2022/2065) and Spanish law (Ley 34/2002, LSSI-CE). The same address takes
+notices about any other content you believe is illegal.
 
 ## Third-party metadata
 
@@ -127,11 +125,21 @@ We may update these Terms as the app changes. Material changes will be
 noted with an updated "Last updated" date above; where required by law,
 we'll provide additional notice (e.g. in-app).
 
+## Hosting
+
+Renar's servers are operated by Hetzner Online GmbH in Germany (EU);
+Cloudflare, Inc. carries the traffic to them. The Privacy Policy lists
+every service that processes your data.
+
 ## Governing law
 
-These Terms are governed by the laws of `[GOVERNING LAW]`, without regard
-to conflict-of-law principles, except where local consumer-protection law
-requires otherwise.
+These Terms are governed by the laws of Spain, without regard to
+conflict-of-law principles. If you are a consumer living in the European
+Union, you also keep the protection of the mandatory consumer law of your
+country of residence, and you can bring a claim in the courts of that
+country; otherwise the courts of Spain have jurisdiction. The European
+Commission's online dispute resolution platform is at
+<https://ec.europa.eu/consumers/odr>.
 
 ## Contact
 

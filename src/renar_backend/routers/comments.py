@@ -2,24 +2,27 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.875365
-Revised: 2026/09/02 16:41:42.055667
+Revised: 2026/11/15 02:45:09.088076
 
 Comments on titles (global across users), with likes, nested replies and
 user reports.
 """
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..catalog.titles import find_or_create_title, find_title
 from ..database import get_db
 from ..events import publish as publish_event
 from ..models import Comment, CommentLike, CommentReport, EpisodeWatch, LibraryEntry, MediaType, User
-from ..schemas import CommentCreate, CommentOut, CommentReportCreate
+from ..schemas import CommentCreate, CommentOut, ReportCreate
+from ..social.blocks import blocked_pair_ids
 from ..social.comment_threads import ancestor_depth, load_thread, resolve_root_scope
+from ..social.reactions import DISLIKE, LIKE, clear_reaction, reaction_counts, set_reaction
+from ..social.reports import add_report, remove_report
 from ..users.auth import get_current_user
 from ..users.premium import flair
 from .reviews import reviewer_ids
@@ -90,10 +93,7 @@ def _comment_out(
         **flair(c.author, is_reviewer=c.user_id in (reviewer_id_set or ())),
         "text": c.text,
         "created_at": c.created_at,
-        "likes": sum(1 for like in c.likes if like.value > 0),
-        "dislikes": sum(1 for like in c.likes if like.value < 0),
-        "liked_by_me": any(like.user_id == me.id and like.value > 0 for like in c.likes),
-        "disliked_by_me": any(like.user_id == me.id and like.value < 0 for like in c.likes),
+        **reaction_counts(c.likes, me.id),
         "mine": c.user_id == me.id,
         "reported_by_me": any(r.user_id == me.id for r in c.reports),
         "seen_by_author": seen,
@@ -102,6 +102,25 @@ def _comment_out(
         if depth < MAX_REPLY_DEPTH
         else [],
     }
+
+
+def _without_authors(
+    children_by_parent: dict[int | None, list[Comment]], author_ids: set[int]
+) -> dict[int | None, list[Comment]]:
+    """The reply lists minus every reply written by one of `author_ids`.
+    The tree is rendered by walking these lists down from the roots, so a
+    dropped reply takes its whole subtree with it: a reply makes no sense
+    without the comment it answers."""
+    return {
+        parent_id: [c for c in children if c.user_id not in author_ids]
+        for parent_id, children in children_by_parent.items()
+    }
+
+
+_ROOT_ORDER = {
+    "desc": (Comment.created_at.desc(), Comment.id.desc()),
+    "asc": (Comment.created_at.asc(), Comment.id.asc()),
+}
 
 
 def _require_target(tmdb_id: int | None, title: str | None) -> None:
@@ -119,29 +138,44 @@ def list_comments(
     title: str | None = Query(default=None, max_length=300),
     season: int | None = Query(default=None, ge=0),
     episode: int | None = Query(default=None, ge=0),
+    sort: Literal["asc", "desc"] = Query(default="desc"),
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
+    """Top-level comments of one thread, replies nested under their parent.
+
+    `sort` orders the top-level comments by posting time: "desc" (default)
+    is newest first, "asc" is oldest first (chronological). Replies always
+    read oldest first under their parent, whatever `sort` says: a
+    conversation only makes sense in the order it was written.
+    """
     _require_target(tmdb_id, title)
     target = find_title(db, media_type, tmdb_id, title)
     if target is None:  # nobody has tracked or commented on this title yet
         return []
+    blocked = blocked_pair_ids(db, me.id)
+    roots = db.query(Comment.id).filter(
+        Comment.title_id == target.id,
+        Comment.season == season,
+        Comment.episode == episode,
+        Comment.parent_id.is_(None),  # replies come nested under their parent
+    )
+    if blocked:  # filtered in SQL so the page limit counts visible comments only
+        roots = roots.filter(Comment.user_id.notin_(blocked))
     root_ids = [
         cid
-        for (cid,) in db.query(Comment.id)
-        .filter(
-            Comment.title_id == target.id,
-            Comment.season == season,
-            Comment.episode == episode,
-            Comment.parent_id.is_(None),  # replies come nested under their parent
-        )
-        .order_by(Comment.created_at.desc())
+        for (cid,) in roots
+        # id breaks ties between comments stamped in the same instant, so the
+        # two directions are exact mirrors of each other
+        .order_by(*_ROOT_ORDER[sort])
         .limit(100)
         .all()
     ]
     if not root_ids:
         return []
     by_id, children_by_parent = load_thread(db, root_ids)
+    if blocked:
+        children_by_parent = _without_authors(children_by_parent, blocked)
     all_comments = list(by_id.values())
     watch_info = _build_watch_info(db, {c.user_id for c in all_comments}, target.id, season, episode)
     rev_ids = reviewer_ids(db, {c.user_id for c in all_comments})
@@ -167,7 +201,9 @@ def create_comment(
         target = find_or_create_title(db, data.media_type, data.tmdb_id, data.title)
     if data.parent_id is not None:
         parent = db.get(Comment, data.parent_id)
-        if parent is None:
+        # A blocked pair can't reply to each other; same answer as a comment
+        # that doesn't exist, so a block can't be detected by probing.
+        if parent is None or parent.user_id in blocked_pair_ids(db, me.id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent comment not found")
         root_title_id, root_season, root_episode = resolve_root_scope(db, parent)
         if root_title_id != target.id or root_season != data.season or root_episode != data.episode:
@@ -219,36 +255,16 @@ def delete_comment(
 
 
 def _set_reaction(db: Session, comment_id: int, me: User, value: int) -> None:
-    """Upsert the caller's reaction to `value` (+1 like, -1 dislike). A user
-    has at most one reaction per comment, so reacting the other way flips the
-    existing row instead of adding a second one.
-    """
-    comment = db.get(Comment, comment_id)
-    if comment is None:
+    """Set the caller's reaction (see social/reactions.py) on a comment that
+    must exist, and tell the caller's other sessions when it changed."""
+    if db.get(Comment, comment_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    existing = db.query(CommentLike).filter(CommentLike.comment_id == comment_id, CommentLike.user_id == me.id).first()
-    if existing:
-        if existing.value != value:
-            existing.value = value
-            db.commit()
-            publish_event(me.id, "comment_changed")
-    else:
-        db.add(CommentLike(comment_id=comment_id, user_id=me.id, value=value))
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()  # concurrent reaction from the same user — treat as no-op
-            return
+    if set_reaction(db, CommentLike, CommentLike.comment_id, comment_id, me.id, value):
         publish_event(me.id, "comment_changed")
 
 
 def _clear_reaction(db: Session, comment_id: int, me: User, value: int) -> None:
-    """Remove the caller's reaction, but only if it currently matches `value`
-    — e.g. DELETE .../like must not retract an existing dislike."""
-    reaction = db.query(CommentLike).filter(CommentLike.comment_id == comment_id, CommentLike.user_id == me.id).first()
-    if reaction and reaction.value == value:
-        db.delete(reaction)
-        db.commit()
+    if clear_reaction(db, CommentLike, CommentLike.comment_id, comment_id, me.id, value):
         publish_event(me.id, "comment_changed")
 
 
@@ -258,7 +274,7 @@ def like_comment(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    _set_reaction(db, comment_id, me, 1)
+    _set_reaction(db, comment_id, me, LIKE)
 
 
 @router.delete("/{comment_id}/like", status_code=status.HTTP_204_NO_CONTENT)
@@ -267,7 +283,7 @@ def unlike_comment(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    _clear_reaction(db, comment_id, me, 1)
+    _clear_reaction(db, comment_id, me, LIKE)
 
 
 @router.post("/{comment_id}/dislike", status_code=status.HTTP_204_NO_CONTENT)
@@ -276,7 +292,7 @@ def dislike_comment(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    _set_reaction(db, comment_id, me, -1)
+    _set_reaction(db, comment_id, me, DISLIKE)
 
 
 @router.delete("/{comment_id}/dislike", status_code=status.HTTP_204_NO_CONTENT)
@@ -285,13 +301,13 @@ def undislike_comment(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    _clear_reaction(db, comment_id, me, -1)
+    _clear_reaction(db, comment_id, me, DISLIKE)
 
 
 @router.post("/{comment_id}/report", status_code=status.HTTP_204_NO_CONTENT)
 def report_comment(
     comment_id: int,
-    data: CommentReportCreate | None = None,
+    data: ReportCreate | None = None,
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
@@ -303,17 +319,15 @@ def report_comment(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Cannot report your own comment",
         )
-    already = (
-        db.query(CommentReport).filter(CommentReport.comment_id == comment_id, CommentReport.user_id == me.id).first()
+    add_report(
+        db,
+        CommentReport,
+        CommentReport.comment_id,
+        comment_id,
+        CommentReport.user_id,
+        me.id,
+        data.reason if data else "",
     )
-    if not already:  # repeat reports by the same user are no-ops
-        db.add(CommentReport(comment_id=comment_id, user_id=me.id, reason=(data.reason.strip() if data else "")))
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()  # concurrent report from same user — no-op
-            return
-        _log.info("comment %s reported by user %s", comment_id, me.id)
 
 
 @router.delete("/{comment_id}/report", status_code=status.HTTP_204_NO_CONTENT)
@@ -322,10 +336,4 @@ def unreport_comment(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    report = (
-        db.query(CommentReport).filter(CommentReport.comment_id == comment_id, CommentReport.user_id == me.id).first()
-    )
-    if report:
-        db.delete(report)
-        db.commit()
-        _log.info("comment %s report retracted by user %s", comment_id, me.id)
+    remove_report(db, CommentReport, CommentReport.comment_id, comment_id, CommentReport.user_id, me.id)

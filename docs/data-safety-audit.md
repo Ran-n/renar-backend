@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/08/27 09:52:03.159327 )
-[//]: # (+ Revised: 	2026/11/09 11:49:59.068315 )
+[//]: # (+ Revised: 	2026/11/15 11:56:15.375751 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Data Safety Audit
@@ -43,14 +43,16 @@ catalog data (titles, episodes, genres) isn't user data and is out of scope.
 | Table | Purpose | Retention |
 |---|---|---|
 | `Comment`, `CommentLike`, `CommentReport` | User-authored comments on titles/episodes, reactions, abuse reports | Until deleted by the author or moderated (see `routers/admin/moderation.py`); until account deletion otherwise |
-| `Review`, `ReviewWhitelist` | User-authored title reviews, reviewer-flair eligibility | Until deleted by the author or account deletion |
+| `Review`, `ReviewLike`, `ReviewReport`, `ReviewWhitelist` | User-authored title reviews, reactions, abuse reports (with an optional free-text reason), reviewer-flair eligibility | Until deleted by the author or moderated (see `routers/admin/reports.py`); until account deletion otherwise |
 | `Follow`, `List`, `ListItem` | Social follow graph, user-created custom lists | Until account deletion |
+| `UserBlock` | Who a user blocked (blocker, blocked, date); hides each side's content from the other | Until unblocked, or account deletion of either side |
+| `UserReport` | A profile flagged for the moderators (reported user, reporter, optional free-text reason) | Until retracted by the reporter, or account deletion of either side |
 
 ## Notifications
 
 | Table | Purpose | Retention |
 |---|---|---|
-| `Notification` | New-episode/new-film alerts, in-app only (no push yet — see `TODO.md`'s push-notifications entry) | Until read/dismissed by the user or account deletion |
+| `Notification` | New-episode/new-film alerts, in-app only (no push yet — see `BACKLOG.md`'s push-notifications entry) | Until read/dismissed by the user or account deletion |
 
 ## Security / abuse prevention
 
@@ -65,19 +67,19 @@ catalog data (titles, episodes, genres) isn't user data and is out of scope.
 
 - Precise device location (no GPS/location permission requested).
 - Payment/card data (premium is currently admin-granted only — see
-  `TODO.md`'s Monetization section; no payment processor is
+  `BACKLOG.md`'s Monetization section; no payment processor is
   integrated yet).
 - Contacts, SMS, call logs, or any other device data beyond what's listed
   above.
-- Advertising identifiers (no ad SDK integrated — see `TODO.md`'s
+- Advertising identifiers (no ad SDK integrated — see `BACKLOG.md`'s
   parked Ads item).
 
 ## Account deletion
 
 `DELETE /auth/me` (self-service) or an admin hard-delete both funnel through
 `users/accounts.py::delete_account`, which removes every row above tied to
-the account (library, watches, comments, reviews, lists, notifications,
-login events, images) in FK-safe order, then the `User` row itself — see
+the account (library, watches, comments, reviews, lists, blocks, reports
+made by or about the account, notifications, login events, images) in FK-safe order, then the `User` row itself — see
 that function for the exact deletion order. A grace period
 (`SiteSettings.deletion_grace_days`) delays the final purge so a self-service
 deletion can be cancelled by logging back in before then.

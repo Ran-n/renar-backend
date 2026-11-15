@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.543016
-Revised: 2026/11/09 15:59:25.015048
+Revised: 2026/11/14 16:40:52.614233
 
 Write-through persistence for TMDB data (see TmdbCache in models.py).
 
@@ -329,6 +329,42 @@ def sync_show_episodes(db: Session, title: Title, deadline: float | None = None)
             continue
         sync_episodes(db, title, season_number, data)
     db.commit()
+
+
+# How long a request waits for ensure_seasons_synced's catalog sync. Long
+# enough for the few TMDB calls a typical show needs, short enough that a
+# slow TMDB never holds an episode write for long; whatever isn't reached
+# is picked up by the next call (already synced seasons are skipped).
+_ENSURE_SYNC_BUDGET_S = 3.0
+
+
+def ensure_seasons_synced(db: Session, title: Title | None, seasons: set[int]) -> None:
+    """Make sure the episode catalog holds rows for each of `seasons` of
+    `title`, syncing the show from TMDB when one is missing.
+
+    The catalog is otherwise filled by the Upcoming feed and the periodic
+    notifier job, so a show added moments ago has none yet. Anything that
+    compares watches against the catalog (is this season fully watched?)
+    calls this first, or a new show's seasons could never count as
+    complete. One indexed read when the rows are already there.
+
+    Only seasons sync_show_episodes can fetch count (1 to the show's
+    `total_seasons`): specials (season 0) and a season number TMDB doesn't
+    list would otherwise look missing forever and start a sync on every
+    call."""
+    if title is None or title.tmdb_id is None or not title.total_seasons:
+        return
+    syncable = {season for season in seasons if 1 <= season <= title.total_seasons}
+    if not syncable:
+        return
+    known = {
+        season
+        for (season,) in db.query(Episode.season)
+        .filter(Episode.title_id == title.id, Episode.season.in_(syncable))
+        .distinct()
+    }
+    if syncable - known:
+        sync_show_episodes(db, title, deadline=time.monotonic() + _ENSURE_SYNC_BUDGET_S)
 
 
 def refresh_title_details(db: Session, title: Title) -> None:

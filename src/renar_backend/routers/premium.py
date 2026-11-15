@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:25:42.427427
-Revised: 2026/08/05 21:48:03.825541
+Revised: 2026/11/13 14:25:45.978392
 
 Premium account features: the color palette, the profile style (avatar ring
 + username colors) and the verified-badge request flow.
@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..events import publish as publish_event
 from ..models import User
-from ..schemas import PremiumStyleUpdate, UserOut
+from ..schemas import PaletteOut, PremiumStyleUpdate, UserOut
 from ..users.auth import get_current_user, require_premium
 from ..users.premium import PALETTE, feature_enabled
 
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/premium", tags=["premium"])
 _log = logging.getLogger(__name__)
 
 
-@router.get("/palette")
+@router.get("/palette", response_model=PaletteOut)
 def palette(user: User = Depends(get_current_user)):
     """Server-defined color options — the single source the pickers render."""
     return {"colors": list(PALETTE)}

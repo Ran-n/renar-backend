@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:21:23.587996
-Revised: 2026/11/09 23:36:43.827657
+Revised: 2026/11/15 11:56:18.332605
 
 Admin sign-in page: username, password and the 6-digit authenticator code
 (TOTP). A correct triple sets the ``renar_admin`` session cookie (see
@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from ... import site_settings
 from ...config import settings
 from ...users import admin_session, security
-from ._html import _BASE_CSS, _FAVICON, _P, _RESPONSIVE_CSS
+from ._html import _BASE_CSS, _FAVICON, _LOGO_MARK_SVG, _P, _RESPONSIVE_CSS
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -56,6 +56,19 @@ def login_url(next_path: str) -> str:
     return f"{_P}/login?next={quote(next_path, safe='')}"
 
 
+def _topbar() -> str:
+    """The sign-in screens' topbar: the renar mark and the panel's name.
+    One helper for the sign-in and the session-expired page, so the two
+    can't drift apart."""
+    return f"""<header class="topbar">
+    <div class="logo mark" aria-hidden="true">{_LOGO_MARK_SVG}</div>
+    <div class="brand">
+      <span class="brand-name">Admin</span>
+      <span class="brand-sub">renar</span>
+    </div>
+  </header>"""
+
+
 def _page(*, username: str = "", next_path: str = _P, error: str | None = None) -> str:
     error_html = f'<div class="login-error" role="alert">{html.escape(error)}</div>' if error else ""
     return f"""<!DOCTYPE html>
@@ -68,19 +81,7 @@ def _page(*, username: str = "", next_path: str = _P, error: str | None = None) 
   <style>{_BASE_CSS}{_LOGIN_CSS}{_RESPONSIVE_CSS}</style>
 </head>
 <body>
-  <header class="topbar">
-    <div class="logo">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-      </svg>
-    </div>
-    <div class="brand">
-      <span class="brand-name">Admin</span>
-      <span class="brand-sub">renar</span>
-    </div>
-  </header>
+  {_topbar()}
   <main class="login-wrap">
     <form class="login-card" method="post" action="{_P}/login">
       <h1>Sign in</h1>
@@ -106,7 +107,8 @@ def _page(*, username: str = "", next_path: str = _P, error: str | None = None) 
 def _require_configured() -> None:
     if not admin_session.admin_configured():
         raise HTTPException(
-            status_code=503, detail="Admin panel not configured (ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_TOTP_SECRET)"
+            status_code=503,
+            detail="Admin panel not configured (ADMIN_USERNAME, ADMIN_PASSWORD_HASH, ADMIN_TOTP_SECRET)",
         )
 
 
@@ -182,6 +184,7 @@ def session_expired_page() -> str:
   <style>{_BASE_CSS}{_LOGIN_CSS}{_RESPONSIVE_CSS}</style>
 </head>
 <body>
+  {_topbar()}
   <main class="login-wrap">
     <div class="login-card">
       <h1>Session expired — sign in again</h1>

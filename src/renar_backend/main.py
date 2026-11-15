@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.282446
-Revised: 2026/11/09 23:36:39.283957
+Revised: 2026/11/15 11:56:18.003553
 """
 
 import asyncio
@@ -27,7 +27,9 @@ from .routers import (
     admin,
     app_releases,
     auth,
+    blocks,
     comments,
+    diary,
     events,
     export,
     images,
@@ -37,6 +39,7 @@ from .routers import (
     notifications,
     premium,
     reviews,
+    seasons,
     social,
     stats,
     svc,
@@ -44,8 +47,10 @@ from .routers import (
     upcoming,
 )
 from .routers.admin import login as admin_login
+from .schemas import HealthOut, RootOut
 from .social import notifier
 from .users.auth import AdminLoginRequired
+from .users.cf_access import CloudflareAccessMiddleware
 from .users.security import AbuseGuardMiddleware, OriginCheckMiddleware, SecurityHeadersMiddleware
 from .users.usage import UsageTrackingMiddleware
 
@@ -58,6 +63,10 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 _log = logging.getLogger(__name__)
+
+# Read once at import: a missing icon is a packaging bug and should fail
+# loudly here (FileNotFoundError names the path), not as a broken tab icon.
+_FAVICON_BYTES = (Path(__file__).parent / "static" / "favicon.ico").read_bytes()
 
 
 def backend_version() -> str:
@@ -115,24 +124,36 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.enable_docs else None,
 )
 
-# UsageTrackingMiddleware added (and therefore wrapped) before AbuseGuard,
-# so AbuseGuard sits outside it: a banned/flooded request is rejected
-# before ever reaching UsageTracking, instead of reaching it and being
-# filtered out there via scope["route"] (still unset for short-circuited
-# requests, so a route that slips past AbuseGuard some other way is still
-# never mis-recorded).
-app.add_middleware(UsageTrackingMiddleware)
-if settings.abuse_guard_enabled:
-    app.add_middleware(AbuseGuardMiddleware)
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(OriginCheckMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
-)
+
+def install_middleware(target: FastAPI, *, abuse_guard: bool) -> None:
+    """Add the middleware stack, innermost first.
+
+    UsageTrackingMiddleware is added (and therefore wrapped) before
+    AbuseGuard, so AbuseGuard sits outside it: a banned/flooded request is
+    rejected before ever reaching UsageTracking, instead of reaching it and
+    being filtered out there via scope["route"] (still unset for
+    short-circuited requests, so a route that slips past AbuseGuard some
+    other way is still never mis-recorded).
+
+    CloudflareAccessMiddleware is added before AbuseGuard too, so bans
+    apply first; its 404 never counts as a probe, because AbuseGuard
+    only counts paths that match no route."""
+    target.add_middleware(UsageTrackingMiddleware)
+    target.add_middleware(CloudflareAccessMiddleware)
+    if abuse_guard:
+        target.add_middleware(AbuseGuardMiddleware)
+    target.add_middleware(SecurityHeadersMiddleware)
+    target.add_middleware(OriginCheckMiddleware)
+    target.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+
+install_middleware(app, abuse_guard=settings.abuse_guard_enabled)
 
 app.include_router(auth.router)
 # reviews.router uses literal /media/reviews paths and must be registered
@@ -140,8 +161,11 @@ app.include_router(auth.router)
 # the wildcard path param would otherwise swallow "reviews" as an item_id.
 app.include_router(reviews.router)
 app.include_router(media.router)
+app.include_router(seasons.router)
 app.include_router(tmdb.router)
 app.include_router(stats.router)
+# before social: GET /users/blocked must win over GET /users/{user_id}
+app.include_router(blocks.router)
 app.include_router(social.router)
 app.include_router(comments.router)
 app.include_router(lists.router)
@@ -149,6 +173,7 @@ app.include_router(notifications.router)
 app.include_router(events.router)
 app.include_router(images.router)
 app.include_router(upcoming.router)
+app.include_router(diary.router)
 app.include_router(imports.router)
 app.include_router(export.router)
 app.include_router(premium.router)
@@ -157,14 +182,22 @@ app.include_router(admin.router)
 app.include_router(svc.router)
 
 
-@app.get("/")
+@app.get("/", response_model=RootOut)
 def home():
     # Lets a browser (e.g. a phone checking the server address) confirm
     # the API is reachable instead of getting a bare 404.
     return {"status": "ok", "message": "Connection to Renar OK", "version": app.version}
 
 
-@app.get("/health")
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """The renar tile for the browser tab, on the API root and every admin
+    page. Cached for a day: it almost never changes, and without the header
+    browsers re-fetch it often."""
+    return Response(_FAVICON_BYTES, media_type="image/x-icon", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/health", response_model=HealthOut)
 def health():
     return {"status": "ok"}
 

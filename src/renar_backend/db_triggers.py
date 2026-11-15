@@ -2,21 +2,23 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 09:54:55.646441
-Revised: 2026/08/18 17:25:24.090648
+Revised: 2026/11/15 11:01:42.220573
 
 Postgres functions/triggers that keep denormalized aggregate columns in sync
 at the database level — see docs/design-decisions.md, "users.total_watch_minutes:
 a stored aggregate, maintained by a database trigger, not application code",
 and its app_counters.total_users counterpart.
 
-Defined once here, not inlined in the Alembic migration, because it's used in
-two places that must never drift apart:
+This module holds TODAY's trigger SQL. models.py registers it against each
+relevant table's own "after_create" event, which makes it exist in the
+schema Base.metadata.create_all() builds (tests/conftest.py).
 
-- alembic/versions/a7c2e9f4b816_*.py, which creates it for real deployments.
-- models.py, registering it against each relevant table's own "after_create"
-  event — what makes it exist in the schema tests build via
-  Base.metadata.create_all(), since tests don't run Alembic migrations
-  (see tests/conftest.py).
+Alembic migrations must NOT import it: each migration carries a frozen copy
+of the SQL as it stood when it was written, so the history can be replayed
+on an empty database. Changing any SQL here therefore needs a new migration
+that applies the new version; tests/test_migrations.py fails when the two
+routes (create_all and `alembic upgrade head`) end in different functions
+or triggers.
 
 The triggers maintain their columns incrementally (O(1) per row change),
 not by re-aggregating on every write. OLD/NEW give the trigger exactly the

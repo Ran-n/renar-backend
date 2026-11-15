@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.146587
-Revised: 2026/11/09 15:59:25.298011
+Revised: 2026/11/14 00:22:50.019865
 
 Import a TV Time GDPR export zip: shows, episode history, movies, favorites.
 One of several importers registered in routers/imports.py's dispatch table
@@ -78,6 +78,7 @@ from ..tvdb.tvdb_store import (
     series_summary,
     sync_tvdb_episodes,
 )
+from . import import_progress
 
 _log = logging.getLogger(__name__)
 
@@ -148,6 +149,9 @@ def finish_user(user_id: int) -> None:
 
 
 def start_job(user_id: int) -> None:
+    # every new run is the moment to forget long-finished ones (see
+    # import_progress.py): no timer needed, and the dict stays small
+    import_progress.prune_finished(_progress)
     _progress[user_id] = {"stage": "Starting", "done": 0, "total": 0, "finished": False, "error": None, "summary": None}
     _mark_job(user_id, finished=False, error=None, summary=None)
 
@@ -161,7 +165,7 @@ def release_slot() -> None:
 
 
 def _set(user_id: int, **kw):
-    _progress.setdefault(user_id, {}).update(kw)
+    import_progress.update(_progress, user_id, **kw)
 
 
 def _mark_job(user_id: int, *, finished: bool, error: str | None = None, summary: dict | None = None) -> None:
@@ -646,8 +650,7 @@ def _upsert_library_entry(
                 )
                 if winner is None:
                     return None, False, False, False, False
-                if winner_title is not None:
-                    _backfill(winner_title)
+                _backfill(winner_title)  # winner was found through winner_title
                 changed = reconcile(winner, entry_fields)
                 db.commit()
                 return winner.id, False, changed, False, True
@@ -659,9 +662,7 @@ def _upsert_library_entry(
         entry = db.get(LibraryEntry, item_id, with_for_update=True)
         if entry is None:
             return None, False, False, False, False
-        title_row = db.get(Title, entry.title_id)
-        if title_row is not None:
-            _backfill(title_row)
+        _backfill(entry.title_ref)  # title_id is a NOT NULL foreign key
         changed = reconcile(entry, entry_fields)
         db.commit()
         return item_id, False, changed, False, False

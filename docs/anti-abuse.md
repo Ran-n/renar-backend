@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.135465 )
-[//]: # (+ Revised: 	2026/11/09 23:36:38.252741 )
+[//]: # (+ Revised: 	2026/11/15 11:56:14.999912 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Anti-abuse system
@@ -56,10 +56,13 @@ entirely — the reasoning is that a real, identifiable user (e.g. an app
 version calling an endpoint that's since been removed) must never get banned
 for it, since forging that token is infeasible without `SECRET_KEY`.
 
+`/favicon.ico` is a real route (it serves the renar icon), so a browser
+fetching it on every page never counts as a probe.
+
 ### 3. Rate limiting — throttle first, ban only for floods
 
-Every counted request (i.e. not `/health` or `/robots.txt`, which must never
-eat into a client's budget) increments a per-IP counter with a 1-minute
+Every counted request (i.e. not `/health`, `/robots.txt` or `/favicon.ico`,
+which must never eat into a client's budget) increments a per-IP counter with a 1-minute
 window:
 
 - Over `RATE_LIMIT_PER_MINUTE` (default 600): `429` + `Retry-After`. This is
@@ -133,6 +136,34 @@ holds a copy of active bans in memory.
   directly — this is defense-in-depth for a browser client that sends the
   token anyway. Non-browser clients (the app, curl, server-to-server calls)
   don't send `Origin` at all and are unaffected.
+
+## Cloudflare Access in front of the admin path
+
+On prod the admin path can be put behind a Cloudflare Access application
+(Zero Trust → Access → Applications → "renar admin (prod)": domain
+`api.renar.app`, path = `ADMIN_PATH` without its leading slash). Cloudflare
+then asks for a one-time code mailed to the operator before any request
+reaches the server. The APK upload (`uv run build apk --split --publish` in
+renar-frontend) can't read mail, so it sends a service token
+(`renar-apk-publish`, Access → Service credentials) that a second policy
+(action Service Auth) lets through; its two halves live in the build PC's
+keyring (renar-frontend README, "Build").
+
+The server checks Access's work when `CF_ACCESS_TEAM_DOMAIN` and
+`CF_ACCESS_AUD` are set ([environment-variables.md](environment-variables.md#admin-panel)):
+every request under `ADMIN_PATH` must carry the signed
+`Cf-Access-Jwt-Assertion` header. Without a valid one the answer is
+`404 {"detail": "Not Found"}`, a `warning` in the log with the client IP
+and the reason (missing, expired, wrong aud, wrong iss, bad signature), and
+no strike. If Cloudflare's signing keys can't be fetched, the answer is
+`503 Admin access check unavailable` and an `error` in the log; the keys are
+cached for an hour. Nothing outside the admin path is checked, and with both
+settings empty (dev) nothing is checked at all.
+
+**Rotating the service token:** it expires a year after it was made, and
+`--publish` then stops with "Cloudflare Access blocked the upload". Create a
+new token in Access → Service credentials, add it to the "apk publish"
+policy, store its id and secret in the keyring, then delete the old one.
 
 ## Sharing bans with the frontend
 

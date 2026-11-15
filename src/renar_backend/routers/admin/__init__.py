@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/11/09 23:36:39.446240
+Revised: 2026/11/15 02:45:10.698351
 
 Admin router package.
 
@@ -16,6 +16,7 @@ login            — sign-in page (password + authenticator code) and logout
 users            — user list, detail view, library, and all user-action POSTs
 analytics        — site-wide usage stats and per-endpoint caller breakdown
 moderation       — comment review/deletion and banned-IP management
+reports          — reported reviews (with delete) and reported users
 settings         — site settings read/write
 invites          — invite-code generation and lifecycle management
 periodic_tasks   — per-task enable/interval controls and run status
@@ -37,6 +38,7 @@ from . import (
     moderation,
     periodic_tasks,
     premium,
+    reports,
     update,
     users,
 )
@@ -61,6 +63,7 @@ router.include_router(dashboard.router)
 router.include_router(users.router)
 router.include_router(analytics.router)
 router.include_router(moderation.router)
+router.include_router(reports.router)
 router.include_router(settings_panel.router)
 router.include_router(invites.router)
 router.include_router(periodic_tasks.router)

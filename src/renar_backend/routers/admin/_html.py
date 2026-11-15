@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/11/09 23:36:39.611893
+Revised: 2026/11/14 00:22:47.239626
 
 Shared HTML/CSS primitives for the admin control panel.
 
@@ -14,6 +14,7 @@ on their domain logic.
 import html
 import re
 from datetime import timedelta
+from pathlib import Path
 from urllib.parse import quote
 
 from ...config import settings
@@ -26,11 +27,15 @@ _P = settings.admin_path.rstrip("/") or "/admin"
 # Minimal but correct email check: local@domain.tld
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-_FAVICON = (
-    "data:image/svg+xml,"
-    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E"
-    "%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%A0%3C/text%3E%3C/svg%3E"
-)
+# Served by main.py's /favicon.ico route. A same-origin URL, not a data:
+# URI: the panel's CSP is default-src 'self', which blocks data: icons in
+# browsers that apply CSP to favicons (Firefox).
+_FAVICON = "/favicon.ico"
+
+# Read once at import: a missing file is a packaging bug and should stop
+# the app with the path in the error, not serve a broken sign-in page.
+_STATIC = Path(__file__).resolve().parents[2] / "static"
+_LOGO_MARK_SVG = (_STATIC / "renar-mark-dark.svg").read_text(encoding="utf-8")
 
 _BASE_CSS = """
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -77,6 +82,11 @@ _BASE_CSS = """
       font-size: 15px; flex-shrink: 0;
     }
     .logo svg { width: 16px; height: 16px; stroke: var(--bg); }
+    /* the renar mark: no gradient tile behind it (it has its own rings), and
+       no CSS stroke (it would outline the filled spiral; the rings keep the
+       stroke attribute they carry themselves) */
+    .logo.mark { background: none; }
+    .logo.mark svg { width: 30px; height: 30px; stroke: none; }
     .brand { display: flex; flex-direction: column; gap: 1px; }
     .brand-name {
       font-size: .85rem; font-weight: 600; color: var(--text);

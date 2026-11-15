@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:13.871671
-Revised: 2026/11/09 23:36:38.787424
+Revised: 2026/11/14 00:22:46.463035
 """
 
 import logging
@@ -66,17 +66,21 @@ def _log_config() -> dict:
     config = deepcopy(LOGGING_CONFIG)
     config["filters"] = {"quiet_polling": {"()": f"{__name__}._QuietPollingFilter"}}
     config["handlers"]["access"]["filters"] = ["quiet_polling"]
-    # Plain (no ANSI) formatter shared by the file handler and the root logger's console
-    # handler, matching main.py's old logging.basicConfig format. DefaultFormatter decides
+    # Plain (no ANSI) formatter for the file handlers, matching main.py's old
+    # logging.basicConfig format. DefaultFormatter decides
     # on colour by checking sys.stderr.isatty() globally, ignoring which handler it's
     # attached to, so it can't be reused as-is for the file without leaking escape codes.
     config["formatters"]["app"] = {
         "format": "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
         "datefmt": "%Y-%m-%d %H:%M:%S",
     }
+    # The console gets its own skimmable line (short time, aligned level and
+    # logger columns, colour on a terminal — see logging_setup.py); the
+    # files below keep the full plain one.
+    config["formatters"]["app_console"] = {"()": "renar_backend.logging_setup.ConsoleFormatter"}
     config["handlers"]["app_console"] = {
         "class": "logging.StreamHandler",
-        "formatter": "app",
+        "formatter": "app_console",
         "stream": "ext://sys.stderr",
     }
     config["handlers"]["file"] = {

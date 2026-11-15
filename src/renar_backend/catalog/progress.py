@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 15:59:25.836736
-Revised: 2026/11/09 15:59:25.836736
+Revised: 2026/11/14 00:22:46.578278
 
 Watch-status rules shared by every path that recomputes a library entry's
 progress: per-episode toggles, imports, and a show's production status
@@ -21,7 +21,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..constants import ENDED_STATUSES
-from ..models import Episode, LibraryEntry, MediaType, Title, WatchStatus
+from ..models import Episode, EpisodeWatch, LibraryEntry, MediaType, Title, WatchStatus
 
 _log = logging.getLogger(__name__)
 
@@ -58,6 +58,37 @@ def aired_episode_total(title_id: int, db: Session) -> int | None:
         .filter(Episode.title_id == title_id, Episode.air_date.isnot(None), Episode.air_date <= date.today())
         .scalar()
     )
+
+
+def completed_seasons(db: Session, item: LibraryEntry, season: int | None = None) -> list[int]:
+    """The seasons of `item`'s show the owner has fully watched, ascending:
+    every episode of the season that has aired, per the synced Episode
+    catalog, has a watch row. `season` limits the check to that one season.
+
+    A season the catalog knows no aired episode of is never complete: with
+    nothing to compare against there is no telling the last watched episode
+    was the last one. An unaired or undated episode doesn't hold a season
+    back, so a season still airing is complete while the owner is caught up
+    and stops being so when its next episode airs."""
+    aired = db.query(Episode.season, Episode.episode_number).filter(
+        Episode.title_id == item.title_id, Episode.air_date.isnot(None), Episode.air_date <= date.today()
+    )
+    watched = db.query(EpisodeWatch.season, EpisodeWatch.episode).filter(EpisodeWatch.media_item_id == item.id)
+    if season is not None:
+        aired = aired.filter(Episode.season == season)
+        watched = watched.filter(EpisodeWatch.season == season)
+    aired_by_season: dict[int, set[int]] = {}
+    for s, number in aired:
+        aired_by_season.setdefault(s, set()).add(number)
+    watched_by_season: dict[int, set[int]] = {}
+    for s, number in watched:
+        watched_by_season.setdefault(s, set()).add(number)
+    return sorted(s for s, numbers in aired_by_season.items() if numbers <= watched_by_season.get(s, set()))
+
+
+def season_is_complete(db: Session, item: LibraryEntry, season: int) -> bool:
+    """Whether the owner has watched every aired episode of `season`."""
+    return bool(completed_seasons(db, item, season))
 
 
 def resolve_status(item: LibraryEntry, db: Session) -> None:

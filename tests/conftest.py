@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/11/10 00:05:40.447155
+Revised: 2026/11/15 11:56:19.298251
 
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
@@ -36,15 +36,22 @@ os.environ["PROD_TURNSTILE_SECRET_KEY"] = ""
 os.environ["DEV_TURNSTILE_SITE_KEY"] = ""
 os.environ["DEV_TURNSTILE_SECRET_KEY"] = ""
 os.environ["ADMIN_USERNAME"] = ""
+os.environ["ADMIN_PASSWORD_HASH"] = ""
+# A developer's .env may still carry the retired plain ADMIN_PASSWORD,
+# which stops Settings() from loading (see config.py).
 os.environ["ADMIN_PASSWORD"] = ""
 os.environ["ADMIN_TOTP_SECRET"] = ""
 os.environ["ADMIN_API_TOKEN"] = ""
 os.environ["ADMIN_PATH"] = "/admin"
+# test_cf_access.py turns the Access check on per test.
+os.environ["CF_ACCESS_TEAM_DOMAIN"] = ""
+os.environ["CF_ACCESS_AUD"] = ""
 # All test traffic comes from one fake IP; the guard would ban it.
 # test_security.py builds its own app to exercise the middleware.
 os.environ["ABUSE_GUARD_ENABLED"] = "false"
 
 import pytest  # noqa: E402
+from argon2 import PasswordHasher  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 
@@ -66,6 +73,9 @@ atexit.register(_drop_schema)
 
 PASSWORD = "password123"
 ADMIN_CREDS = ("root", "hunter2secret")
+# Hashed once, with the cheapest parameters argon2 accepts: verifying reads
+# the parameters from the hash, so the suite doesn't pay 64 MiB per sign-in.
+ADMIN_PASSWORD_HASH = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1).hash(ADMIN_CREDS[1])
 ADMIN_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
 ADMIN_API_TOKEN = "test-admin-api-token-0123456789"
 
@@ -88,13 +98,14 @@ def admin_enabled():
     """
     from renar_backend.users import admin_session
 
-    settings.admin_username, settings.admin_password = ADMIN_CREDS
+    settings.admin_username = ADMIN_CREDS[0]
+    settings.admin_password_hash = ADMIN_PASSWORD_HASH
     settings.admin_totp_secret = ADMIN_TOTP_SECRET
     settings.admin_api_token = ADMIN_API_TOKEN
     admin_session.reset_replay_guard()
     yield admin_headers()
     settings.admin_username = ""
-    settings.admin_password = ""
+    settings.admin_password_hash = ""
     settings.admin_totp_secret = ""
     settings.admin_api_token = ""
     admin_session.reset_replay_guard()
@@ -132,10 +143,14 @@ def _fresh_db():
     svc._auth_failures.clear()
     # Temp bans queued by a failed admin sign-in (users/security.py) wait in a
     # module-level dict for the next AbuseGuardMiddleware to pick up; a test
-    # building its own guarded app would inherit an earlier test's ban.
+    # building its own guarded app would inherit an earlier test's ban. The
+    # in-memory permaban set is process-wide too: a test that permabans
+    # "testclient" would make the next guarded app answer 403 to everything.
     from renar_backend.users import security
 
     security._external_temp_bans.clear()
+    security._permabanned.clear()
+    security._permabans_loaded = False
     yield
 
 

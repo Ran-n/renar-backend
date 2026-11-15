@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.262466
-Revised: 2026/11/09 15:59:25.401973
+Revised: 2026/11/14 00:22:50.489624
 
 Per-episode tracking: set/unset, bulk, progress sync, rewatches, ratings.
 """
@@ -1102,3 +1102,75 @@ def test_film_patch_rating_creates_watch_event_and_updates_aggregate(client, ali
         assert title.rating_count == 1
     finally:
         db.close()
+
+
+# ---------- community episode ratings, whole show ----------
+
+
+def _show_ratings(client, headers, tmdb_id: int = 70523):
+    return client.get("/media/episode-ratings/show", params={"tmdb_id": tmdb_id}, headers=headers)
+
+
+def test_show_episode_ratings_lists_every_rated_episode_in_order(client, alice, bob):
+    """One call returns the average and count of each rated episode,
+    ordered by season then episode; unrated episodes are absent."""
+    _, a = alice
+    _, b = bob
+    a_show = _show(client, a, tmdb_id=70523)
+    b_show = _show(client, b, tmdb_id=70523)
+    client.put(f"/media/{a_show['id']}/episodes/2/1", json={"watched": True, "rating": 90}, headers=a)
+    client.put(f"/media/{a_show['id']}/episodes/1/2", json={"watched": True, "rating": 80}, headers=a)
+    client.put(f"/media/{b_show['id']}/episodes/1/2", json={"watched": True, "rating": 60}, headers=b)
+    client.put(f"/media/{a_show['id']}/episodes/1/1", json={"watched": True}, headers=a)  # watched, unrated
+
+    r = _show_ratings(client, a)
+    assert r.status_code == 200, r.text
+    assert r.json() == [
+        {"season": 1, "episode": 2, "average": 70, "count": 2},
+        {"season": 2, "episode": 1, "average": 90, "count": 1},
+    ]
+
+
+def test_show_episode_ratings_agree_with_the_single_episode_endpoint(client, alice, bob):
+    _, a = alice
+    _, b = bob
+    a_show = _show(client, a, tmdb_id=70523)
+    b_show = _show(client, b, tmdb_id=70523)
+    client.put(f"/media/{a_show['id']}/episodes/1/1", json={"watched": True, "rating": 81}, headers=a)
+    client.put(f"/media/{b_show['id']}/episodes/1/1", json={"watched": True, "rating": 60}, headers=b)
+    single = client.get(
+        "/media/episode-ratings", params={"tmdb_id": 70523, "season": 1, "episode": 1}, headers=a
+    ).json()
+    (row,) = _show_ratings(client, a).json()
+    assert {"average": row["average"], "count": row["count"]} == single
+
+
+def test_show_episode_ratings_drop_an_episode_whose_last_rating_is_cleared(client, alice):
+    _, headers = alice
+    show = _show(client, headers, tmdb_id=70523)
+    client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True, "rating": 80}, headers=headers)
+    client.put(f"/media/{show['id']}/episodes/1/1", json={"watched": True}, headers=headers)
+    assert _show_ratings(client, headers).json() == []
+
+
+def test_show_episode_ratings_only_cover_the_asked_show(client, alice):
+    _, headers = alice
+    dark = _show(client, headers, tmdb_id=70523)
+    other = _show(client, headers, tmdb_id=1399, title="Other")
+    client.put(f"/media/{dark['id']}/episodes/1/1", json={"watched": True, "rating": 80}, headers=headers)
+    client.put(f"/media/{other['id']}/episodes/1/1", json={"watched": True, "rating": 20}, headers=headers)
+    assert _show_ratings(client, headers, 70523).json() == [{"season": 1, "episode": 1, "average": 80, "count": 1}]
+
+
+def test_show_episode_ratings_unknown_show_is_empty(client, alice):
+    _, headers = alice
+    r = _show_ratings(client, headers, 999999)
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_show_episode_ratings_validation_and_auth(client, alice):
+    _, headers = alice
+    assert client.get("/media/episode-ratings/show", params={"tmdb_id": 70523}).status_code == 401
+    assert _show_ratings(client, headers, 0).status_code == 422
+    assert client.get("/media/episode-ratings/show", headers=headers).status_code == 422

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/09/02 10:58:06.951269
+Revised: 2026/11/15 02:45:15.236166
 
 Import a Renar export (.7z) back into an account: the round trip half of
 GDPR Art. 20 that users/export.py builds, exercised end-to-end through the
@@ -798,3 +798,72 @@ def test_run_exception_is_captured_in_status(client, alice, monkeypatch):
     body = _wait_for_ready(client, headers)
     assert body["finished"] is True
     assert body["error"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — blocks
+# ---------------------------------------------------------------------------
+
+
+def test_import_restores_blocks_and_skips_follows_across_them(client, alice, bob):
+    """The export's block list is re-applied, and a follow to someone in it
+    is skipped rather than undoing the block."""
+    alice_user, alice_headers = alice
+    bob_user, _ = bob
+    social = {
+        "following": [bob_user["username"]],
+        "blocked_users": [
+            {"username": bob_user["username"], "blocked_at": "2026-11-01T00:00:00+00:00"},
+            {"username": "zzz_no_such_user_xyz", "blocked_at": None},  # account gone: nothing to block
+            {"username": alice_user["username"]},  # never yourself
+            "not-an-object",  # a hand-edited file must not break the import
+        ],
+    }
+    r = client.post(
+        "/import",
+        files={"file": ("x.7z", _full_7z(social=social), "application/x-7z-compressed")},
+        headers=alice_headers,
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, alice_headers)
+    assert body["error"] is None
+    assert body["summary"]["blocks"] == 1
+    assert body["summary"]["follows"] == 0
+    assert body["summary"]["follows_skipped"] == 1
+    blocked = client.get("/users/blocked", headers=alice_headers).json()
+    assert [u["username"] for u in blocked] == [bob_user["username"]]
+    assert client.get(f"/users/{alice_user['id']}/following", headers=alice_headers).json() == []
+
+
+def test_import_does_not_follow_across_an_existing_block(client, alice, bob):
+    """A block made by the OTHER side also stands in the way of a restored follow."""
+    alice_user, alice_headers = alice
+    bob_user, bob_headers = bob
+    client.post(f"/users/{alice_user['id']}/block", headers=bob_headers).raise_for_status()
+    r = client.post(
+        "/import",
+        files={"file": ("x.7z", _full_7z(social={"following": [bob_user["username"]]}), "application/x-7z-compressed")},
+        headers=alice_headers,
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, alice_headers)
+    assert body["error"] is None
+    assert body["summary"]["follows"] == 0
+    assert body["summary"]["blocks"] == 0
+
+
+def test_import_block_already_in_place_is_not_counted_twice(client, alice, bob):
+    _, alice_headers = alice
+    bob_user, _ = bob
+    client.post(f"/users/{bob_user['id']}/block", headers=alice_headers).raise_for_status()
+    social = {"blocked_users": [{"username": bob_user["username"]}]}
+    r = client.post(
+        "/import",
+        files={"file": ("x.7z", _full_7z(social=social), "application/x-7z-compressed")},
+        headers=alice_headers,
+    )
+    assert r.status_code == 202, r.text
+    body = _wait_for_ready(client, alice_headers)
+    assert body["error"] is None
+    assert body["summary"]["blocks"] == 0
+    assert len(client.get("/users/blocked", headers=alice_headers).json()) == 1

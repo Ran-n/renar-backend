@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/11/09 16:20:33.688065
+Revised: 2026/11/15 11:01:42.654261
 """
 
 import enum
@@ -145,6 +145,10 @@ class TurnstileWidgetSession(Base):
 
 class User(Base):
     __tablename__ = "users"
+    # Composite, not a plain index on total_watch_minutes: the rank query
+    # (routers/stats.py _compute_ranking) breaks ties on created_at, and
+    # this is the index the migration built (a7c2e9f4b816).
+    __table_args__ = (Index("ix_users_total_watch_minutes", "total_watch_minutes", "created_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
@@ -251,7 +255,7 @@ class User(Base):
     # user's own value — never a full-table scan), so leaderboard rank/total
     # can be read with a plain indexed COUNT query instead of aggregating
     # every user's library on every request.
-    total_watch_minutes: Mapped[int] = mapped_column(Integer, default=0, server_default="0", index=True)
+    total_watch_minutes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     # The only usage fact stored here: everything else the admin panel shows
     # (login count, last login, request totals) is derived from login_events /
@@ -863,6 +867,7 @@ class LibraryEntry(Base):
     custom_poster_image: Mapped[Image | None] = relationship(foreign_keys=[custom_poster_image_id])
     custom_backdrop_image: Mapped[Image | None] = relationship(foreign_keys=[custom_backdrop_image_id])
     episode_watches: Mapped[list[EpisodeWatch]] = relationship(back_populates="item", cascade="all, delete-orphan")
+    season_ratings: Mapped[list[SeasonRating]] = relationship(back_populates="item", cascade="all, delete-orphan")
     watch_events: Mapped[list[WatchEvent]] = relationship(cascade="all, delete-orphan")
     notifications: Mapped[list[Notification]] = relationship(cascade="all, delete-orphan")
     # Quoted forward reference: EpisodeCustomStill is declared further down
@@ -1077,6 +1082,30 @@ class EpisodeWatch(Base):
     item: Mapped[LibraryEntry] = relationship(back_populates="episode_watches")
 
 
+class SeasonRating(Base):
+    """The owner's 1-100 grade for one whole season of a show in their
+    library. One row per (library entry, season): the grade is a fact about
+    that pair alone, not derived from the episodes' ratings and not tied to
+    any one of them, so it gets its own table rather than a column on
+    episode_watches (per episode) or media_items (per title).
+    """
+
+    __tablename__ = "season_ratings"
+    __table_args__ = (
+        UniqueConstraint("media_item_id", "season", name="uq_item_season_rating"),
+        CheckConstraint("rating BETWEEN 1 AND 100", name="ck_season_rating_range"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    media_item_id: Mapped[int] = mapped_column(ForeignKey("media_items.id"), index=True)
+    season: Mapped[int] = mapped_column(Integer)
+    rating: Mapped[int] = mapped_column(Integer)  # 1-100
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    item: Mapped[LibraryEntry] = relationship(back_populates="season_ratings")
+
+
 class EpisodeCustomStill(Base):
     """Premium per-episode still override, same shape/rules as
     LibraryEntry.custom_backdrop_image_id: a TMDB alternate downloaded
@@ -1133,6 +1162,46 @@ class Follow(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     follower_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     followed_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserBlock(Base):
+    """One user blocking another: one row per (blocker, blocked). The effect
+    is symmetric (neither sees the other's comments, reviews or profile, see
+    social/blocks.py), but who blocked whom is kept because only the blocker
+    may undo it. The only key is the pair (`id` is a surrogate) and
+    `created_at` depends on the whole pair.
+    """
+
+    __tablename__ = "user_blocks"
+    __table_args__ = (
+        UniqueConstraint("blocker_id", "blocked_id", name="uq_user_block_pair"),
+        CheckConstraint("blocker_id <> blocked_id", name="ck_user_block_not_self"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    blocker_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    blocked_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserReport(Base):
+    """A user flagging another user's profile (username, avatar, background)
+    for moderator attention. One row per (reported user, reporter): repeat
+    reports are no-ops. Surfaced on the admin "Reported users" page; nothing
+    is hidden automatically.
+    """
+
+    __tablename__ = "user_reports"
+    __table_args__ = (
+        UniqueConstraint("reported_user_id", "reporter_id", name="uq_user_report"),
+        CheckConstraint("reported_user_id <> reporter_id", name="ck_user_report_not_self"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reported_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    reporter_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    reason: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -1197,6 +1266,49 @@ class Review(Base):
 
     author: Mapped[User] = relationship()
     title_ref: Mapped[Title] = relationship()
+    likes: Mapped[list[ReviewLike]] = relationship(back_populates="review", cascade="all, delete-orphan")
+    reports: Mapped[list[ReviewReport]] = relationship(back_populates="review", cascade="all, delete-orphan")
+
+
+class ReviewLike(Base):
+    """A user's reaction to a review: +1 (like) or -1 (dislike). Same shape
+    as CommentLike: one row per (review, user), and reacting the other way
+    flips this row's value rather than adding a second one, so a user can
+    never both like and dislike the same review.
+    """
+
+    __tablename__ = "review_likes"
+    __table_args__ = (
+        UniqueConstraint("review_id", "user_id", name="uq_review_like"),
+        CheckConstraint("value IN (-1, 1)", name="ck_review_like_value"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    review_id: Mapped[int] = mapped_column(ForeignKey("reviews.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    value: Mapped[int] = mapped_column(Integer, default=1)
+
+    review: Mapped[Review] = relationship(back_populates="likes")
+
+
+class ReviewReport(Base):
+    """A user flagging a review for moderator attention. Same shape as
+    CommentReport: one row per (review, reporter), repeat reports are
+    no-ops. Surfaced on the admin "Reported reviews" page.
+    """
+
+    __tablename__ = "review_reports"
+    __table_args__ = (UniqueConstraint("review_id", "reporter_id", name="uq_review_report"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    review_id: Mapped[int] = mapped_column(ForeignKey("reviews.id"), index=True)
+    # named for what it is (as in UserReport), not `user_id`: that would read
+    # as a copy of reviews.user_id, the review's author
+    reporter_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    review: Mapped[Review] = relationship(back_populates="reports")
 
 
 class ReviewWhitelist(Base):
@@ -1207,9 +1319,12 @@ class ReviewWhitelist(Base):
     """
 
     __tablename__ = "review_whitelist"
+    # A named constraint plus a plain index, as the migration built them
+    # (88137cd72bc2), not one unique index.
+    __table_args__ = (UniqueConstraint("user_id", name="uq_review_whitelist_user_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

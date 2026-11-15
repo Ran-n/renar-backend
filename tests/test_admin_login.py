@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:21:23.769899
-Revised: 2026/11/10 11:04:47.797141
+Revised: 2026/11/15 11:56:19.946314
 
 Admin panel sign-in: the login page (username + password + authenticator
 code), the session cookie, its expiry and invalidation, logout, the strike
@@ -13,6 +13,7 @@ table. Time is frozen in the middle of a TOTP step (``frozen_now``) so a
 code computed by the test can't roll over to the next step mid-test.
 """
 
+import logging
 import time
 import types
 from urllib.parse import quote
@@ -61,10 +62,12 @@ def strike_count() -> int:
 # ---------- configuration ----------
 
 
-@pytest.mark.parametrize("field", ["admin_username", "admin_password", "admin_totp_secret"])
+@pytest.mark.parametrize("field", ["admin_username", "admin_password_hash", "admin_totp_secret"])
 def test_unconfigured_returns_503(client, admin_enabled, monkeypatch, field):
     monkeypatch.setattr(settings, field, "")
-    assert client.get("/admin", follow_redirects=False).status_code == 503
+    r = client.get("/admin", follow_redirects=False)
+    assert r.status_code == 503
+    assert "ADMIN_PASSWORD_HASH" in r.json()["detail"]
     assert client.get("/admin/login").status_code == 503
     assert login(client, code="123456").status_code == 503
 
@@ -96,8 +99,37 @@ def test_login_page_renders_form(client, admin_enabled):
         'autocomplete="one-time-code"',
         'inputmode="numeric"',
         'value="/admin/users"',
+        # the renar tile in the tab and the renar mark in the topbar
+        'href="/favicon.ico"',
+        'class="logo mark"',
+        'viewBox="0 0 512 512"',
     ):
         assert needle in r.text
+    assert "M7 11V7a5 5 0 0 1 10 0v4" not in r.text  # the old padlock is gone
+    assert "data:image/svg+xml" not in r.text  # blocked by the panel's CSP in Firefox
+
+
+def test_login_mark_uses_the_dark_palette(client, admin_enabled):
+    """The inline mark is recoloured for the dark topbar: light spiral,
+    tan dot, sage rings, and nothing left of the light-background colours."""
+    text = client.get("/admin/login").text
+    for colour in ('fill="#e9e5da"', 'fill="#c99b6c"', 'stroke="#6fa391"'):
+        assert colour in text
+    for old_colour in ("#26282a", "#a67a4f", "#3f6c5f"):
+        assert old_colour not in text
+
+
+def test_session_expired_page_has_logo_topbar(client, admin_enabled, alice):
+    """The session-expired screen carries the same topbar as sign-in."""
+    user, _ = alice
+    r = client.post(f"/admin/users/{user['id']}/delete", follow_redirects=False)
+    assert r.status_code == 401
+    assert "Session expired" in r.text
+    login = client.get("/admin/login").text
+    start, end = login.index('<header class="topbar">'), login.index("</header>")
+    assert login[start:end] in r.text
+    assert 'class="logo mark"' in r.text
+    assert 'href="/favicon.ico"' in r.text
 
 
 # ---------- signing in ----------
@@ -239,7 +271,7 @@ def test_expired_session_redirects(client, admin_enabled):
     assert r.headers["location"].startswith("/admin/login")
 
 
-@pytest.mark.parametrize("field", ["admin_password", "admin_username", "admin_totp_secret"])
+@pytest.mark.parametrize("field", ["admin_password_hash", "admin_username", "admin_totp_secret"])
 def test_rotated_credential_kills_session(client, admin_enabled, monkeypatch, field):
     assert client.get("/admin", headers=admin_enabled, follow_redirects=False).status_code == 200
     rotated = "KRSXG5DTMVRXEZLUKRSXG5DTMVRXEZLU" if field == "admin_totp_secret" else "rotated-value"
@@ -328,6 +360,35 @@ def test_every_admin_page_has_logout_button(client, admin_enabled, alice):
         assert 'action="/admin/logout"' in r.text, path
 
 
+def test_every_admin_page_uses_served_favicon(client, admin_enabled, alice):
+    """Every admin HTML page links the same-origin /favicon.ico and none
+    still carries a data: icon (which the panel's CSP blocks)."""
+    user, _ = alice
+    skip = {"/admin/logout", "/admin/app-releases/{release_id}/download"}
+    pages = set()
+    for route in _all_routes():
+        path = route.path
+        if not (path == "/admin" or path.startswith("/admin/")) or "GET" not in (route.methods or set()):
+            continue
+        if path in skip:
+            continue
+        pages.add(path.replace("{user_id}", str(user["id"])))
+    assert {"/admin/login", "/admin/users"} <= pages
+    params = {"/admin/usage/endpoint": {"method": "GET", "path": "/media"}}
+    checked = 0
+    for path in sorted(pages):
+        if "{" in path:
+            continue
+        r = client.get(path, params=params.get(path), headers=admin_enabled)
+        if "text/html" not in r.headers.get("content-type", ""):
+            continue
+        assert r.status_code == 200, (path, r.status_code)
+        assert 'href="/favicon.ico"' in r.text, path
+        assert "data:image/svg+xml" not in r.text, path
+        checked += 1
+    assert checked >= 10  # the walk really covered the panel
+
+
 # ---------- API token (scripts: the APK upload) ----------
 
 
@@ -355,3 +416,58 @@ def test_api_token_unset_never_matches(client, admin_enabled, monkeypatch):
 def test_api_token_does_not_open_html_pages(client, admin_enabled):
     r = client.get("/admin", headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"}, follow_redirects=False)
     assert r.status_code == 303
+
+
+# ---------- the password is stored as an Argon2id hash ----------
+
+
+def test_wrong_password_with_hash_is_rejected(client, admin_enabled, frozen_now):
+    r = login(client, password="not-the-password", now=frozen_now)
+    assert r.status_code == 401
+    assert strike_count() == 1
+    assert admin_session.COOKIE_NAME not in r.cookies
+
+
+def test_right_password_with_production_strength_hash(client, admin_enabled, frozen_now, monkeypatch):
+    """The suite's own hash uses cheap parameters; one made with the library
+    defaults (what `uv run admin-password` prints) must verify too."""
+    from argon2 import PasswordHasher
+
+    monkeypatch.setattr(settings, "admin_password_hash", PasswordHasher().hash(PASSWORD))
+    assert login(client, now=frozen_now).status_code == 303
+    assert strike_count() == 0
+
+
+def test_wrong_username_still_verifies_password(client, admin_enabled, frozen_now, monkeypatch):
+    """Both halves are always checked, so timing doesn't reveal which was wrong."""
+    seen = []
+    real = admin_session._HASHER
+
+    class Spy:
+        def verify(self, hashed, password):
+            seen.append(password)
+            return real.verify(hashed, password)
+
+    monkeypatch.setattr(admin_session, "_HASHER", Spy())
+    assert login(client, username="someone-else", now=frozen_now).status_code == 401
+    assert seen == [PASSWORD]
+
+
+@pytest.mark.parametrize("corrupt", ["$argon2id$garbage", "$argon2id$v=19$m=65536,t=3,p=4$AAAA$AAAA", "plain-text"])
+def test_corrupt_hash_fails_closed_and_logs(client, admin_enabled, frozen_now, monkeypatch, caplog, corrupt):
+    monkeypatch.setattr(settings, "admin_password_hash", corrupt)
+    with caplog.at_level(logging.ERROR, logger="renar_backend.users.admin_session"):
+        r = login(client, now=frozen_now)
+    assert r.status_code == 401
+    assert admin_session.COOKIE_NAME not in r.cookies
+    assert "ADMIN_PASSWORD_HASH could not be verified" in caplog.text
+    assert PASSWORD not in caplog.text
+
+
+def test_plain_password_setting_alone_does_not_configure_the_panel(client, monkeypatch):
+    """The retired ADMIN_PASSWORD must never count as a credential."""
+    monkeypatch.setattr(settings, "admin_username", USER)
+    monkeypatch.setattr(settings, "admin_password", PASSWORD)
+    monkeypatch.setattr(settings, "admin_totp_secret", "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
+    assert admin_session.admin_configured() is False
+    assert client.get("/admin/login").status_code == 503

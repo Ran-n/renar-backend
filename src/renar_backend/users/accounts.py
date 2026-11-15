@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 03:02:57.798569
-Revised: 2026/09/07 15:13:01.906343
+Revised: 2026/11/15 02:45:12.782737
 
 Account deletion: the one purge path, shared by self-service
 (DELETE /auth/me) and the admin panel's delete-user action.
@@ -40,8 +40,12 @@ from ..models import (
     ReleasedUsername,
     RequestDay,
     Review,
+    ReviewLike,
+    ReviewReport,
     ReviewWhitelist,
     User,
+    UserBlock,
+    UserReport,
     utcnow,
 )
 from .export import delete_export
@@ -60,6 +64,13 @@ def delete_account(user: User, db: Session) -> None:
     for comment in db.query(Comment).filter(Comment.user_id == user_id).all():
         db.delete(comment)  # ORM delete cascades the comment's likes, reports and reply subtree
     db.query(Follow).filter((Follow.follower_id == user_id) | (Follow.followed_id == user_id)).delete(
+        synchronize_session=False
+    )
+    db.query(UserBlock).filter((UserBlock.blocker_id == user_id) | (UserBlock.blocked_id == user_id)).delete(
+        synchronize_session=False
+    )
+    # Profile reports the user made, and the ones made about them.
+    db.query(UserReport).filter((UserReport.reporter_id == user_id) | (UserReport.reported_user_id == user_id)).delete(
         synchronize_session=False
     )
     db.query(Notification).filter(Notification.user_id == user_id).delete(synchronize_session=False)
@@ -82,6 +93,16 @@ def delete_account(user: User, db: Session) -> None:
     own_list_ids = select(List.id).where(List.user_id == user_id)
     db.query(ListItem).filter(ListItem.list_id.in_(own_list_ids)).delete(synchronize_session=False)
     db.query(List).filter(List.user_id == user_id).delete(synchronize_session=False)
+    # Reactions the user left on anyone's reviews, then the reactions others
+    # left on the user's own reviews: the bulk Review delete below is a plain
+    # DELETE statement, so the ORM cascade on Review.likes never runs for it.
+    db.query(ReviewLike).filter(ReviewLike.user_id == user_id).delete(synchronize_session=False)
+    own_review_ids = select(Review.id).where(Review.user_id == user_id)
+    db.query(ReviewLike).filter(ReviewLike.review_id.in_(own_review_ids)).delete(synchronize_session=False)
+    # Same for review reports: the ones the user made, then the ones on the
+    # user's own reviews.
+    db.query(ReviewReport).filter(ReviewReport.reporter_id == user_id).delete(synchronize_session=False)
+    db.query(ReviewReport).filter(ReviewReport.review_id.in_(own_review_ids)).delete(synchronize_session=False)
     db.query(Review).filter(Review.user_id == user_id).delete(synchronize_session=False)
     db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user_id).delete(synchronize_session=False)
     delete_export(user_id)  # the zip lives on disk, not in a row this delete() touches
