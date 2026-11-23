@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:22:54.723786
-Revised: 2026/11/09 15:59:24.906011
+Revised: 2026/11/23 12:52:18.295603
 
 Background checkers: new-episode notifications, film release-date refresh,
 episode history backfill, and periodic TMDB metadata resync for every
@@ -25,7 +25,7 @@ from ..database import SessionLocal
 from ..events import publish as publish_event
 from ..models import EpisodeWatch, LibraryEntry, MediaType, Notification, Title, WatchStatus, utcnow
 from ..tmdb.tmdb_http import tmdb_get
-from ..tmdb.tmdb_store import store_details, sync_show_episodes
+from ..tmdb.tmdb_store import store_details, sync_announced_seasons, sync_show_episodes
 
 _log = logging.getLogger(__name__)
 
@@ -91,6 +91,10 @@ def check_new_episodes(db: Session, fetch=fetch_show) -> int:
         # the payload is already in hand — persist it (tmdb_cache + typed
         # Title columns: show_status, next_episode_air_date, ...) for free
         store_details(db, group[0].title_ref, data)
+        # committed first, so no row lock is held across its TMDB call (see
+        # the per-show commit below)
+        db.commit()
+        sync_announced_seasons(db, group[0].title_ref)
         last = data.get("last_episode_to_air") or {}
         air_str = last.get("air_date")
         season = last.get("season_number")
@@ -212,6 +216,8 @@ def sync_episode_history(db: Session) -> int:
         try:
             sync_show_episodes(db, title)
         except Exception:
+            # first: after a failed flush even reading title.id raises
+            db.rollback()
             _log.exception("episode history sync failed for title %s", title.id)
     return len(titles)
 
@@ -464,6 +470,26 @@ def purge_expired_deletions_once() -> int:
         db.close()
 
 
+def purge_released_usernames_once() -> int:
+    from ..users import accounts  # local import: avoids a cycle at module load
+
+    db = SessionLocal()
+    try:
+        return accounts.purge_released_usernames(db, utcnow())
+    finally:
+        db.close()
+
+
+def purge_expired_decisions_once() -> int:
+    from ..moderation.decisions import purge_expired_decisions  # local import: avoids a cycle at module load
+
+    db = SessionLocal()
+    try:
+        return purge_expired_decisions(db, utcnow())
+    finally:
+        db.close()
+
+
 async def _account_purge_loop() -> None:
     await asyncio.sleep(15)
     while True:
@@ -473,8 +499,14 @@ async def _account_purge_loop() -> None:
             started = utcnow()
             try:
                 n = await asyncio.to_thread(purge_expired_deletions_once)
-                _log.info("account purge done: %d accounts removed", n)
-                task_runs.record_run("account_purge", started, "ok", f"{n} accounts removed")
+                names = await asyncio.to_thread(purge_released_usernames_once)
+                decisions = await asyncio.to_thread(purge_expired_decisions_once)
+                detail = (
+                    f"{n} accounts removed, {names} released usernames forgotten, "
+                    f"{decisions} moderation decisions deleted"
+                )
+                _log.info("account purge done: %s", detail)
+                task_runs.record_run("account_purge", started, "ok", detail)
             except Exception:
                 _log.exception("account purge failed")
                 task_runs.record_run("account_purge", started, "error", "purge failed, see server logs")

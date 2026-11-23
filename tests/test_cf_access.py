@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/15 11:53:53.885574
-Revised: 2026/11/15 11:56:21.530379
+Revised: 2026/11/22 05:15:08.941540
 
 Cloudflare Access check on the admin path (users/cf_access.py).
 
@@ -269,3 +269,12 @@ def test_config_both_set_loads_and_normalises_the_domain():
 def test_config_only_one_set_stops_the_boot(only):
     with pytest.raises(ValidationError, match="set both CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD, or neither"):
         Settings(**{"cf_access_team_domain": "", "cf_access_aud": "", **only})
+
+
+def test_garbage_token_is_malformed_before_any_key_fetch(monkeypatch):
+    """A token whose header can't be read is refused as "malformed" by the
+    key lookup itself (the fixture above fakes that lookup, so this calls the
+    real one; PyJWT rejects the header before fetching any keys)."""
+    monkeypatch.setattr(settings, "cf_access_team_domain", TEAM)
+    with pytest.raises(cf_access.AccessDenied, match="malformed"):
+        cf_access._signing_key("not.a.jwt")

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:13.871671
-Revised: 2026/11/14 00:22:46.463035
+Revised: 2026/11/22 01:52:22.054099
 """
 
 import logging
@@ -21,6 +21,9 @@ from renar_backend._devserver import ensure_port_free
 # complaint — hot-reload then silently never fires.
 _SRC_DIR = str(Path(__file__).resolve().parents[1])
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
+# Log files roll over at midnight UTC and are kept this many days, then
+# deleted: the retention period the privacy policy states (GDPR art. 13).
+LOG_RETENTION_DAYS = 30
 _LOG_FILE = _BACKEND_DIR / "logs" / "renar-backend.log"
 # WARNING+ only, same records as _LOG_FILE — lets a crash/error check skim
 # one small file instead of grepping the full (mostly INFO/access-log) one.
@@ -85,18 +88,20 @@ def _log_config() -> dict:
     }
     config["handlers"]["file"] = {
         "formatter": "app",
-        "class": "logging.handlers.RotatingFileHandler",
+        "class": "logging.handlers.TimedRotatingFileHandler",
         "filename": str(_LOG_FILE),
-        "maxBytes": 10_000_000,
-        "backupCount": 5,
+        "when": "midnight",
+        "utc": True,
+        "backupCount": LOG_RETENTION_DAYS,
         "encoding": "utf-8",
     }
     config["handlers"]["errors_file"] = {
         "formatter": "app",
-        "class": "logging.handlers.RotatingFileHandler",
+        "class": "logging.handlers.TimedRotatingFileHandler",
         "filename": str(_ERROR_LOG_FILE),
-        "maxBytes": 10_000_000,
-        "backupCount": 5,
+        "when": "midnight",
+        "utc": True,
+        "backupCount": LOG_RETENTION_DAYS,
         "encoding": "utf-8",
         "level": "WARNING",
     }

@@ -1,0 +1,17 @@
+# ------------------------------------------------------------------------------
+#+ Authors: 	Ran# <ran.hash@proton.me>
+#+ Created: 	2026/11/21 18:57:56.626394
+#+ Revised: 	2026/11/21 18:57:56.626394
+# ------------------------------------------------------------------------------
+
+# Installed at /etc/systemd/system/renar-backup.timer on the prod VPS.
+# Persistent: a run missed while the VPS was down happens at next boot.
+[Unit]
+Description=Nightly renar database dump at 03:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

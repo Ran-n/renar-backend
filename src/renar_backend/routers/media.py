@@ -2,19 +2,20 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.286403
-Revised: 2026/11/14 00:43:56.364122
+Revised: 2026/11/23 10:25:05.966703
 """
 
 import logging
 from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from sqlalchemy import Date, and_, cast, exists, func, inspect, or_
+from sqlalchemy import func, inspect, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from ..catalog.progress import completed_seasons, resolve_status, season_is_complete
 from ..catalog.titles import WITH_TITLE_GENRES, backfill_title_tmdb_id, escape_like, find_or_create_title, find_title
+from ..catalog.watch_next import newest_new_episode_aired, rank_watch_next, watch_next_filter, watch_next_order
 from ..database import get_db
 from ..events import publish as publish_event
 from ..media.image_service import gc_image, image_row_for
@@ -82,71 +83,6 @@ _MAX_WARMUP_PER_REQUEST = 15
 _DEFAULT_LIST_LIMIT = 60
 
 
-def _unwatched_aired_episode_clause(*, newer_than_last_watched: bool = False):
-    """EXISTS(...) clause, correlated to whatever `LibraryEntry` row it's
-    filtered/selected alongside: does this show have an aired episode
-    (`air_date <= today`) with no matching `EpisodeWatch` row?
-
-    Live, not cached: `LibraryEntry.status`/`episodes_watched` only get
-    recomputed by `_sync_progress()` on a write to that item (toggling an
-    episode, a rewatch, ...) — a show sitting untouched while a new episode
-    airs never re-runs that, so `status` alone can't answer "is this show
-    *currently* fully caught up" reliably. This clause re-evaluates fresh
-    against the `episodes`/`episode_watches` tables on every call instead,
-    which `list_media`'s "last_watched" ordering (Home's Watch Next list) is
-    small enough — one user, one status — to afford doing live.
-
-    `newer_than_last_watched=True` narrows this to episodes that aired more
-    recently than the show's own `last_watched_at` — i.e. genuinely new
-    content that arrived since the user last watched anything on it, not
-    just an old backlog episode they haven't gotten around to yet. Used for
-    the "bubble a fresh episode to position #2" ranking rule, a stricter
-    condition than the plain "still has something aired left to watch" one
-    used for excluding fully caught-up shows.
-    """
-    conditions = [
-        Episode.title_id == LibraryEntry.title_id,
-        Episode.air_date.isnot(None),
-        Episode.air_date <= date.today(),
-        # .correlate(LibraryEntry): this EXISTS sits inside the outer Episode
-        # EXISTS, two levels down from the LibraryEntry it needs to match —
-        # SQLAlchemy's auto-correlation only reaches the immediately
-        # enclosing query, so without this it silently treated `media_items`
-        # as a fresh, uncorrelated table (`FROM episode_watches, media_items`)
-        # instead of the specific outer row. That turned "has this item's
-        # episode ever been watched" into "has *any* item's same season/
-        # episode number ever been watched by anyone" — which matched almost
-        # everywhere in a large library, wrongly marking nearly every show
-        # "fully caught up" and dropping it from Home's Watch Next list.
-        ~exists()
-        .where(
-            EpisodeWatch.media_item_id == LibraryEntry.id,
-            EpisodeWatch.season == Episode.season,
-            EpisodeWatch.episode == Episode.episode_number,
-        )
-        .correlate(LibraryEntry, Episode),
-    ]
-    if newer_than_last_watched:
-        conditions.append(
-            or_(LibraryEntry.last_watched_at.is_(None), Episode.air_date > cast(LibraryEntry.last_watched_at, Date))
-        )
-    return exists().where(and_(*conditions))
-
-
-def _known_aired_episode_clause():
-    """EXISTS(...): has at least one Episode row synced for this show with
-    `air_date <= today`. Guards `_unwatched_aired_episode_clause` from a
-    vacuous-truth trap: a show with *no* synced episode data at all (never
-    opened its season list, or a brand new addition) has zero aired-and-
-    unwatched rows for the exact same reason a genuinely caught-up show
-    does — there's nothing to find either way. Without this guard, both
-    look identical to the exclusion filter and a show with simply no data
-    yet would vanish from Watch Next instead of a caught-up one."""
-    return exists().where(
-        Episode.title_id == LibraryEntry.title_id, Episode.air_date.isnot(None), Episode.air_date <= date.today()
-    )
-
-
 def _get_owned_item(item_id: int, user: User, db: Session) -> LibraryEntry:
     item = db.get(LibraryEntry, item_id)
     if item is None or item.user_id != user.id:
@@ -197,47 +133,13 @@ def list_media(
             )
         )
     # "last_watched" is opt-in (Home's in-progress preview) rather than the
-    # default: it orders by genuine watch activity only (see
-    # LibraryEntry.last_watched_at), while Library's own browsing/filtering
-    # keeps the existing "most recently touched at all" order everyone
-    # already expects.
+    # default: Library's own browsing keeps the "most recently touched at
+    # all" order everyone expects. Which entries Home shows and in what
+    # order lives in catalog/watch_next.py.
     if order_by == "last_watched":
-        # A tv_show fully caught up on everything aired so far has nothing
-        # left to prompt "continue watching" for until a new episode
-        # actually airs — see _unwatched_aired_episode_clause's docstring
-        # for why this can't just filter on the (possibly stale) status
-        # field. Films have no episode concept, so media_type != tv_show
-        # short-circuits the OR before the correlated EXISTS runs for them.
-        # A show with no synced episode data at all is kept too (see
-        # _known_aired_episode_clause's docstring) — there's no evidence
-        # it's caught up, just no data yet.
-        query = query.filter(
-            or_(
-                Title.media_type != MediaType.tv_show,
-                ~_known_aired_episode_clause(),
-                _unwatched_aired_episode_clause(),
-            )
-        )
-        has_new_episode = _unwatched_aired_episode_clause(newer_than_last_watched=True)
-        query = query.add_columns(has_new_episode.label("has_new_episode")).order_by(
-            LibraryEntry.last_watched_at.desc().nullslast()
-        )
-        # Re-ranked in Python, not SQL: position #1 always stays the single
-        # most-recently-watched item (last_watched_at's own top row) — a show
-        # with a fresh unwatched episode bubbles to #2, ahead of older
-        # last_watched_at rows without one, but never displaces #1 itself.
-        # Expressing "row 1 is exempt from the boost" as one ORDER BY key
-        # isn't possible without a self-referencing window function; doing it
-        # here, over a per-user "watching" list that's never large, is
-        # simpler and just as correct. Runs over the un-limited result (only
-        # `offset` applied at the SQL level) so a boosted show further down
-        # the last_watched order can still surface within `limit`.
-        rows = query.offset(offset).all()
-        if rows:
-            head, *rest = rows
-            rest.sort(key=lambda pair: not pair.has_new_episode)  # stable: new-episode rows first
-            rows = [head, *rest]
-        entries = [entry for entry, _has_new in rows[:limit]]
+        query = query.filter(watch_next_filter()).add_columns(newest_new_episode_aired())
+        # ranked over the whole list, then paged, so pages never overlap
+        entries = rank_watch_next(query.order_by(*watch_next_order()).all())[offset : offset + limit]
     else:
         query = query.order_by(LibraryEntry.updated_at.desc())
         entries = query.offset(offset).limit(limit).all()

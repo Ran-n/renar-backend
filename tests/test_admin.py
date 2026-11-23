@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.847810
-Revised: 2026/11/09 23:36:41.962902
+Revised: 2026/11/22 03:03:52.975132
 
 Admin panel: HTTP Basic gate and the user-delete action.
 """
@@ -320,7 +320,12 @@ def test_admin_delete_comment_removes_comment_and_likes(client, admin_enabled, a
     comment = _post_comment(client, alice_headers, "soon to be gone")
     assert client.post(f"/comments/{comment['id']}/like", headers=bob_headers).status_code == 204
 
-    r = client.post(f"/admin/comments/{comment['id']}/delete", headers=admin_enabled, follow_redirects=False)
+    r = client.post(
+        f"/admin/comments/{comment['id']}/delete",
+        data={"reason": "spam"},
+        headers=admin_enabled,
+        follow_redirects=False,
+    )
     assert r.status_code == 303
 
     db = SessionLocal()
@@ -1120,7 +1125,13 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
 
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code_val},
+        json={
+            "accepts_terms": True,
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": PASSWORD,
+            "invite_code": code_val,
+        },
     )
     assert r.status_code == 400
 
@@ -1130,7 +1141,9 @@ def test_revoked_invite_cannot_register(client, admin_enabled):
 
 def test_admin_ban_user(client, admin_enabled, alice):
     user, _ = alice
-    r = client.post(f"/admin/users/{user['id']}/ban", headers=admin_enabled, follow_redirects=False)
+    r = client.post(
+        f"/admin/users/{user['id']}/ban", data={"reason": "spam"}, headers=admin_enabled, follow_redirects=False
+    )
     assert r.status_code == 303
     db = SessionLocal()
     try:

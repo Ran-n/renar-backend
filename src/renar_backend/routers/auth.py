@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.560889
-Revised: 2026/11/09 11:49:59.719632
+Revised: 2026/11/22 01:52:25.301040
 """
 
 import html
@@ -161,6 +161,13 @@ def register(data: UserCreate, request: Request, background_tasks: BackgroundTas
             detail="Registration is currently closed",
         )
 
+    if not data.accepts_terms:
+        _log.info("registration rejected: terms not accepted (username=%r)", data.username)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="You must accept the Terms of Service",
+        )
+
     secret_key = settings.turnstile_secret_key_for(request.url.hostname, ss.turnstile_dev_hostnames)
     if not verify_turnstile(
         data.turnstile_token, client_ip(request), enabled=ss.turnstile_enabled, secret_key=secret_key
@@ -258,6 +265,7 @@ def register(data: UserCreate, request: Request, background_tasks: BackgroundTas
         # SiteSettings.email_confirmation_enabled's docstring in models.py).
         email_confirmed=not ss.email_confirmation_enabled,
         email_confirmation_bypassed=not ss.email_confirmation_enabled,
+        terms_accepted_at=utcnow(),
     )
     db.add(user)
     if invite is not None:

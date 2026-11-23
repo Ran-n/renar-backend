@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:29:43.383581
-Revised: 2026/11/11 17:42:29.053514
+Revised: 2026/11/23 12:52:18.202673
 
 Load test: drives a short headless locust run (tests/load/locustfile.py)
 against a live_server and asserts the backend survived it — zero failed
@@ -53,7 +53,7 @@ def test_backend_survives_a_short_burst_of_concurrent_load(live_server):
             ],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=180,  # a cold start can take most of a minute before the 15 s run
         )
         stats_file = Path(f"{csv_prefix}_stats.csv")
         if not stats_file.exists():

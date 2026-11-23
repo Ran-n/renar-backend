@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 18:19:17.543016
-Revised: 2026/11/14 16:40:52.614233
+Revised: 2026/11/23 11:49:59.747288
 
 Write-through persistence for TMDB data (see TmdbCache in models.py).
 
@@ -216,12 +216,17 @@ def cached_tmdb(
     path: str,
     season: int = NO_SEASON,
     language: str = "en",
+    newer_than: datetime | None = None,
 ) -> dict:
     """Fetch a raw TMDB payload through the persistent cache.
 
     Fresh stored copy -> served without contacting TMDB. Stale or missing
     -> fetched (and persisted when the title is tracked). TMDB down ->
     stale copy if one exists, else the fetch error propagates.
+
+    `newer_than`: a stored copy fetched before this moment counts as stale
+    however young it is, for a caller that knows the data changed since. It
+    also skips tmdb_get's in-memory copy, which is that same old data.
 
     `language` is a separate cache dimension: only the "en" copy syncs the
     typed Title/Episode columns (see sync_title_details/sync_episodes) —
@@ -231,7 +236,8 @@ def cached_tmdb(
     row = None
     if title is not None:
         row = db.query(TmdbCache).filter_by(title_id=title.id, kind=kind, season=season, language=language).first()
-        if row is not None and _is_fresh(row.fetched_at):
+        outdated = row is not None and newer_than is not None and row.fetched_at < newer_than
+        if row is not None and not outdated and _is_fresh(row.fetched_at):
             return row.payload
 
     locale = TMDB_LOCALE.get(language)
@@ -241,7 +247,7 @@ def cached_tmdb(
     if kind == "details":
         params["append_to_response"] = "external_ids"
     try:
-        data = tmdb_get(path, params or None)
+        data = tmdb_get(path, params or None, cache=newer_than is None)
     except HTTPException as exc:
         if row is not None:
             _log.warning("TMDB unavailable (%s), serving stored copy of %s: %s", exc.detail, path, exc.status_code)
@@ -258,7 +264,9 @@ def cached_tmdb(
 
 def sync_episodes(db: Session, title: Title, season_number: int, data: dict) -> None:
     """Upsert Episode rows from a raw TMDB season payload (single write
-    path for the episodes table, mirroring sync_title_details)."""
+    path for the episodes table, mirroring sync_title_details). Each insert
+    has its own savepoint: the background jobs and a request can sync the
+    same show at once, and the loser must not lose its whole transaction."""
     for e in data.get("episodes", []):
         episode_number = e.get("episode_number")
         if episode_number is None:
@@ -271,15 +279,21 @@ def sync_episodes(db: Session, title: Title, season_number: int, data: dict) -> 
         if row is not None:
             row.name = name
             row.air_date = air_date
-        else:
-            db.add(
-                Episode(
-                    title_id=title.id,
-                    season=season_number,
-                    episode_number=episode_number,
-                    name=name,
-                    air_date=air_date,
+            continue
+        try:
+            with db.begin_nested():
+                db.add(
+                    Episode(
+                        title_id=title.id,
+                        season=season_number,
+                        episode_number=episode_number,
+                        name=name,
+                        air_date=air_date,
+                    )
                 )
+        except IntegrityError:
+            _log.info(
+                "episode (%s, s%se%s) already inserted by a concurrent sync", title.id, season_number, episode_number
             )
 
 
@@ -288,9 +302,12 @@ def sync_show_episodes(db: Session, title: Title, deadline: float | None = None)
     at a time, through the same persistent TMDB cache season_tmdb() uses.
 
     A season already fully captured (its last known episode aired in the
-    past) is skipped without contacting TMDB — only seasons that are new,
-    unannounced, or still airing get fetched, so a show whose history is
-    already synced costs nothing but a few indexed DB reads per request.
+    past, and the show's details announce none after it) is skipped without
+    contacting TMDB — only seasons that are new, unannounced, or still airing
+    get fetched, so a show whose history is already synced costs nothing but
+    a few indexed DB reads per request. "Aired in the past" alone isn't
+    enough: TMDB often adds a season's episodes a few at a time, and between
+    two of them the season would look finished and never be fetched again.
 
     `deadline` (a `time.monotonic()` value) bounds how long a *caller on the
     request path* lets this run: once past it, remaining seasons are left
@@ -303,32 +320,79 @@ def sync_show_episodes(db: Session, title: Title, deadline: float | None = None)
     """
     if title.tmdb_id is None or not title.total_seasons:
         return
-    today = date.today()
+    announced, announced_at = _announced_episodes(db, title)
     for season_number in range(1, title.total_seasons + 1):
         if deadline is not None and time.monotonic() > deadline:
             break
-        latest = (
-            db.query(Episode)
-            .filter_by(title_id=title.id, season=season_number)
-            .order_by(Episode.episode_number.desc())
-            .first()
-        )
-        if latest is not None and latest.air_date is not None and latest.air_date < today:
+        latest = _latest_episode(db, title, season_number)
+        behind = latest is not None and latest.episode_number < announced.get(season_number, 0)
+        if latest is not None and latest.air_date is not None and latest.air_date < date.today() and not behind:
             continue
-        try:
-            data = cached_tmdb(
-                db,
-                title.media_type,
-                title.tmdb_id,
-                "season",
-                f"/tv/{title.tmdb_id}/season/{season_number}",
-                season=season_number,
-            )
-        except HTTPException as exc:
-            _log.warning("episode sync skipped for title %s season %s: %s", title.id, season_number, exc.detail)
-            continue
-        sync_episodes(db, title, season_number, data)
+        _fetch_season(db, title, season_number, announced_at if behind else None)
     db.commit()
+
+
+def sync_announced_seasons(db: Session, title: Title) -> None:
+    """Sync only the seasons whose announced episodes (see
+    _announced_episodes) the catalog doesn't have yet. For a caller that just
+    stored fresh details: a new episode reaches the catalog, and so Home's
+    Watch Next, in the same pass, without a full backfill."""
+    if title.tmdb_id is None:
+        return
+    announced, announced_at = _announced_episodes(db, title)
+    for season_number, episode_number in announced.items():
+        latest = _latest_episode(db, title, season_number)
+        if latest is None or latest.episode_number < episode_number:
+            _fetch_season(db, title, season_number, announced_at)
+    db.commit()
+
+
+def _announced_episodes(db: Session, title: Title) -> tuple[dict[int, int], datetime | None]:
+    """The highest episode number per season that the show's stored details
+    name as last aired or next to air, and when those details were fetched.
+
+    Compared against the highest number stored, not row by row: TMDB
+    sometimes renumbers (details say S4E12 while the season lists 13-24), and
+    a missing exact number would refetch such a season forever. Season 0
+    (specials) is left out, as in sync_show_episodes."""
+    row = db.query(TmdbCache).filter_by(title_id=title.id, kind="details", season=NO_SEASON, language="en").first()
+    if row is None:
+        return {}, None
+    announced: dict[int, int] = {}
+    for key in ("last_episode_to_air", "next_episode_to_air"):
+        episode = row.payload.get(key) or {}
+        season_number, episode_number = episode.get("season_number"), episode.get("episode_number")
+        if season_number and episode_number:
+            announced[season_number] = max(episode_number, announced.get(season_number, 0))
+    return announced, row.fetched_at
+
+
+def _latest_episode(db: Session, title: Title, season_number: int) -> Episode | None:
+    return (
+        db.query(Episode)
+        .filter_by(title_id=title.id, season=season_number)
+        .order_by(Episode.episode_number.desc())
+        .first()
+    )
+
+
+def _fetch_season(db: Session, title: Title, season_number: int, newer_than: datetime | None) -> None:
+    """Fetch one season and upsert its episodes; a failed fetch is logged and
+    left for the next run, so one season never stops the others."""
+    try:
+        data = cached_tmdb(
+            db,
+            title.media_type,
+            title.tmdb_id,
+            "season",
+            f"/tv/{title.tmdb_id}/season/{season_number}",
+            season=season_number,
+            newer_than=newer_than,
+        )
+    except HTTPException as exc:
+        _log.warning("episode sync skipped for title %s season %s: %s", title.id, season_number, exc.detail)
+        return
+    sync_episodes(db, title, season_number, data)
 
 
 # How long a request waits for ensure_seasons_synced's catalog sync. Long

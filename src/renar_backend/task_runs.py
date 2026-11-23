@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/08/24 12:39:04.684218
+Revised: 2026/11/22 01:52:25.732663
 
 Periodic-task tracking: each background task (see TASKS) is independently
 enabled, independently scheduled, and reports its own run status — one
@@ -101,7 +101,9 @@ TASKS: list[TaskSpec] = [
     TaskSpec(
         "account_purge",
         "Account purge",
-        "Permanently delete accounts past their self-requested deletion grace period.",
+        "Permanently delete accounts past their self-requested deletion grace period, "
+        "forget released usernames past their cooldown, and delete moderation decisions "
+        "6 months after their measure ended.",
         "Security",
         360,
     ),

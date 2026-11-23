@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/07 13:28:52.145659 )
-[//]: # (+ Revised: 	2026/11/15 11:56:14.287872 )
+[//]: # (+ Revised: 	2026/11/23 16:25:53.833694 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Renar Backend
@@ -71,6 +71,47 @@ uv run alembic upgrade head
 # uv run be reloads by itself; otherwise restart it
 ```
 
+### Backups
+
+Prod dumps its database every night at 03:30 UTC: `renar-backup.timer`
+runs `/usr/local/bin/renar-backup` (source: `scripts/backup/`), which writes
+`/var/backups/renar/renar-<date>.dump` (`pg_dump -F c`) with a BLAKE3
+`.b3` beside it and keeps 14 days. The build PC holds the off-host copy: the
+scheduled task **Renar prod backup pull** runs `uv run backup-pull --dest <folder>`
+(default `~/backups/renar-prod`) daily at 09:00, or at the next start if the
+PC was off. It copies each new dump (refused unless its BLAKE3 matches),
+mirrors `media/` into `media/`, moves images deleted on prod into
+`media-deleted/<date>/`, and prunes both after 14 days. It reaches the VPS
+through the SSH alias `renar-prod` in `~/.ssh/config` (override with
+`--host` or `RENAR_BACKUP_HOST`), and logs to `backup-pull.log` in the
+destination.
+
+Install or update the VPS side from the repo root:
+
+```bash
+scp scripts/backup/renar-backup renar-prod:/usr/local/bin/
+scp scripts/backup/renar-backup.{service,timer} renar-prod:/etc/systemd/system/
+ssh renar-prod 'chmod 755 /usr/local/bin/renar-backup; systemctl daemon-reload; systemctl enable --now renar-backup.timer'
+```
+
+Check it: `systemctl list-timers renar-backup.timer` shows the next run, and a
+failed run shows in `systemctl --failed`; on the PC, the task's *Last Run
+Result* is 0 and `backup-pull.log` ends with `backup-pull done`.
+
+Restore a dump (into a scratch database first, then swap it in once it looks
+right):
+
+```bash
+sudo -u postgres createdb renar_restore
+sudo -u postgres pg_restore --no-owner --no-privileges -d renar_restore /var/backups/renar/renar-<date>.dump
+# compare, e.g. SELECT count(*) FROM users; in both, then stop renar-backend,
+# rename the databases, reassign ownership to the renar role and start it again
+```
+
+For a dump from the PC, `scp` it to the VPS first; restore the images with
+`scp -r` of the matching `media/` folders into `/opt/renar-backend/media`
+(owner `renar`).
+
 ## HTTPS
 
 Local development runs over plain HTTP (traffic never leaves the machine /
@@ -115,7 +156,8 @@ API docs: http://127.0.0.1:8000/docs
   `renar-<version>-<abi>.apk`
 - `GET /auth/registration-status` — unauthenticated; returns `registration_open` and
   `invite_only` so the signup screen can render the invite-code field before submission
-- `POST /auth/register` — create account (also accepts `invite_code` when
+- `POST /auth/register` — create account; needs `accepts_terms: true`, 422
+  without it (also accepts `invite_code` when
   `site_settings.invite_only` is `true`)
 - `POST /auth/login` — get JWT token (form fields: username, password; username also accepts email)
 - `GET /auth/me` — current user; `DELETE /auth/me` — delete account (cleans up all data)
@@ -233,7 +275,13 @@ API docs: http://127.0.0.1:8000/docs
     is bounded), plus connections- and signups-per-day. Each endpoint drills into
     its callers (`/usage/endpoint?method=&path=`), which link back to user pages.
   - **Comment manager** (`/comments?user_id=...`) — full comment text with
-    per-comment delete.
+    per-comment delete (a reason from the Terms is required) and "Dismiss
+    reports" on reported ones.
+  - **Moderation Decisions** (`/decisions`) — every removal and restriction
+    with its reason, whether it followed a report, and whether the
+    statement-of-reasons e-mail reached the user ("Send again" when it
+    didn't); kept until 6 months after the measure ends. See
+    [anti-abuse.md](docs/anti-abuse.md#moderation-by-people).
   - **Banned IPs** (`/bans`) — review and lift honeypot bans.
   - **Site Settings** (`/settings`) — toggle registration open/invite-only and tune
     all anti-abuse limits (rate limits, flood threshold, login backoff, probe

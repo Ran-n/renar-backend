@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:51.980396 )
-[//]: # (+ Revised: 	2026/11/16 00:44:49.120753 )
+[//]: # (+ Revised: 	2026/11/23 21:05:51.766987 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Changelog
@@ -11,6 +11,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- Sign-up asks you to confirm you're 14 or older and accept the Terms and
+  Privacy Policy: `POST /auth/register` refuses an account without
+  `accepts_terms: true` (422) and stores when it was accepted
+  (`users.terms_accepted_at`). App versions up to 0.24.1 can't create
+  accounts any more; signing in still works
+- Moderation decisions are recorded and the user gets an e-mail with the
+  reasons: removing a comment or review, suspending or closing an account,
+  changing a username or withdrawing review rights as a measure, and
+  dismissing reports. Each needs a reason from the Terms; people who
+  reported the content are told the outcome; the admin panel has a
+  "Moderation Decisions" page with each e-mail's status and a "Send again"
+  button, and comments and reviews get a "Dismiss reports" action. The
+  e-mails are in the user's app language
+- `uv run backup-pull` copies the production database dumps and images to
+  this PC (scheduled daily); the server dumps the database nightly and
+  keeps 14 days
+- The Terms of Service and the privacy policy say who runs Renar (Breren)
+  and are available in Spanish
+
+### Changed
+
+- Server logs are kept for 30 days: both log files roll over at midnight
+  UTC instead of by size, and self-update logs older than 30 days are
+  deleted
+- Home's Watch Next list: what you watched last stays #1, then shows you've
+  started that have a new episode (newest first), then the rest by when you
+  last watched them. Shows you never started no longer count as having new
+  episodes and come last
+
+### Fixed
+
+- The first requests on a new database no longer fail with a 500 when several
+  arrive at once (they raced to create the site settings)
+- New episodes of a show you were up to date with reach Home: TMDB often
+  adds a season's episodes a few at a time, and between two of them the
+  season counted as finished and was never fetched again. The new-episode
+  check now also fetches the season of any episode it finds missing
+- Imported shows had no last-watched date, so Home showed the same
+  arbitrary list whatever you watched. Both imports now set it from the
+  imported watch dates, and a migration fixes existing accounts
+- Deleted released usernames once their cooldown ends (the account purge
+  task now does it)
+
+### Security
+
+- Hid a library entry's notes and personal link from other users
+  (`GET /users/{id}/media`)
+- Removed leaked personal data (an e-mail address, a username, a user
+  folder name and a LAN address) from the repository history and from the
+  source archives of releases 0.20.0 to 0.23.0
 
 ## [0.23.0] - 2026-11-16
 

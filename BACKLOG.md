@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/11/14 16:40:50.586421 )
-[//]: # (+ Revised: 	2026/11/15 11:56:20.851748 )
+[//]: # (+ Revised: 	2026/11/22 03:03:53.200781 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -12,7 +12,11 @@ up by "do next". Items are light on purpose: the full spec is written when
 an item is promoted to `TODO.md`, against the code as it is then. Items
 parked from `TODO.md` on 2026-11-14 keep their original text under Notes.
 
-Next backlog number: 19
+| To do | Backlog |
+|:-----:|:-------:|
+| **6** | **32** |
+
+Next backlog number: 35
 
 ## Index
 
@@ -33,6 +37,21 @@ Next backlog number: 19
 - [B15. Diary: list every rewatch as its own entry](#b15-diary-list-every-rewatch-as-its-own-entry)
 - [B16. Community average for season grades](#b16-community-average-for-season-grades)
 - [B17. Streaming availability: country, subscribed services and a library filter](#b17-streaming-availability-country-subscribed-services-and-a-library-filter)
+- [B19. Stop the worker threads and close the HTTP clients cleanly on shutdown](#b19-stop-the-worker-threads-and-close-the-http-clients-cleanly-on-shutdown)
+- [B20. Keep confirmation codes, invite codes and e-mail addresses out of the logs, and make the log level configurable](#b20-keep-confirmation-codes-invite-codes-and-e-mail-addresses-out-of-the-logs-and-make-the-log-level-configurable)
+- [B21. Test the migrations down to base and through every revision with data](#b21-test-the-migrations-down-to-base-and-through-every-revision-with-data)
+- [B22. Add live tests against TMDB, TheTVDB, Brevo and Turnstile](#b22-add-live-tests-against-tmdb-thetvdb-brevo-and-turnstile)
+- [B23. Add rendered browser tests for the admin panel](#b23-add-rendered-browser-tests-for-the-admin-panel)
+- [B24. Fetch TMDB in parallel in the notifier checks and the translation warm-up](#b24-fetch-tmdb-in-parallel-in-the-notifier-checks-and-the-translation-warm-up)
+- [B25. Enforce the clean-code limits with ruff and a file-length check](#b25-enforce-the-clean-code-limits-with-ruff-and-a-file-length-check)
+- [B26. Split `users/tvtime_import.py` into a package by import stage](#b26-split-userstvtime_importpy-into-a-package-by-import-stage)
+- [B27. Split the admin panel page modules](#b27-split-the-admin-panel-page-modules)
+- [B28. Split `models.py` and `schemas.py` by domain](#b28-split-modelspy-and-schemaspy-by-domain)
+- [B29. Split the remaining files over 500 lines](#b29-split-the-remaining-files-over-500-lines)
+- [B30. Choose a source-tree skeleton for Python FastAPI backends and move to it](#b30-choose-a-source-tree-skeleton-for-python-fastapi-backends-and-move-to-it)
+- [B31. Add the file header to the 48 files that lack it](#b31-add-the-file-header-to-the-48-files-that-lack-it)
+- [B32. Rename the default branch from `master` to `main` on every forge](#b32-rename-the-default-branch-from-master-to-main-on-every-forge)
+- [B33. Rewrite the README as a landing page](#b33-rewrite-the-readme-as-a-landing-page)
 
 ## Using the backlog
 
@@ -42,6 +61,8 @@ Next backlog number: 19
   end, then increase that number. Deleting leaves a gap; nothing is renumbered.
 - Keep the Index in file order: one `- [B<n>. title](#anchor)` line per item;
   update it whenever an item is added, retitled or deleted.
+- Keep the count table above the Index equal to the items here and in `TODO.md`,
+  in both files.
 - Screenshots go in `docs/todo/B<n>-<slug>.png`, linked from the item.
 - To build an item, promote it: it becomes a full `TODO.md` item and leaves
   this file.
@@ -785,3 +806,361 @@ half is renar-frontend's backlog item B22.
 9. `src/renar_backend/users/security.py`: any new code path that can
    strike or ban must check `site_settings.exempt_ips` first (none is
    expected; check).
+
+## B19. Stop the worker threads and close the HTTP clients cleanly on shutdown
+
+**Added:** 2026-11-21 · Area: Reliability
+**Why:** `~/.claude/memory/feedback_universal_behaviours.md` says every
+thread, background worker and child process is stopped cleanly before the
+process exits, on every quit path. Today the FastAPI `lifespan` in
+`src/renar_backend/main.py` cancels only the eight periodic tasks from
+`social/notifier.py::start_periodic_tasks`. Imports run on bare daemon
+threads (`routers/imports.py` line 140, `threading.Thread(target=_run,
+daemon=True)`), data exports on a daemon `export-worker` thread
+(`users/export_queue.py` line 78), and both die mid-work when the worker
+exits (a self-update reload, a `systemctl restart`). The module-level
+`httpx.Client`s (`tmdb/tmdb_http.py` `http_client` and `image_http_client`,
+`tvdb/tvdb_http.py`, `users/email_confirmation.py`, `users/turnstile.py`)
+are never closed, and `engine.dispose()` only runs in the stale-plan
+handler. The interruption is reported ("Import was interrupted by a server
+restart. Please re-run it.", `routers/imports.py` line 178), so nothing is
+lost silently, but the user has to start over.
+**Goal:** on shutdown the server stops taking new imports and exports, lets
+running ones finish or stop at a safe point within a bounded time, closes
+every HTTP client and disposes the engine, and logs each step.
+
+### Notes
+- Found by the standards audit (former item 38).
+- uvicorn's `timeout_graceful_shutdown` is already capped in `__main__.py`
+  (`_serve`) because `/events` SSE streams never close by themselves; the
+  worker drain must fit inside that cap.
+- Imports commit per entry (`docs/design-decisions.md`, "Renar-export
+  reconcile locks the row and commits per entry"), so stopping between
+  entries is safe; the export worker would need its partial file removed.
+- Tests: the checklist's Shutdown/lifecycle row in
+  `~/.claude/memory/feedback_tests.md` (each quit path, assert the thread
+  ended and the clients are closed).
+
+## B20. Keep confirmation codes, invite codes and e-mail addresses out of the logs, and make the log level configurable
+
+**Added:** 2026-11-21 · Area: Logging / Security
+**Why:** `~/.claude/memory/feedback_logging.md` says never to log secrets,
+raw tokens or PII, and that the log level comes from `LOG_LEVEL`
+(default `INFO`). Today `users/email_confirmation.py` line 135 logs, at
+INFO, the full e-mail address and the confirmation code whenever
+`BREVO_API_KEY` is unset; `routers/admin/invites.py` lines 754, 771, 816
+and 833 log the invite code itself on revoke, restore, reset and delete.
+The level is hard-coded: `main.py` calls `logging.basicConfig(level=
+logging.INFO, …)` at import time and `__main__.py::_log_config` sets the
+root logger to `"INFO"`; there is no `LOG_LEVEL` setting in `config.py` or
+`docs/environment-variables.md`. App modules log through the root logger
+(64 `getLogger(__name__)` calls) instead of a `renar_backend` logger with
+`propagate = False`.
+**Goal:** the logs name the account (user id) and the invite's id, never a
+code or an address; `LOG_LEVEL=DEBUG` in `.env` makes the server verbose
+without a code change.
+
+### Notes
+- Found by the standards audit (former item 38).
+- With Brevo unset (the dev PC) the code is still needed to test
+  registration: decide how a developer gets it (for example only when
+  `LOG_LEVEL=DEBUG` and the address masked), and write the choice in
+  `docs/design-decisions.md`.
+- `tests/test_logging_config.py` and `tests/test_main_logging.py` pin the
+  current config and must change with it; add `caplog` tests asserting no
+  code or address reaches any record.
+
+## B21. Test the migrations down to base and through every revision with data
+
+**Added:** 2026-11-21 · Area: Tests
+**Why:** `~/.claude/memory/feedback_tests.md` (checklist, "Migrations")
+wants `alembic upgrade head` on an empty DB, then `downgrade base`, then
+upgrade again, plus a walk through every revision one at a time with data
+inserted once its tables exist, checking the data survives each step.
+`tests/test_migrations.py` only upgrades an empty schema to head and
+compares it with the models and triggers
+(`test_upgrade_from_empty_reaches_head`,
+`test_migrated_schema_matches_the_models`,
+`test_migrated_triggers_match_create_all`); no test ever runs a
+`downgrade()`, although all 87 revisions in `alembic/versions/` define one.
+**Goal:** a broken `downgrade()` or a revision that drops data fails the
+suite.
+
+### Notes
+- Found by the standards audit (former item 38).
+- Uses the same throwaway Postgres schema pattern as `tests/conftest.py`
+  (`_SCHEMA`, `search_path`); the walk can be slow, so consider its own
+  marker kept out of the default run but inside the coverage run.
+
+## B22. Add live tests against TMDB, TheTVDB, Brevo and Turnstile
+
+**Added:** 2026-11-21 · Area: Tests
+**Why:** `~/.claude/memory/feedback_tests.md` (checklist, "Live") wants a
+`live` marker for tests against the real external APIs, kept out of the
+default run but run before every version bump
+(`~/.claude/memory/feedback_version_bump.md` step 2). The backend calls
+four services (`tmdb/tmdb_http.py`, `tvdb/tvdb_http.py`,
+`users/email_confirmation.py` for Brevo, `users/turnstile.py` for
+Cloudflare Turnstile) and every test mocks them, so a changed response
+shape or a retired endpoint only shows up in production.
+**Goal:** `uv run pytest -m live` checks that each service still answers in
+the shape the code parses.
+
+### Notes
+- Found by the standards audit (former item 38).
+- Needs the API keys from `.env`; skip with a clear reason when a key is
+  missing, never pass silently. Add `live` to `addopts`' exclusions and to
+  `pyproject.toml`'s `markers`, and list the command in `README.md`'s Tests.
+- Brevo: use its account/sender endpoint, not a real send. Turnstile: the
+  documented always-pass test secret.
+
+## B23. Add rendered browser tests for the admin panel
+
+**Added:** 2026-11-21 · Area: Tests / Admin panel
+**Why:** `~/.claude/memory/feedback_tests_rendered_ui.md` wants every UI
+screen tested in the real running app (real clicks, pixel or DOM
+assertions, reviewed baselines), and `feedback_ui_tests_hidden.md` wants
+those runs headless by default with `<APP>_SHOW_TEST_WINDOW=1` to show
+them. The admin panel (`routers/admin/`: dashboard, users, invites,
+moderation, reports, premium, settings, periodic tasks, app releases,
+server update, analytics, login) is server-rendered HTML with inline
+JavaScript (the refresh button, the hostname and IP chip inputs in
+`settings.py`, `confirm()` prompts), and is only tested as strings and
+HTTP responses (`tests/test_admin.py`, `tests/test_admin_render.py`).
+Nothing proves the page looks right or that its scripts work.
+**Goal:** a Playwright suite (marker `ui`) logs in to the admin panel
+against a throwaway DB, clicks through every page in light and narrow
+widths, and compares each with a reviewed baseline.
+
+### Notes
+- Found by the standards audit (former item 38).
+- Playwright is already used by renar-frontend (system Python; see the
+  project memory `renar-frontend-ui-verification-workflow.md`).
+- Headless by default (`RENAR_BACKEND_SHOW_TEST_WINDOW=1` for headed);
+  never move the real mouse (`feedback_ui_tests_no_input_hijack.md`).
+- Baselines must show only demo data (`feedback_tests_rendered_ui.md`,
+  "Nothing personal on screen").
+- The integration fixtures' live server (`_test_server.py`) can host it.
+
+## B24. Fetch TMDB in parallel in the notifier checks and the translation warm-up
+
+**Added:** 2026-11-21 · Area: Performance
+**Why:** `~/.claude/memory/feedback_parallel_code.md` says independent I/O
+runs concurrently through a bounded pool, and a sequential loop over it is
+a defect. `social/notifier.py` fetches TMDB one title at a time in the
+episode check (loop at line 84), the film check (line 179) and the
+unmatched-title retry (line 302), and `tmdb/tmdb_store.py`'s
+`warm_title_translations` (line 123) does the same per title. With a large
+catalogue each check takes as long as the sum of its round trips.
+**Goal:** these loops fan out through a bounded pool, keep their results in
+order, log each failed title on its own, and finish in a fraction of the
+time.
+
+### Notes
+- Found by the standards audit (former item 38).
+- `_tmdb_metadata_resync_loop` paces itself on purpose (`time.sleep
+  (pace_seconds)`, line 250, "no rate limiting in tmdb_http.py"); keep that
+  one sequential and say why beside it. Size the pool under TMDB's rate
+  limit and write the limit beside the cap.
+- DB sessions are not thread-safe: fetch in the pool, write in one session
+  afterwards (see the per-title session note in
+  `docs/design-decisions.md`, "`warm_title_translations` opens one DB
+  session per title").
+- Tests: ordering, one failure among successes, the cap honoured.
+
+## B25. Enforce the clean-code limits with ruff and a file-length check
+
+**Added:** 2026-11-21 · Area: Code quality
+**Why:** `~/.claude/memory/feedback_clean_code.md` (Enforcement) wants the
+size and complexity limits checked by the linter, and
+`~/.claude/memory/reference_lint_configs.md` gives the Python settings:
+select `C901`, `PLR0911`-`PLR0917`, `PLR1702`, `RUF100`, `PGH004`, with
+`max-complexity = 10`, `max-args = 4`, `max-positional-args = 3`,
+`max-statements = 25`, `max-branches = 10`, `max-nested-blocks = 3`,
+`max-locals = 10`, plus `pylint --disable=all --enable=C0302
+--max-module-lines=500` for file length and a check that every `# noqa`
+carries a reason. `pyproject.toml` selects only `E, F, I, B, UP, SIM`.
+Run with those limits on 2026-11-21, ruff reports 330 findings in `src/`
+(123 PLR0917, 57 PLR0913, 30 PLR1702, 30 PLR0915, 17 PLR0914, 16 C901,
+14 PLR0912, 3 PLR0911, plus 40 boolean-flag FBT findings); 75 functions
+are over 40 lines and 14 files over 500 lines.
+**Goal:** `uv run ruff check` enforces the limits; every existing violation
+is either fixed by items B26-B29 or carries a `# noqa: <CODE> <reason>`.
+
+### Notes
+- Found by the standards audit (former item 38).
+- Land the config with per-file ignores for the files B26-B29 will split,
+  and remove each ignore with its split, so the repo is never red.
+- The two existing `# noqa: UP037` lines (`models.py` 885, `schemas.py`
+  945) already carry reasons.
+
+## B26. Split `users/tvtime_import.py` into a package by import stage
+
+**Added:** 2026-11-21 · Area: Code structure
+**Why:** `~/.claude/memory/feedback_clean_code.md` sets a hard stop at 500
+lines per file and 40 lines per function. `users/tvtime_import.py` is 1651
+lines; its `run` function is 744 lines, `_upsert_library_entry` 125 and
+`_process_show` 99.
+**Goal:** the TV Time import is a `users/tvtime_import/` package with one
+module per stage (parsing the export, matching titles, writing the
+library, lists, progress), each under 200 lines, with the same behaviour
+and tests.
+
+### Notes
+- Found by the standards audit (former item 38). After B25.
+- Tests: `tests/test_imports.py` (1395 lines) and
+  `tests/test_tvtime_import_gaps.py` (2460 lines) pin it; split them along
+  the same lines. Grep every importer of `tvtime_import` first
+  (`routers/imports.py`).
+
+## B27. Split the admin panel page modules
+
+**Added:** 2026-11-21 · Area: Code structure / Admin panel
+**Why:** `~/.claude/memory/feedback_clean_code.md` hard stops (500-line
+files, 40-line functions). `routers/admin/users.py` is 1210 lines,
+`invites.py` 834, `settings.py` 710, `_html.py` 636; the page renderers are
+single functions of HTML f-strings: `_render_invites` 481 lines,
+`_render_site_settings` 470, `_render_users` 237, `_render_user_detail`
+104, `moderation._render_comments` 101. Handlers, queries and markup sit in
+one file, against the rule's separation of concerns.
+**Goal:** each admin page has its handlers, its queries and its markup in
+separate modules (a template per page, or small render functions per
+card), each file under 200 lines.
+
+### Notes
+- Found by the standards audit (former item 38). After B25; B23's rendered
+  tests should exist first so the split can be checked visually.
+- `docs/design-decisions.md`, "Admin panel: server-rendered HTML behind a
+  login form + TOTP", keeps server-rendered HTML; a template engine
+  (Jinja2) would be a new dependency, so record the choice there.
+
+## B28. Split `models.py` and `schemas.py` by domain
+
+**Added:** 2026-11-21 · Area: Code structure
+**Why:** `~/.claude/memory/feedback_clean_code.md` hard stop of 500 lines
+per file. `models.py` is 1534 lines and `schemas.py` 1258, each holding
+every domain (users, titles, library, social, imports, admin, premium).
+**Goal:** `models/` and `schemas/` packages with one module per domain,
+each under 500 lines, and every import site updated.
+
+### Notes
+- Found by the standards audit (former item 38). After B25.
+- No re-export shims: the rule forbids renaming re-exports and code in
+  `__init__.py`, so every importer changes (grep `from .models import`,
+  `from renar_backend.models import`, Alembic's `env.py`).
+- `tests/test_normalization.py` and `tests/snapshots/*.json` must stay
+  green unchanged; mutmut's `paths_to_mutate` in `pyproject.toml` names
+  both files.
+
+## B29. Split the remaining files over 500 lines
+
+**Added:** 2026-11-21 · Area: Code structure
+**Why:** `~/.claude/memory/feedback_clean_code.md` hard stop of 500 lines
+per file, 40 per function. Besides B26-B28: `routers/media.py` 1504 lines
+(`list_media` 101), `routers/auth.py` 781 (`register` 136),
+`update_check.py` 616, `users/security.py` 603, `social/notifier.py` 557,
+`users/renar_import.py` 550 (`_import_library` 101), `routers/tmdb.py`
+509. Also over 40 lines: `_test_server.py::main` 171,
+`routers/upcoming.py::get_upcoming_history` 126,
+`catalog/titles.py::merge_titles` 117, `routers/stats.py::get_stats` 114.
+**Goal:** each of these files is split by responsibility, under 500 lines,
+and each listed function under 40, with behaviour unchanged.
+
+### Notes
+- Found by the standards audit (former item 38). After B25. Can be done one
+  file per sitting; promote one file at a time.
+
+## B30. Choose a source-tree skeleton for Python FastAPI backends and move to it
+
+**Added:** 2026-11-21 · Area: Code structure
+**Why:** `~/.claude/memory/feedback_source_organization.md` has an approved
+skeleton only for Rust + gpui; for any other stack the rule is to propose
+one (an instance of the base skeleton: `app/`, `model/<domain>/`, a
+delivery layer such as `api/` in place of `ui/`, `platform/`, `tools/`,
+build-enforced packages), get the user's approval and save it. This repo is
+one package, `src/renar_backend/`, mixing top-level modules (`models.py`,
+`schemas.py`, `update_check.py`, `self_update.py`, `db_triggers.py`) with
+domain folders (`catalog/`, `media/`, `social/`, `users/`, `tmdb/`,
+`tvdb/`, `routers/`). It has a generic name the rule forbids
+(`media/image_utils.py`), and tests are flat in `tests/` instead of
+mirroring `src/` (`~/.claude/memory/feedback_tests.md`, Framework).
+**Goal:** an approved Python + FastAPI skeleton saved in the global memory,
+and this repo moved to it, recorded in `docs/design-decisions.md`.
+
+### Notes
+- Found by the standards audit (former item 38). Needs the user's choice
+  first (AskUserQuestion), so it can't start unattended.
+- Do after B26-B29 or fold them in, so files move once.
+- The self-update (`update_check.py`, `self_update.py`) and the hatch
+  wheel config (`[tool.hatch.build.targets.wheel] packages`) depend on the
+  package path.
+
+## B31. Add the file header to the 48 files that lack it
+
+**Added:** 2026-11-21 · Area: Code quality
+**Why:** `~/.claude/memory/feedback_file_headers.md` and
+`feedback_clean_code.md` ("Every source file: the `metadata` header, then
+a module summary") want the `metadata` header on every `.py` file. 48 have
+none: `src/renar_backend/events.py` (its docstring has Authors and Created
+but no Revised), `src/renar_backend/routers/events.py`,
+`tests/integration/__init__.py`, `tests/test_events.py`,
+`tests/test_notifier_loops.py`, `tests/test_stale_prepared_plan.py`,
+`tests/test_tvdb_http.py`, and 41 of the 87 migrations in
+`alembic/versions/` (e.g. `e5ffb2678f36_initial_schema.py`).
+**Goal:** every `.py` file in `src/`, `tests/` and `alembic/` starts with
+the header, and a test fails when a new one doesn't.
+
+### Notes
+- Found by the standards audit (former item 38).
+- `metadata -c` on a file that already has a docstring adds a second one:
+  merge them by hand, then `metadata -m` (the rule's own warning).
+  Migrations already have the E402 per-file ignore for the two-docstring
+  layout.
+
+## B32. Rename the default branch from `master` to `main` on every forge
+
+**Added:** 2026-11-21 · Area: Repository
+**Why:** `~/.claude/memory/feedback_git_remotes.md` says repositories use
+`main`. This one uses `master` locally and on GitHub (`origin`), GitLab and
+Codeberg, while `CONTRIBUTING.md` (lines 65 and 68) already tells
+contributors to branch from and open pull requests against `main`. The
+self-update's git mode hard-codes the branch: `update_check.py`
+(`BRANCH = "master"`, line 62, and its docstring), and so do `README.md`
+(lines 35, 38, 68, 245) and `docs/environment-variables.md`
+(`UPDATE_RELEASE_URL` row).
+**Goal:** `main` is the default branch everywhere, the self-update follows
+`origin/main`, and no doc says `master`.
+
+### Notes
+- Found by the standards audit (former item 38).
+- The dev PC's checkout self-updates in git mode; rename there and on the
+  forges in one go, and change `BRANCH` in the same release, or the
+  one-click update refuses. renar-frontend may need the same; check it.
+- `docs/design-decisions.md` "Self-update: git checkouts fast-forward" says
+  `origin/master` (lines 1155-1172).
+
+## B33. Rewrite the README as a landing page
+
+**Added:** 2026-11-21 · Area: Docs
+**Why:** `~/.claude/memory/reference_readme_layout.md` sets the README
+layout for every repo: a centred header with logo and tagline, a primary
+call to action, a few badges, the main sections in public-first order
+(adapted for a server: "Install on a server" in place of a download
+table), technical material lower down, the License line with its version,
+and Breren's original logo (`breren-logo.svg`) in the footer; every
+`docs/*.md` starts with a links line to the others. `README.md` today
+opens with `# Renar Backend` and goes straight into Setup, Run, HTTPS,
+Endpoints (a long list), Tests and License, with no header block, badges,
+FAQ, contents line or footer.
+**Goal:** a README that tells a visitor what the Renar backend is and how
+to run their own in its first screen, with the developer material kept
+below and in `docs/`.
+
+### Notes
+- Found by the standards audit (former item 38).
+- The rule is "on trial" (tested first on Orin); check it is still current
+  before promoting.
+- The Endpoints list can move to `docs/` (or the OpenAPI schema when
+  `ENABLE_DOCS=true`).
+- Copy `breren-logo.svg` unchanged from the `breren` repo's
+  `public/icons/` into the repo's own assets.

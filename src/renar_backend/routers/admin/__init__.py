@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/11/15 02:45:10.698351
+Revised: 2026/11/22 01:52:22.270497
 
 Admin router package.
 
@@ -13,7 +13,9 @@ Sub-module layout
 -----------------
 dashboard        — admin landing page (service tiles, quick links)
 login            — sign-in page (password + authenticator code) and logout
-users            — user list, detail view, library, and all user-action POSTs
+users            — user list, detail view, library, and the user-action POSTs
+account_moderation — ban/unban, review rights, account deletion (moderation decisions)
+decisions        — the list of moderation decisions and their e-mail status
 analytics        — site-wide usage stats and per-endpoint caller breakdown
 moderation       — comment review/deletion and banned-IP management
 reports          — reported reviews (with delete) and reported users
@@ -30,9 +32,11 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 from . import (
+    account_moderation,
     analytics,
     app_releases,
     dashboard,
+    decisions,
     invites,
     login,
     moderation,
@@ -61,6 +65,8 @@ router.add_api_route(
 router.include_router(login.router)
 router.include_router(dashboard.router)
 router.include_router(users.router)
+router.include_router(account_moderation.router)
+router.include_router(decisions.router)
 router.include_router(analytics.router)
 router.include_router(moderation.router)
 router.include_router(reports.router)

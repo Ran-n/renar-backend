@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:10:01.809974 )
-[//]: # (+ Revised: 	2026/11/15 11:56:15.714319 )
+[//]: # (+ Revised: 	2026/11/23 11:50:00.334457 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Design decisions
@@ -2122,17 +2122,18 @@ covers status → `completed` for a film: films have no episode rows at
 all, so "I watched this" for a film *is* that status change and nothing
 else — without this rule films could never appear in the ordering.
 
-**Ties/nulls:** `nullslast()` — an entry with no watch activity yet sorts
-after every entry that has some, but no explicit "stale" cutoff or
+**Ties/nulls:** an entry with no watch activity at all sorts after
+every entry that has some, and ties break on the newest entry
+(`LibraryEntry.id desc`), so equal rows never come back in whatever order
+the database happens to return them. No explicit "stale" cutoff or
 demotion exists. A show marked `watching` and never touched again just
-sits at whatever position its (frozen) `last_watched_at` earns it,
-sliding down as other entries get newer activity, until it eventually
-falls off Home's capped preview (still reachable via "See full
-library"). No TTL-based auto-revert to `want_to_watch` — deliberately
-deferred, since "abandoned" has no obvious universal cutoff (movies
-never get a second episode event; a slow-burn show might get one every
-few months by design) and inventing one is a product decision, not a bug
-fix.
+sits at whatever position its (frozen) `last_watched_at` earns it, sliding
+down as other entries get newer activity, until it eventually falls off
+Home's capped preview (still reachable via "See full library"). No
+TTL-based auto-revert to `want_to_watch` — deliberately deferred, since
+"abandoned" has no obvious universal cutoff (movies never get a second
+episode event; a slow-burn show might get one every few months by design)
+and inventing one is a product decision, not a bug fix.
 
 **Migration `b7f3d0a91c4e`** backfilled existing `watching`/`completed`
 rows from each item's latest `episode_watches.watched_at` (falling back
@@ -2140,36 +2141,83 @@ to `updated_at`) specifically so this rollout didn't make every
 pre-existing in-progress show read as "never watched" and vanish from
 the ordering until the user happened to watch something new.
 
+**Imports stamp it from the real history:** the TV Time and Renar-export
+imports write every watch with its real date but never set
+`last_watched_at`, so a whole imported library sorted as "never watched",
+in an arbitrary tie order: Home showed the same rows whatever the user
+watched, and the old top vanished into that tie instead of moving to #2.
+Both imports now end with `catalog/watch_next.py`'s
+`restamp_last_watched`: each `watching`/`completed` entry gets the latest
+of its `episode_watches`/`watch_events` dates, only when that is newer
+than its stamp (a newer in-app status change stays). Migration
+`f3a9c6e2b8d1` ran the same rule over existing data. Entries imported as
+"watching" with nothing watched keep no stamp and sort last.
+
 **Fully caught-up shows are excluded, live, not via the `status` column:**
 `order_by=last_watched` additionally drops any `tv_show` where every
-aired episode has been watched — `_unwatched_aired_episode_clause()`
-(`routers/media.py`) is a correlated `EXISTS` against `Episode`/
+aired episode has been watched — `has_unwatched_aired_episode()`
+(`catalog/watch_next.py`) is a correlated `EXISTS` against `Episode`/
 `EpisodeWatch` checked at query time, not a stored flag. A cached
 `LibraryEntry.status` of `watching` only changes on a write (a watch
 event, a manual status edit); it says nothing about whether a new
 episode aired since the user last opened the app, so a boolean column
 would go stale the moment time passes without the user doing anything.
-The clause is guarded by `_known_aired_episode_clause()` so a show with
+The clause is guarded by `has_known_aired_episode()` so a show with
 zero synced `Episode` rows (season data never pulled) is never excluded
 for lack of evidence, and films — which have no `Episode` concept at all
 — are never subject to the rule regardless of their own data.
 
-**New-episode ranking bumps to position #2, not by re-sorting on air
-date:** a show with an aired-but-unwatched episode newer than the show's
-own `last_watched_at` gets a `has_new_episode` flag from the same live
-`EXISTS` check (`newer_than_last_watched=True`), and the result set is
-re-ranked in Python: the caller's actual most-recently-watched item
-always stays first, everything else is stably sorted by
-`has_new_episode` descending. An old backlog episode the user just
-hasn't caught up on yet (aired *before* their last watch) does not
-count as "new" and doesn't move the show. Re-ranking happens after the
-fully-caught-up exclusion and before the `limit` slice, so a show only
-bumped into view by the exclusion becoming false can still win the #2
-slot the same query.
+**Order: last watched, then new episodes, then recency:** #1 is the entry
+the user watched last (`last_watched_at`). Then every started show with a
+new episode, meaning an unwatched one that aired after the user's last
+watch of that show (`newest_new_episode_aired()`), newest air date first.
+Then the rest by last watch, and last the entries never watched. With no
+new episodes anywhere, watching something moves the old #1 to #2. The
+query orders by recency in SQL (`watch_next_order()`) and
+`rank_watch_next()` re-ranks in Python, since "the first row is exempt"
+can't be one ORDER BY key; it runs over the whole list (one user's
+in-progress shows, never large) before `offset`/`limit`, so pages never
+overlap or skip. An old backlog episode (aired *before* the user's last
+watch of that show) isn't news and doesn't move it.
+
+**Never-started entries get no boost (2026-11-23):** a show imported as
+"watching" with nothing watched has no `last_watched_at`, and under the
+first version of this rule every one of its episodes counted as new. That
+filled every slot after #1 with old shows the user never started, so Home
+showed the same rows whatever they watched and the previous #1 vanished
+below them. Now "new" needs a last watch to be newer than, and a
+never-started entry sorts last.
+
+### A season is finished only when nothing after it is announced
+
+`sync_show_episodes` (`tmdb/tmdb_store.py`) skips a season whose last known
+episode has aired, so a synced show costs no TMDB calls. That alone made the
+skip permanent too early: TMDB often adds a season's episodes a few at a
+time, and between two of them the season looked finished, so the next
+episode never reached the catalog. Found in the dev database: American Dad!
+had S22E11 while TMDB announced E13, Detective Conan E1208 of 1213. Such a
+show stayed "caught up" and never came back to Home.
+
+The season is now fetched again when the stored details payload names a
+later episode of it as last aired or next to air (`_announced_episodes`).
+
+- **Highest number, not exact match:** TMDB renumbers some seasons (Tokyo
+  Ghoul's details say S4E12, its season lists 13-24). Looking for the exact
+  row would refetch those forever.
+- **A season page older than the announcement is stale**, whatever its age
+  (`cached_tmdb`'s `newer_than`), or the new episode would wait out the
+  24-hour cache. A page fetched after it isn't refetched, so a season that
+  really lacks the episode costs one call per details refresh, not one per
+  request.
+- **`check_new_episodes` syncs the seasons it finds behind**
+  (`sync_announced_seasons`), so the notification and Home agree in the same
+  pass instead of waiting for the separate history job.
+- **Episode inserts use a savepoint each:** that check and the history job
+  start together and can insert the same row.
 
 ### Nested `EXISTS` correlation needs every outer level named explicitly
 
-`_unwatched_aired_episode_clause()`'s inner `EXISTS` (the `EpisodeWatch`
+`_unwatched_aired_conditions()`'s inner `EXISTS` (the `EpisodeWatch`
 check above) sits two query levels down from the `LibraryEntry` row it
 needs to match: the outer `EXISTS` correlates `Episode` to `LibraryEntry`,
 and this inner one correlates `EpisodeWatch` to that same `LibraryEntry`
@@ -2350,6 +2398,85 @@ permanently unstylable when every other tier and every other premium
 color surface (status colors, home progress colors) already lets the user
 pick per-slot — the JSONB-map-of-independently-settable-values shape
 `status_colors` established was the direct fit, not a new pattern.
+
+## Privacy and moderation
+
+### Notes and personal links are owner-only
+
+`GET /users/{id}/media` returns another user's entries with `notes` and
+`url` set to `null`; the owner gets both. The rule lives in one place,
+`schemas.redact_for` (fields in `OWNER_ONLY_ENTRY_FIELDS`), so any future
+endpoint that hands out someone else's entry reuses it.
+
+**Why:** the app labels the field just "Notes" and nothing tells the user
+others can read it; in a tracker people expect notes to be private, and
+GDPR art. 25 asks for privacy by default. The legal review of 2026-11-21
+found other users could read them. The feed (`FeedEntryOut`) never carried
+either field.
+
+### Sign-up records Terms acceptance and the minimum age with one checkbox
+
+`POST /auth/register` refuses an account (422) unless `accepts_terms` is
+true, and stores `users.terms_accepted_at`. The check runs before Turnstile,
+so a refused request doesn't spend a token.
+
+**Why:** the Terms say you accept them by ticking the box and set 14 as the
+minimum age (LOPDGDD art. 7); without a stored timestamp there's no record
+that anyone accepted. Older app builds don't send the field and are refused
+on purpose: they can't show the Terms. Accounts from before the box keep a
+null timestamp; no Terms version is stored until there is more than one.
+
+### Every moderation action records a decision and e-mails the reasons
+
+Each admin action that removes content or restricts an account (delete a
+comment or review, ban, close an account, change a username or withdraw
+review rights as a measure) and each dismissed report writes one
+`moderation_decisions` row through `moderation/decisions.py`, then e-mails
+the statement of reasons to the user and the outcome to every reporter, in
+their app language (`moderation/texts.py`). The admin must pick a reason
+from the Terms' acceptable-use rules; a dismissal's reason is always "no
+breach". Actions that can also be routine work (a username typo, an
+account deleted on request, review rights removed) offer "Not a moderation
+measure", which records nothing. The send result is stored on the row; the
+Decisions page shows it and can send a failed one again.
+
+**Why:** the Terms promise what DSA art. 16(5), 17 and 20 require: a
+statement of reasons, whether it followed a report, that no automated means
+were used, and 6 months to contest. Recording before deleting means the row
+exists even if the e-mail or the deletion fails. The e-mail goes out as a
+background task so a slow mail server never blocks the admin page; the
+recipient's address is read before the account can disappear. The row keeps
+only the removed text cut to 300 characters (the statement quotes it) and a
+username snapshot, since `user_id` goes null when the account is deleted
+(registered in `tests/test_normalization.py` as a snapshot, not a copy).
+`target_id` has no foreign key on purpose: the measure deletes the comment
+or review it names. A
+lasting measure (a ban, withdrawn review rights) stays open until lifted;
+the `account_purge` task deletes a decision 183 days after its measure ends,
+the privacy policy's "up to 6 months after". Action and reason are enums,
+and the action implies the target type, so no target-type column (BCNF).
+The Brevo call moved to `users/mailer.py`, shared with the confirmation
+codes, so only one module knows the mail API.
+
+### Released usernames are forgotten after the cooldown
+
+The `account_purge` task also deletes `released_usernames` rows older than
+the current `username_cooldown_days`.
+
+**Why:** the rows exist only to block re-registration during the cooldown;
+keeping them forever kept deleted accounts' usernames forever, against the
+privacy policy's retention promise. Raising the cooldown later can't bring
+back rows already deleted, which is accepted.
+
+### Server logs are kept 30 days, by date
+
+Both log files use `TimedRotatingFileHandler` (midnight UTC, 30 backups),
+and launching a self-update deletes `self-update-*.log` files older than 30
+days.
+
+**Why:** size-based rotation kept an IP address or username for weeks when
+traffic was quiet and hours when busy, so the privacy policy couldn't state
+a period (GDPR art. 13 asks for one).
 
 ## Dev server
 
@@ -3155,3 +3282,24 @@ supported or tested: `a3f8c1e97b52` (remove book and youtube media types)
 is irreversible by design. `alembic/env.py` doubles `%` in the database URL,
 because configparser treats it as interpolation and a URL-encoded option
 (`options=-csearch_path%3D...`) would otherwise be rejected.
+
+### Nightly `pg_dump` plus a pull to the build PC, not WAL archiving or a Storage Box
+
+Prod's database is dumped every night (`scripts/backup/renar-backup`,
+`renar-backup.timer`, 14 dumps kept in `/var/backups/renar`), and the build
+PC pulls each new dump plus a mirror of `media/` with `uv run backup-pull`,
+run daily by a Windows scheduled task (README "Backups").
+
+**Why:** the database is about 80 MB and a dump takes seconds, so losing at
+most a day of changes is an acceptable worst case for now; WAL archiving and
+a standby would add moving parts the size doesn't justify. The off-host copy
+goes to the PC because it needs no new account or monthly cost (the user's
+choice, 2026-11-21); the trade-off is that the copy only advances on days the
+PC is on (the task runs at the next start after a missed 09:00). The PC pulls
+rather than the VPS pushing, so the VPS holds no credential for the PC. Each
+dump is checked against the BLAKE3 sum written on the VPS before it's kept.
+`rsync` isn't on Windows, so images are compared by size and mtime and the
+changed ones come over as one `tar` stream through SSH. Images deleted on
+prod are set aside for 14 days, not deleted at once, so restoring any dump
+still in the window finds its images. The SSH host is an alias in
+`~/.ssh/config`, so the address never enters the repo.

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/11/15 02:45:11.044239
+Revised: 2026/11/22 01:52:22.368394
 
 Admin dashboard: the tile-grid landing page at /admin (or the configured
 admin path).
@@ -100,6 +100,17 @@ _SERVICES = [
             ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
             '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/>'
             '<line x1="4" y1="22" x2="4" y2="15"/>'
+            "</svg>"
+        ),
+    },
+    {
+        "name": "Moderation Decisions",
+        "desc": "Every removal and restriction, its reason and whether the user was e-mailed",
+        "href": f"{_P}/decisions",
+        "icon": (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"'
+            ' fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+            '<path d="M12 3v18"/><path d="M5 7h14"/><path d="M5 7l-3 7h6z"/><path d="M19 7l-3 7h6z"/>'
             "</svg>"
         ),
     },

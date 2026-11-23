@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/11/15 02:45:15.236166
+Revised: 2026/11/23 08:13:12.627007
 
 Import a Renar export (.7z) back into an account: the round trip half of
 GDPR Art. 20 that users/export.py builds, exercised end-to-end through the
@@ -15,6 +15,9 @@ import time
 
 import py7zr
 from conftest import login, register
+
+from renar_backend.database import SessionLocal
+from renar_backend.models import LibraryEntry
 
 
 def _empty_7z() -> bytes:
@@ -867,3 +870,34 @@ def test_import_block_already_in_place_is_not_counted_twice(client, alice, bob):
     assert body["error"] is None
     assert body["summary"]["blocks"] == 0
     assert len(client.get("/users/blocked", headers=alice_headers).json()) == 1
+
+
+def test_import_stamps_last_watched_from_the_imported_history(client, alice):
+    """Home orders by last_watched_at; the import must set it to the latest
+    imported watch, not leave it empty (exports don't carry it)."""
+    user, headers = alice
+    rows = [
+        {
+            "media_type": "tv_show",
+            "title": "Probe",
+            "tmdb_id": 9_000_901,
+            "status": "watching",
+            "episode_watches": [
+                {"season": 1, "episode": 1, "watched_at": "2024-03-01T20:00:00+00:00"},
+                {"season": 1, "episode": 2, "watched_at": "2024-03-08T20:00:00+00:00"},
+            ],
+        }
+    ]
+    r = client.post(
+        "/import", files={"file": ("x.7z", _library_7z(rows), "application/x-7z-compressed")}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    assert _wait_for_ready(client, headers)["error"] is None
+
+    entries = client.get("/media", params={"status_filter": "watching"}, headers=headers).json()
+    db = SessionLocal()
+    try:
+        stamp = db.get(LibraryEntry, entries[0]["id"]).last_watched_at
+    finally:
+        db.close()
+    assert stamp.isoformat().startswith("2024-03-08")

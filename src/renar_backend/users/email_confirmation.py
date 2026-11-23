@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 12:30:00.000000
-Revised: 2026/11/09 11:50:00.323184
+Revised: 2026/11/22 01:52:26.029896
 
 Registration/email-change confirmation codes — see routers/auth.py's
 /auth/confirm-email and /auth/resend-confirmation, and models.py's
@@ -28,12 +28,12 @@ from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
-import httpx
 from sqlalchemy.orm import Session
 
 from .. import site_settings
 from ..config import settings
 from ..models import EmailConfirmationCode, User, utcnow
+from . import mailer
 
 _log = logging.getLogger(__name__)
 
@@ -45,11 +45,9 @@ MAX_ATTEMPTS = 8  # past this, a code is treated as burned regardless of expires
 # is deleted before ever being blocked at login, but that's an admin-panel convention,
 # not an enforced invariant here.
 
-BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
-
-# One pooled client, same rationale as users/turnstile.py's http_client:
-# reusing connections to Brevo saves a TLS handshake per confirmation email.
-_http_client = httpx.Client(timeout=10)
+# The shared Brevo client (users/mailer.py); the alias keeps the name the
+# tests patch.
+_http_client = mailer.http_client
 
 _SUBJECTS = {
     "register": "Confirm your Renar account",
@@ -141,34 +139,13 @@ def send_confirmation_email(to_address: str, code: str, language: str, purpose: 
         return
     ss = site_settings.current()
     intro = _INTROS.get(purpose, _DEFAULT_INTRO)
-    payload = {
-        "sender": {"name": ss.email_sender_name, "email": ss.email_sender_address},
-        "to": [{"email": to_address}],
-        "subject": _SUBJECTS.get(purpose, "Confirm your Renar email"),
-        "htmlContent": _HTML_TEMPLATE.format(
-            intro=intro, code=code, ttl=ss.confirmation_code_ttl_minutes, logo_url=_LOGO_URL
-        ),
-        "textContent": (
-            f"{intro}\n\nYour confirmation code is: {code}\n\n"
-            f"This code expires in {ss.confirmation_code_ttl_minutes} minutes."
-        ),
-    }
-    try:
-        resp = _http_client.post(
-            BREVO_SEND_URL,
-            headers={"api-key": settings.brevo_api_key, "content-type": "application/json"},
-            json=payload,
-        )
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        _log.error(
-            "could not send confirmation email to %s via Brevo: %s %s",
-            to_address,
-            exc.response.status_code,
-            exc.response.text,
-        )
-    except httpx.HTTPError:
-        _log.exception("could not send confirmation email to %s via Brevo", to_address)
+    mailer.deliver(
+        to_address,
+        _SUBJECTS.get(purpose, "Confirm your Renar email"),
+        _HTML_TEMPLATE.format(intro=intro, code=code, ttl=ss.confirmation_code_ttl_minutes, logo_url=_LOGO_URL),
+        f"{intro}\n\nYour confirmation code is: {code}\n\n"
+        f"This code expires in {ss.confirmation_code_ttl_minutes} minutes.",
+    )
 
 
 def create_and_send_code(db: Session, user: User, purpose: str, target_email: str, background_tasks) -> None:

@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/11/09 11:43:55.623794 )
-[//]: # (+ Revised: 	2026/11/15 22:47:21.252869 )
+[//]: # (+ Revised: 	2026/11/23 21:05:51.864949 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # TODO
@@ -21,18 +21,20 @@ history lives in git, `CHANGELOG.md` and `docs/design-decisions.md`. Items
 moved over from the old `docs/backlog.md` keep their original free-form
 text; rewrite one into the template below before implementing it.
 
-Next item number: 39
+| To do | Backlog |
+|:-----:|:-------:|
+| **6** | **32** |
+
+Next item number: 44
 
 ## Index
 
-- [21. Back up the production database](#21-back-up-the-production-database)
 - [22. Publish the Terms of Service](#22-publish-the-terms-of-service)
 - [27. Turn on admin sign-in and the one-click update on the dev PC and the Hetzner VPS](#27-turn-on-admin-sign-in-and-the-one-click-update-on-the-dev-pc-and-the-hetzner-vps)
 - [29. Switch prod to the hashed admin password and lock `.env` to the service user](#29-switch-prod-to-the-hashed-admin-password-and-lock-env-to-the-service-user)
 - [30. Put the prod admin panel behind Cloudflare Access](#30-put-the-prod-admin-panel-behind-cloudflare-access)
 - [31. Turn on the Cloudflare Access header check on prod](#31-turn-on-the-cloudflare-access-header-check-on-prod)
-- [37. Audit the whole history for leaked secrets and personal data](#37-audit-the-whole-history-for-leaked-secrets-and-personal-data)
-- [38. Check the project against the global standards and file the gaps](#38-check-the-project-against-the-global-standards-and-file-the-gaps)
+- [39. Name the license version in every mention of the license](#39-name-the-license-version-in-every-mention-of-the-license)
 
 ## Adding an item
 
@@ -49,6 +51,9 @@ Next item number: 39
   the lowest number in use) and update every reference to them.
 - Keep the Index in file order: one `- [<n>. title](#anchor)` line per item;
   update it whenever an item is added, retitled, moved or deleted.
+- Keep the count table above the Index equal to the items here and in
+  `BACKLOG.md`, in both files; update it whenever an item is added, deleted,
+  promoted or parked.
 - Screenshots go in `docs/todo/<n>-<slug>.png`, linked from the item.
 - Split anything bigger than one sitting into items that ship alone.
 
@@ -95,60 +100,6 @@ Next item number: 39
 
 ---
 
-## 21. Back up the production database
-
-**[Blocking for 1.0]** · Area: Publishing (app stores, web, going public)
-
-**Why:** production runs on the Hetzner VPS since 2026-11-09 (systemd
-`renar-backend.service`, Postgres 17 on the same machine, database `renar`),
-so a host is chosen and set up. Nothing backs the database up: a dead disk,
-a bad migration or a deleted server loses every account and library.
-`/root/renar-backups/` only holds pre-deploy code tarballs, on the same disk.
-**Goal:** a dump of the database is taken every night, kept for 14 days,
-copied off the VPS, and a restore from it has been done once.
-
-### Behaviour
-- A systemd timer on the VPS runs nightly at 03:30 UTC:
-  `pg_dump -F c renar` as the `postgres` user into
-  `/var/backups/renar/renar-<YYYY-MM-DD>.dump` (directory `postgres:postgres`,
-  mode `0700`), then deletes dumps older than 14 days.
-- The same unit then copies the new dump off the machine. Where to is the
-  owner's choice, because it costs money or needs an account: a Hetzner
-  Storage Box (same provider, cheapest) or any `rclone` remote. Pick one
-  before starting; without an off-host copy the item is not done.
-- The uploaded images (`/opt/renar-backend/media`) go to the same
-  destination with `rsync`/`rclone sync` in the same unit.
-- A failed run shows as a failed unit (`systemctl --failed`); nothing mails.
-
-### Out of scope
-- Point-in-time recovery (WAL archiving) and a standby server.
-- Dev PC backups.
-
-### Implementation
-1. Choose the off-host destination and create its credentials.
-2. VPS: `/usr/local/bin/renar-backup` (the dump, the prune, the copy),
-   `renar-backup.service` (oneshot) and `renar-backup.timer`; enable the timer.
-3. Run it once by hand; check the dump exists in both places.
-4. Restore test: `pg_restore --no-owner -d renar_restore_test` into a scratch
-   database on the VPS, compare `SELECT count(*) FROM users` with prod, drop
-   the scratch database.
-5. `README.md`: a "Backups" section under the deployment notes: where the
-   dumps are, how to restore one, how to check the timer.
-
-### Tests
-- None automated; step 4 is the test.
-
-### Docs
-- `README.md` as in step 5. `docs/design-decisions.md`: entry "Nightly
-  `pg_dump` plus an off-host copy" (why a dump and not WAL archiving at this
-  size). Changelog: none (no code).
-
-### Done when
-- [ ] `systemctl list-timers renar-backup.timer` shows the next run.
-- [ ] A dump from last night exists on the VPS and off it.
-- [ ] The restore test's user count matched prod's.
-- [ ] README section in place.
-
 ## 22. Publish the Terms of Service
 
 **[Blocking for 1.0]** · Area: Publishing (app stores, web, going public)
@@ -159,24 +110,38 @@ kept, Hetzner named as host, EU Digital Services Act for takedown notices),
 its page is built (`renar-frontend/landing/terms/index.html`) and the app's
 Profile → Legal → Terms of Service row already opens
 <https://renar.app/terms/>, but that URL answers 404: the site hasn't been
-deployed since. Neither the terms nor the privacy policy has had a legal
-review.
+deployed since.
 **Goal:** <https://renar.app/terms/> shows the terms, dated the day they
 went live.
 
+**Status (2026-11-22):** the owner made the lawyer-role review the legal
+review, so steps 1 and 2 are done. The provider is named by trade name only
+(Breren, the trade name of an individual): the owner chose on 2026-11-23 to
+leave the legal name out. There is no NIF or postal address, because Renar is
+free with no advertising or income, so LSSI-CE art. 10 doesn't apply; the
+Terms promise to add both before charging for anything. The commitments
+stand: contact in English and Spanish, 30 days' notice, 6 months to
+contest, backups in the EU. "Last updated" is 22 November 2026, and Spanish
+versions exist (`docs/*.es.md`, `landing/es/`). The code the texts promise
+is built: owner-only notes, the username purge, 30-day logs, moderation
+decisions with e-mails, and the sign-up checkbox (renar-frontend). What's
+left is the deploy. It waits for the backend and app releases that carry
+that code, because publishing first would promise things users can't see
+yet.
+
 ### Implementation
-1. Decide whether a lawyer reads both documents first; apply their changes
-   to the `.md` source and regenerate the page (same HTML shell as
-   `landing/privacy/index.html`; the two must say the same thing).
-2. Set "Last updated" in `docs/terms-of-service.md` and
-   `landing/terms/index.html` to the day of the deploy.
+1. Release the backend and the app that carry the sign-up checkbox and the
+   moderation decisions, and deploy the backend to prod.
+2. If either text changed after 22 November 2026, set "Last updated" in
+   all eight files (two `.md` and two `.es.md` sources, four pages) to the
+   deploy day.
 3. Deploy `landing/` (Cloudflare Pages project `renar-site`). This is the
-   same deploy as renar-frontend TODO item 25 step 3, which waits for the
-   backend release that carries blocking.
+   same deploy as renar-frontend TODO item 25 step 3.
 4. If the Play Console listing has a terms field, give it the URL.
 
 ### Done when
-- [ ] `curl -I https://renar.app/terms/` answers 200.
+- [ ] `curl -I https://renar.app/terms/` and `https://renar.app/es/terms/`
+      answer 200.
 - [ ] The app's Terms of Service row opens the page.
 
 ## 27. Turn on admin sign-in and the one-click update on the dev PC and the Hetzner VPS
@@ -188,6 +153,12 @@ code and has a Server Update page, but both need one-time setup on each host
 that only the operator can do. Until `ADMIN_TOTP_SECRET` is set, the panel
 answers 503; and the Update page needs the server able to write its own
 project directory.
+**Status (2026-11-21):** prod already has `ADMIN_TOTP_SECRET`,
+`ADMIN_API_TOKEN` and `ADMIN_PASSWORD_HASH` in `.env`, and its systemd unit
+has `ReadWritePaths=/opt/renar-backend` (step 4 is done). The dev PC's
+`.env` still has neither `ADMIN_TOTP_SECRET` nor `ADMIN_API_TOKEN`; the owner
+does step 1 later. Steps 3, 5 and 6 are still open.
+
 **Goal:** on both hosts the admin can sign in with an authenticator code,
 `uv run build apk --split --publish` uploads with the API token, and the
 Update button updates and rolls back for real.
@@ -252,7 +223,7 @@ Update button updates and rolls back for real.
 
 ## 29. Switch prod to the hashed admin password and lock `.env` to the service user
 
-**[Blocking for 1.0]** · Area: Admin panel / Security
+**[Pending manual review]** · Area: Admin panel / Security
 
 **Why:** the server now only accepts an Argon2id hash of the admin password
 (`ADMIN_PASSWORD_HASH`, made by `uv run admin-password`) and refuses to boot
@@ -263,6 +234,13 @@ owning `/opt/renar-backend`.
 **Goal:** prod signs in against the hash, a leaked `.env` no longer gives
 the password, and `.env` and the Cloudflare credentials file are readable
 only by `renar`.
+
+**Status (2026-11-21):** steps 2 and 3 are done. Prod's `.env` has
+`ADMIN_PASSWORD_HASH` and no `ADMIN_PASSWORD` (the hash was made during the
+0.23.0 deploy on 2026-11-16). `.env` and `cloudflare.ini` are
+`renar:renar 600`, and `/root/renar-backups` is `700`. Left: step 1 (sign in
+on the dev PC, which needs the owner's password) and step 4 (the owner
+first saves the password in KeePass).
 
 ### Behaviour
 - The release that carries this change will not start on prod until its
@@ -385,210 +363,78 @@ gets the same 404 an unknown path gets.
       the VPS itself,
       `curl -k -H "Host: api.renar.app" https://127.0.0.1:8000/<ADMIN_PATH>/login`.
 
-## 37. Audit the whole history for leaked secrets and personal data
+## 39. Name the license version in every mention of the license
 
-**Why:** on 2026-11-15 an audit of bounty_board found, in commits already pushed: a real Clavren licence key in a
-test file (`tests/licence_fakes.py`), from where it had been copied into vitralis, a public repo; the licence key the
-user handed to an avalio-lite session, committed into its tests (whole, and half of it in another test); two
-screenshots under `docs/todo/` showing the user's own player card (full name, e-mail, phone, birth date, player ID)
-and their local stores, which gives away where they live; real names, a username, a player ID and a Telegram chat ID
-used as test data; and the Windows user folder in paths written into `TODO.md`. The leak-scan git hooks only see new
-commits, and no text scanner reads pixels, so none of this was caught. This repo has never been audited the same way.
+**[Blocking for 1.0]** · Area: Docs / Legal
 
-**Goal:** no commit, tag, branch or release file of this repo, on any forge, holds a secret (key, token, password,
-private key, licence key, chat or account ID) or the user's personal data (legal name outside `CONTRIBUTORS`,
-e-mail, phone, birth date, address or anything that locates their home, player or account IDs, the Windows user
-folder name). Anything found is gone from history, rotated if it was a secret, and purged from the forges.
-
-### Behaviour
-- The audit covers every branch and tag, every file type (images and PDFs looked at by eye) and every release asset
-  built from the tree (source archives such as `.tar.gz` ship the tests).
-- A finding that is a false positive is recorded, not deleted: a gitleaks fingerprint in `.gitleaksignore` with a
-  comment saying what it is, or a `!regex` line in the ```` ```leak ```` block of
-  `~/.claude/memory/reference_leak_terms_private.md` (then `python ~/.claude/bin/secrets.py seal`) when the same
-  harmless value recurs across projects.
-- A real finding in the current files is replaced by a fake that keeps the tests meaningful: licence keys by
-  Clavren's published test vector `BRN-79YN-44XQ-W025-377Z` or `BRN-2222-3333-4444-5555`; names, usernames and IDs
-  by made-up ones (`Alba`, `Lago Abad`, `·Estrela·`, `0000123456`); e-mails by `@example.com` or `.test`
-  addresses; user paths by `~\...`; screenshots retaken with demo data.
-- A real finding in history is rewritten out (step 8), so it was never committed as far as anyone can see.
-- A leaked secret is also rotated: replaced at its service and the old one revoked. Personal data can't be rotated,
-  so the forges must purge it before the repo is (or stays) public.
-- Nothing personal of the user's is ever sent to an outside service while doing this, except the support requests
-  of step 12, which name only the repo and commit hashes.
-
-### Out of scope
-- Fixing anything that isn't a leak (other items cover code quality and standards).
-- Other repositories: each has its own copy of this item. Work inside this repo only.
-
-### Implementation
-1. Note each remote's visibility: `gh repo view Ran-n/<repo> --json visibility`, `glab api projects/Ran-n%2F<repo>`
-   (`visibility`), and Codeberg's `GET /api/v1/repos/ran-n/<repo>` (`private`; token in
-   `~/.claude/memory/reference_codeberg_token.md`). A public repo makes every finding urgent.
-2. Scan all history with the hook's own checks (its rules, the personal terms and gitleaks):
-   `python ~/.claude/bin/leak_history.py` from the repo root. It lists each distinct finding with its first
-   commit, then every image path ever committed.
-3. Scan the current files too, including uncommitted ones:
-   `gitleaks dir <folder> --config ~/.claude/hooks/gitleaks.toml --redact` for each source, test, docs and script
-   folder (not `.venv`, `build`, `target`, `node_modules`, which are ignored).
-4. Look at every image, PDF and other binary ever committed, every version: list them with
-   `git rev-list --all --objects`, write each blob out with `git cat-file blob <id> > <scratch file>` into the
-   session scratchpad, and open it. Flag real names, e-mails, phones, IDs, chat IDs, tokens, addresses, a map or a
-   list of nearby places centred on home, file paths with the user folder, and window titles or notifications
-   showing accounts. Delete the scratch copies afterwards.
-5. Grep the history for the shapes no rule knows, from the repo root:
-   `git log --all -p | grep -E "BRN-[0-9A-Z]{4}-|chat_id|user_id|bandai|@gmail|C:\\\\Users\\\\"`, and for any real key in
-   `~/.claude/memory` or `~/.claude/project-memory` (the sealed `reference_*` files), check that no part of it
-   (any two consecutive groups) appears: a test of a "mistyped" key once held half a real one.
-6. Check the release assets on every forge (`gh release download`, `glab release download`, Codeberg's release
-   API) the same way: unpack each source archive and grep it; binaries without tests need no check.
-7. Triage every finding into false positive or real, with the reason, and record the false positives as the
-   Behaviour section says. Commit nothing yet.
-8. For real findings in history: rewrite it on a copy, never in the working clone.
-   a. Ask any other Claude session working in this repo (`ListAgents`, then `SendMessage`) to pause commits and
-      pushes, and wait for its reply.
-   b. Make a fresh bare copy: `git init --bare -b main <scratch>/orig.git`, copy `.git/objects` into it
-      (`robocopy <repo>\.git\objects <scratch>\orig.git\objects /E /MT:16`, much faster than a clone on a slow
-      disk), and point `main`, the other branches to publish and every tag at the clone's values with
-      `git update-ref`. Leave tool refs such as `refs/codex/...` out. Copy it again to `<scratch>/new.git`.
-   c. In `new.git`, run `git filter-repo --replace-text <file>` (lines `<real>==><fake>`; for one line that must
-      stay, swap it to a placeholder first and back last) and/or `--strip-blobs-with-ids <file>` for images. An
-      image can sit under several names: strip it by blob id, not by path.
-   d. `python ~/.claude/bin/resign_rewritten.py <scratch>/new.git <scratch>/orig.git main [other branches]`: commits
-      the filter didn't change stay the original objects with their original signatures (even ones made with an
-      older GPG key); changed ones are re-made with the same dates and messages and signed only if they were
-      signed. Then `git -C new.git repack -a -d`, delete `new.git/objects/info/alternates`,
-      `git reflog expire --expire=now --all` and `git gc --prune=now`.
-   e. Verify before pushing: the finding is gone (`git log --all -S<value>` is empty; `git rev-list --all
-      --objects` has no stripped blob); `git log --format='%G?|%GK|%an|%ae|%ad|%cn|%ce|%cd|%B' --date=raw` is
-      identical between orig and new once hashes are masked; tags' tagger, date and message are identical;
-      `git diff --stat <orig main> <new main>` (with `GIT_ALTERNATE_OBJECT_DIRECTORIES` pointing at orig) shows only
-      the scrubbed lines; `python ~/.claude/bin/leak_history.py` inside `new.git` is clean.
-   f. Check every remote still has the `main` you copied (`git ls-remote`); if one moved, start again from b.
-   g. GitLab protects `main` against force pushes: `glab api -X PATCH projects/Ran-n%2F<repo>/protected_branches/main
-      -f allow_force_push=true`, push, then the same call with `false`. Push from `new.git` to every remote:
-      `git push --force <url> refs/heads/main 'refs/tags/*'` (the global hooks scan the push; never bypass them).
-      Check with `git ls-remote` that each forge now matches.
-   h. Move the working clone onto the new history without touching uncommitted work:
-      `git fetch <scratch>/new.git '+refs/heads/main:refs/rewritten/main' '+refs/tags/*:refs/tags/*'`,
-      `git reset --mixed <new main>`, `git checkout -- <each file the rewrite changed and you didn't edit>`, update
-      every `refs/remotes/<remote>/main`, delete `refs/rewritten/main`, then `git reflog expire --expire=now --all`
-      and `git gc --prune=now`. Tell the paused session it can resume and that every hash after the first changed
-      commit is new.
-9. Rebuild every release asset that was built from an old tree and held a finding (source archives:
-   `git archive <tag> | tar -x`, then the project's build, e.g. `uv build --sdist`), write its `.b3`, and replace
-   the file on every forge without touching the release's date or notes: `gh release upload <tag> --clobber`;
-   GitLab: upload with `curl -H "Authorization: Bearer $(glab config get token --host gitlab.com)" -F file=@...`
-   to `projects/<id>/uploads`, swap the release link, then delete the old upload
-   (`DELETE projects/<id>/uploads/<secret>/<filename>`); Codeberg: delete the asset, upload it again under the
-   same name.
-10. Rotate each leaked secret at its service (a Clavren licence key: revoke it and issue a new one in the Clavren
-    dashboard, which only the user can sign in to, so ask them) and seal the new one in this project's memory
-    (a `reference_*_keys.md` or `*_secret.md` file, sealed with `python ~/.claude/bin/secrets.py seal`).
-11. GitLab keeps the old objects: delete the scrubbed blobs with the GraphQL mutation
-    `projectBlobsRemove(input: {projectPath: "Ran-n/<repo>", blobOids: [...]})` (the ids are every blob in the old
-    history that the new one lacks), delete the pipelines of old commits
-    (`DELETE projects/<id>/pipelines/<id>`, they pin old commits), then
-    `POST projects/<id>/housekeeping?task=prune`. Check a removed blob with `GET projects/<id>/repository/blobs/<id>`;
-    if it is still served a day later, add GitLab to step 12.
-12. GitHub and Codeberg (and GitLab if needed) keep serving the old commits by hash: write a support request
-    naming the repo, its visibility, the current `main`, the old heads and the scrubbed blob ids, asking them to
-    purge cached views and unreachable objects; the user sends it from their account.
-13. Record the outcome in this project's memory (`project_history_rewrite.md`, indexed in its `MEMORY.md`): what was
-    found, where, what replaced it, the new `main`, and what is still pending.
-
-### Tests
-- No code changes, so no unit tests. Each check is evidence instead:
-  - `python ~/.claude/bin/leak_history.py` exits 0 on the final history.
-  - `gitleaks dir` reports nothing on every folder.
-  - Every committed image has been opened and noted as clean or removed.
-- If the rewrite changed test files, run the project's full test suite on the new working tree: green.
-
-### Docs
-- `CHANGELOG.md` under `[Unreleased]`, **Security**: "Removed leaked <kind> from the repository history" (no value).
-- `.gitleaksignore` comments for each false positive.
-
-### Done when
-- [ ] Every remote's visibility is noted.
-- [ ] `leak_history.py`, `gitleaks dir` and the grep of step 5 report no real finding; false positives are recorded
-      with a reason.
-- [ ] Every image and PDF ever committed was looked at.
-- [ ] Every real finding is gone from history on every forge (`git ls-remote` matches the new history) and from
-      the release assets, with dates, messages, tags and signatures as before.
-- [ ] Every leaked secret is rotated (or the user has been asked to), and the new one is sealed.
-- [ ] GitLab's old blobs are deleted or a request is written; GitHub's and Codeberg's support requests are written.
-- [ ] The working clone sits on the new history with uncommitted work intact; other sessions were told.
-- [ ] The project memory records the result.
-
-## 38. Check the project against the global standards and file the gaps
-
-**Why:** the global rules in `~/.claude/memory/` (indexed in `~/.claude/memory/MEMORY.md`) have grown: every app
-now needs an in-app updater with signed releases, an About section, a portable build and an installer for each
-platform, a README laid out as a landing page, and code that follows SOLID and the design patterns. Projects
-written before a rule existed don't follow it: Orin, for one, wasn't following the design patterns. This repo has
-not been checked against the current rules, so its gaps are unknown. Do this after item 37, so no work starts on a
-history that may still be rewritten.
-
-**Goal:** a written verdict for every global rule (follows it, not applicable and why, or a gap), and every gap
-filed as its own item in this `TODO.md`, each small enough to ship alone, ordered by importance. This item only
-audits and files; the filed items do the work.
+**Why:** `LICENSE` is the PayBack License v2.0 (its second line reads
+`Version 2.0`), but the two places that name it leave the version out:
+`README.md` line 326 (`[PayBack License (PBL)](LICENSE)`, under "License")
+and `CONTRIBUTING.md` line 105 ("This project is licensed under the
+[PayBack License (PBL)](LICENSE). …"). PBL v1 and v2 are legally different
+licenses, so a public 1.0 that only says "PBL" leaves open which terms
+apply. The global rule `~/.claude/memory/reference_license.md` says every
+mention of a license names its version, read from the `LICENSE` file's
+"Version X.Y" line, as `[PayBack License (PBL) vX.Y](LICENSE)`. Found by
+the standards audit (former item 38). `CONTRIBUTORS` already says
+"Governed by the PayBack License (PBL) v2.0" and needs no change.
+**Goal:** every mention of the license in this repository says "PayBack
+License (PBL) v2.0", and a test fails if a mention without the version, or
+with a version other than `LICENSE`'s, is ever added.
 
 ### Behaviour
-- Each rule is judged against the code as it is now: read the code, run the app or the tests where that is the only
-  way to know.
-- A rule that doesn't fit this kind of project (a library has no updater, a docs or assets repo has no build) is
-  marked not applicable, with the reason.
-- When this project deliberately differs from a rule, and the project spec (`project_spec.md` in its memory) or a
-  decision records why, that is a documented exception, not a gap; when nothing records it, ask the user with
-  AskUserQuestion whether it is an exception or a gap.
-- Each gap becomes one item written by the `/todo` writing rules (Why, Goal, Behaviour, Out of scope,
-  Implementation, Tests, Docs, Done when), with the rule's file named in its Why.
+- `README.md` "License" section: `[PayBack License (PBL) v2.0](LICENSE)`
+  followed by its terms in plain words on the same line: "Free for personal
+  and non-commercial use; commercial use needs a revenue-share agreement
+  with the founder." (the README layout rule,
+  `~/.claude/memory/reference_readme_layout.md` section 17, wants the terms
+  beside the link).
+- `CONTRIBUTING.md` "License" section: the same link text with `v2.0`; the
+  rest of the paragraph stays.
+- When `LICENSE` moves to a new version, the test below fails until every
+  mention is updated, so the version can never silently go stale.
 
 ### Out of scope
-- Fixing the gaps here: each filed item fixes its own.
-- Changing a global rule. If a rule looks wrong for this project, raise it with the user instead of bending it.
-- Other repositories: each has its own copy of this item.
+- Changing the license itself or copying a newer `LICENSE` from
+  `sw\doc\LICENSE` (never read or edit `LICENSE` by hand;
+  the rule says it is only ever copied with the shell).
+- The README's wider layout (backlog item B33).
 
 ### Implementation
-1. Read `~/.claude/memory/MEMORY.md` and every rule file it lists under Session Behaviour, Git & Version Control,
-   Python Projects (when this is a Python project), Repository Setup, Code Quality, API Design (when it has an
-   API) and UI (when it has a UI), plus this project's `project_spec.md`.
-2. Check the project, rule by rule, and write the verdict in a table in this item's working notes (not committed):
-   - **App standards:** `feedback_app_consistency.md`, `feedback_universal_behaviours.md` (clean shutdown on every
-     quit path), `feedback_about_section.md`, `feedback_in_app_updater.md` (GitHub + GitLab check, Ed25519 +
-     BLAKE3 proof before download, self-replace, restart, signing tool, tests, bridge from an older updater),
-     `feedback_build_matrix.md` (portable + installer per platform, names `<app>-<version>-<target>-portable|setup`,
-     `.b3` + `.sig`, tag-driven draft release, per-user installer and its test),
-     `feedback_versioned_build_filenames.md`, `feedback_releases.md`, `feedback_persist_all_settings.md`.
-   - **Repository:** `feedback_new_repo_scaffold.md`, `reference_license.md` (PayBack License, never MIT or Apache),
-     `reference_readme_layout.md`, `reference_contributing_layout.md`, `reference_contributors_layout.md`,
-     `feedback_changelog.md`, `feedback_site_organization.md`, `feedback_git_remotes.md` (`main`, all three forges
-     over SSH).
-   - **Code:** `feedback_clean_code.md` (SOLID, GoF patterns where they fit, DRY, files under about 200 lines,
-     functions under about 20; list the worst offenders with their sizes), `feedback_source_organization.md`,
-     `feedback_logging.md`, `feedback_no_silent_failure.md` (grep for bare `except`, swallowed errors),
-     `feedback_parallel_code.md`, `feedback_regression_safety.md`, `feedback_database_bcnf.md`,
-     `feedback_no_future_imports.md`, `feedback_file_headers.md`, `feedback_python_projects.md` and
-     `reference_pyproject_scaffold.md` (ruff, line length 120), `reference_preferred_stack.md`.
-   - **Tests:** `feedback_tests.md` (every type in its checklist, coverage gate), `feedback_tests_rendered_ui.md`,
-     `feedback_ui_tests_no_input_hijack.md`, `feedback_ui_tests_hidden.md`; run the suite with coverage and note
-     the figure.
-   - **UI and text:** `feedback_i18n_completeness.md`, `feedback_ui_inline_editing.md`,
-     `feedback_ui_disabled_buttons.md`, `feedback_ui_cta_hierarchy.md`.
-3. For each gap, add an item at the end of this file with `/todo` (one rule per item, or one area of the code per
-   item for a large refactor), in this order: security and data loss first, then the updater and releases, then
-   tests, then code structure, then docs and layout. Put the rule file in each item's Why.
-4. Reply to the user with the table's gaps and the new item numbers.
+1. `README.md`, "License" section (line 326): replace the line with
+   `[PayBack License (PBL) v2.0](LICENSE). Free for personal and
+   non-commercial use; commercial use needs a revenue-share agreement with
+   the founder.`
+2. `CONTRIBUTING.md`, "License" section (line 105): change the link text to
+   `PayBack License (PBL) v2.0`.
+3. `tests/test_license_mentions.py` (new, with the `metadata -c` header and
+   a module docstring saying what it guards): read the version from
+   `LICENSE`'s `Version X.Y` line with a regex (not a hard-coded `2.0`),
+   then scan `README.md`, `CONTRIBUTING.md`, `CONTRIBUTORS` and every
+   `docs/*.md` for `PayBack License (PBL)` and assert each occurrence is
+   followed by ` v<that version>`.
+4. `uv run ruff format` then `uv run ruff check` on the new test file (fix
+   by hand, never `--fix`); `metadata -m` on `README.md`,
+   `CONTRIBUTING.md`; `metadata -c` on the new test.
 
 ### Tests
-- None for this item: it changes no code. Each filed item lists its own tests.
+- `tests/test_license_mentions.py::test_every_license_mention_names_the_license_file_version`:
+  passes after steps 1-2, and fails if either file is put back (check once
+  by reverting step 1 locally, then restore).
+- `tests/test_license_mentions.py::test_license_file_declares_a_version`:
+  `LICENSE` has a `Version X.Y` line, so the first test can't pass
+  vacuously.
+- Full suite with coverage, `uv run pytest -m "not security" --cov`, stays
+  at the 100 % gate.
 
 ### Docs
-- None for this item. Changelog: none (an audit changes nothing).
+- `README.md`, `CONTRIBUTING.md`: as above. Changelog (under `### Changed`):
+  "Named the license version (PayBack License v2.0) in the README and the
+  contributing guide".
 
 ### Done when
-- [ ] Every rule file in the groups of step 2 has a verdict: follows, not applicable (with reason), exception (with
-      where it is recorded) or gap.
-- [ ] Every gap is filed as its own item in this `TODO.md`, in the order of step 3, with the Index updated.
-- [ ] The test suite's coverage figure is noted.
-- [ ] The user has the list of gaps and item numbers.
+- [ ] `README.md` and `CONTRIBUTING.md` both say `PayBack License (PBL) v2.0`.
+- [ ] `tests/test_license_mentions.py` passes, and was seen failing with
+      the old README line.
+- [ ] `uv run ruff check` and `uv run ruff format --check` are clean.
+- [ ] The full suite passes with the coverage gate.

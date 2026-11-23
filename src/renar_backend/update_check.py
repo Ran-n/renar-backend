@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:18.387223
-Revised: 2026/11/13 15:35:13.349410
+Revised: 2026/11/22 01:52:25.833808
 
 The server's side of the admin panel's one-click update: whether an update
 is available or blocked (``check``), getting it ready (``prepare``),
@@ -485,6 +485,25 @@ def release_lock(repo: Path | None = None) -> None:
 # ---- launch -----------------------------------------------------------------
 
 
+# self-update-<timestamp>.log files are deleted after this many days, the
+# same retention as the server's own log files (privacy policy, Retention).
+SELF_UPDATE_LOG_RETENTION_DAYS = 30
+
+
+def prune_self_update_logs(logs: Path, now: float | None = None) -> int:
+    """Delete the self-update-*.log files in ``logs`` older than
+    SELF_UPDATE_LOG_RETENTION_DAYS; returns how many were deleted."""
+    cutoff = (time.time() if now is None else now) - SELF_UPDATE_LOG_RETENTION_DAYS * 86400
+    removed = 0
+    for path in logs.glob("self-update-*.log"):
+        if path.stat().st_mtime < cutoff:
+            path.unlink()
+            removed += 1
+    if removed:
+        _log.info("deleted %d self-update log(s) older than %d days", removed, SELF_UPDATE_LOG_RETENTION_DAYS)
+    return removed
+
+
 def _uv_exe() -> str | None:
     # `uv run` exports UV (its own path) to what it runs; fall back to PATH.
     return os.environ.get("UV") or shutil.which("uv")
@@ -501,6 +520,8 @@ def launch(status: UpdateStatus, stage: Path | None, repo: Path | None = None) -
         raise RuntimeError("uv not found (no UV variable, not on PATH)")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = logs_dir(repo) / f"self-update-{stamp}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    prune_self_update_logs(log_path.parent)
     scheme = server.get("scheme", "http")
     port = server.get("port", 8000)
     cmd = [

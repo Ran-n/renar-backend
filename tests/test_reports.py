@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/15 00:21:53.369566
-Revised: 2026/11/15 02:45:14.872487
+Revised: 2026/11/22 01:52:27.914560
 
 Reporting reviews and profiles to the moderators: report/unreport,
 `reported_by_me`, cleanup on review and account deletion, and the two admin
@@ -253,7 +253,12 @@ def test_admin_reported_reviews_page_shows_count_reasons_and_delete(client, admi
     assert "alice" in page.text and "Heat" in page.text
     assert "&lt;b&gt;rude&lt;/b&gt;" in page.text and "<b>rude</b>" not in page.text  # reasons are escaped
 
-    r = client.post(f"/admin/reported-reviews/{review['id']}/delete", headers=admin_enabled, follow_redirects=False)
+    r = client.post(
+        f"/admin/reported-reviews/{review['id']}/delete",
+        data={"reason": "harassment"},
+        headers=admin_enabled,
+        follow_redirects=False,
+    )
     assert r.status_code == 303
     assert _count(ReviewReport) == 0
     assert client.get("/media/reviews", params=FILM, headers=headers).json() == []

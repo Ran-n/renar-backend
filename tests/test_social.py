@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:17.681273
-Revised: 2026/09/02 10:58:14.356603
+Revised: 2026/11/22 01:52:28.015241
 
 Social graph: search, public profiles, follow/unfollow, feed.
 """
@@ -154,6 +154,41 @@ def test_user_media_is_visible_to_others(client, alice, bob):
     client.post("/media", json={"media_type": "film", "title": "Alien"}, headers=bob_headers)
     items = client.get(f"/users/{bob_user['id']}/media", headers=headers).json()
     assert [i["title"] for i in items] == ["Alien"]
+
+
+def test_user_media_hides_notes_and_link_from_other_users(client, alice, bob):
+    """Another user's entries come back with notes and url blanked; the owner
+    still sees both (owner-only fields, GDPR art. 25)."""
+    _, headers = alice
+    bob_user, bob_headers = bob
+    client.post(
+        "/media",
+        json={
+            "media_type": "film",
+            "title": "Alien",
+            "status": "completed",
+            "rating": 80,
+            "notes": "watched with my sister",
+            "url": "https://example.com/my-copy",
+        },
+        headers=bob_headers,
+    )
+    theirs = client.get(f"/users/{bob_user['id']}/media", headers=headers).json()
+    assert theirs[0]["notes"] is None
+    assert theirs[0]["url"] is None
+    assert theirs[0]["status"] == "completed"
+    assert theirs[0]["rating"] == 80
+    own = client.get(f"/users/{bob_user['id']}/media", headers=bob_headers).json()
+    assert own[0]["notes"] == "watched with my sister"
+    assert own[0]["url"] == "https://example.com/my-copy"
+
+
+def test_user_media_of_a_blocking_user_is_404(client, alice, bob):
+    _, headers = alice
+    bob_user, bob_headers = bob
+    alice_id = client.get("/auth/me", headers=headers).json()["id"]
+    assert client.post(f"/users/{alice_id}/block", headers=bob_headers).status_code in (200, 201, 204)
+    assert client.get(f"/users/{bob_user['id']}/media", headers=headers).status_code == 404
 
 
 def test_feed_empty_without_follows(client, alice):

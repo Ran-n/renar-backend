@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/07/09 08:05:52.135465 )
-[//]: # (+ Revised: 	2026/11/15 11:56:14.999912 )
+[//]: # (+ Revised: 	2026/11/22 01:52:21.174843 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Anti-abuse system
@@ -296,3 +296,29 @@ code as `revoked = true`; already-used slots are not refunded.
 
 `invite_only` and `registration_open` are independent: if `registration_open` is
 `false`, registration is closed entirely regardless of any invite code.
+
+## Moderation by people
+
+The layers above act on traffic. Content and accounts are moderated by a
+person in the admin panel, and every such action is a recorded decision
+(`moderation/decisions.py`, design-decisions.md "Every moderation action
+records a decision and e-mails the reasons"):
+
+- **Comment Manager** and **Reported Reviews**: "Delete" needs a reason from
+  the Terms' acceptable-use rules plus an optional note for the user;
+  "Dismiss reports" keeps the content, clears its reports and tells the
+  reporters no rule was broken.
+- **User detail**: "Ban" needs a reason; "Delete account", "Remove from
+  reviewer whitelist" and a username change offer "Not a moderation
+  measure" for routine work, which records nothing. Unban and re-whitelist
+  end the decision's measure.
+- **Moderation Decisions** lists every decision with its reason, the
+  removed text (cut to 300 characters), whether it followed a report, and
+  whether the e-mail reached the user; a failed or unsent one has "Send
+  again". Decisions are deleted 6 months after their measure ends.
+
+The user gets a statement of reasons in their app language: what was done,
+to which content, why, whether it followed a report, that no automated means
+were used, and that they can contest it at legal@renar.app within 6 months.
+Without `BREVO_API_KEY` the e-mail is only logged and the decision shows
+"Not sent (no mail key)".

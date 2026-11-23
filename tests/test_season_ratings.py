@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/14 00:22:44.159221
-Revised: 2026/11/14 16:40:52.941422
+Revised: 2026/11/23 11:50:00.225904
 
 Per-season ratings: a season can be rated once every aired episode of it is
 watched; the grade is one editable fact per (library entry, season), shown
@@ -530,7 +530,7 @@ def fresh_show(client, alice):
 def _tmdb_up(monkeypatch) -> list:
     calls: list = []
 
-    def fake(db, media_type, tmdb_id, kind, path, season=0, language="en"):
+    def fake(db, media_type, tmdb_id, kind, path, season=0, language="en", newer_than=None):
         calls.append(season)
         return SEASON_ONE
 

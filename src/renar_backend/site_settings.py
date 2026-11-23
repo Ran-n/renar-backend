@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/16 13:30:00.000000
-Revised: 2026/08/24 12:39:04.430511
+Revised: 2026/11/23 12:58:39.285805
 
 Runtime-tunable site settings backed by the `site_settings` singleton row.
 
@@ -23,6 +23,7 @@ The public surface is two callables:
 import logging
 import time
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -79,11 +80,18 @@ def _make_defaults() -> SiteSettings:
 
 def get_site_settings(db: Session) -> SiteSettings:
     """Read the singleton SiteSettings row, creating it with config defaults
-    if it doesn't exist yet (upsert-on-read bootstrap)."""
+    if it doesn't exist yet (upsert-on-read bootstrap). On a new database
+    several requests can find it missing at once: the insert has its own
+    savepoint, and the ones that lose read the winner's row."""
     row = db.get(SiteSettings, 1)
     if row is None:
         row = _make_defaults()
-        db.add(row)
+        try:
+            with db.begin_nested():
+                db.add(row)
+        except IntegrityError:
+            _log.info("site_settings row already created by a concurrent request")
+            return db.get_one(SiteSettings, 1)
         db.commit()
         db.refresh(row)
     return row

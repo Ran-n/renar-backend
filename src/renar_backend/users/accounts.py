@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/12 03:02:57.798569
-Revised: 2026/11/15 02:45:12.782737
+Revised: 2026/11/22 01:52:25.932653
 
 Account deletion: the one purge path, shared by self-service
 (DELETE /auth/me) and the admin panel's delete-user action.
@@ -15,7 +15,7 @@ those comments.
 """
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -179,4 +179,18 @@ def purge_expired_deletions(db: Session) -> int:
     count = len(stale)
     for user in stale:
         delete_account(user, db)
+    return count
+
+
+def purge_released_usernames(db: Session, now: datetime) -> int:
+    """Delete every ReleasedUsername row whose cooldown has ended, so the
+    former usernames of deleted accounts are kept only for the cooldown (the
+    privacy policy's Retention promise). Uses the current
+    SiteSettings.username_cooldown_days; raising it later can't bring back
+    rows already deleted. Returns the number of rows deleted."""
+    from ..site_settings import current as site_settings_current
+
+    cutoff = now - timedelta(days=site_settings_current().username_cooldown_days)
+    count = db.query(ReleasedUsername).filter(ReleasedUsername.released_at < cutoff).delete(synchronize_session=False)
+    db.commit()
     return count

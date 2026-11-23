@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/10 00:00:00.000000
-Revised: 2026/11/14 00:22:50.713058
+Revised: 2026/11/22 03:03:52.072745
 
 Schema normalization guard: fails CI the moment a denormalization sneaks
 back into the models.
@@ -96,6 +96,10 @@ ALLOWED_FKLESS_ID_COLUMNS: dict[str, str] = {
     "titles.tvdb_id": "external identity in TheTVDB's keyspace, not a row of ours — see docs/design-decisions.md",
     "titles.imdb_id": "external identity in IMDb's keyspace, not a row of ours — see docs/design-decisions.md",
     "titles.wikidata_id": "external identity in Wikidata's keyspace, not a row of ours — see docs/design-decisions.md",
+    "moderation_decisions.target_id": (
+        "the removed comment or review (which one the action says); the row is deleted by the "
+        "measure itself, so no FK can hold — see docs/design-decisions.md"
+    ),
 }
 
 # Columns flagged by test_no_copied_columns_across_foreign_keys that are not
@@ -103,6 +107,11 @@ ALLOWED_FKLESS_ID_COLUMNS: dict[str, str] = {
 # but a different fact by design. Keyed by (qualified_column, ref_table).
 # Adding an entry is a design decision and belongs in docs/design-decisions.md.
 ALLOWED_COPIED_COLUMNS: dict[tuple[str, str], str] = {
+    ("moderation_decisions.username", "users"): (
+        "the username at the time of the decision, kept after it changes or the account is "
+        "deleted (user_id goes NULL) so a contested decision can be traced — a snapshot, "
+        "not the current username; see docs/design-decisions.md"
+    ),
     ("episode_watches.rating", "media_items"): (
         "a per-episode rating, independent of media_items.rating (the show's "
         "overall rating) — same column name, unrelated fact"

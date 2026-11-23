@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:42:31.539562
-Revised: 2026/11/09 23:36:42.464166
+Revised: 2026/11/22 01:52:27.408980
 
 Fuzz tests (hypothesis): throw a wide range of malformed/random input at a
 few request-parsing endpoints and assert the server never 500s — a 4xx
@@ -50,7 +50,9 @@ _fuzzy_text = st.text(
 @_fuzz_settings
 @given(username=_fuzzy_text, email=_fuzzy_text, password=_fuzzy_text)
 def test_register_never_500s_on_malformed_input(client, username, email, password):
-    r = client.post("/auth/register", json={"username": username, "email": email, "password": password})
+    r = client.post(
+        "/auth/register", json={"accepts_terms": True, "username": username, "email": email, "password": password}
+    )
     assert r.status_code < 500, f"500 on username={username!r} email={email!r} password={password!r}:\n{r.text}"
 
 

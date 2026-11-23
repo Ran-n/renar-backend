@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/20 17:00:00.000000
-Revised: 2026/11/14 01:59:19.952068
+Revised: 2026/11/22 01:52:27.602159
 """
 
 import logging
@@ -198,3 +198,19 @@ def test_console_line_carries_stack_info():
     lines = ConsoleFormatter(use_color=False).format(record).splitlines()
     assert lines[0].endswith("slow sync")
     assert lines[1:] == ["Stack (most recent call last):", "  File notifier.py, line 1"]
+
+
+def test_both_file_handlers_roll_daily_in_utc_and_keep_30_days():
+    """Log files are kept for a fixed period (privacy policy: 30 days),
+    not for however long a size limit happens to last."""
+    from renar_backend.__main__ import LOG_RETENTION_DAYS
+
+    handlers = _log_config()["handlers"]
+    assert LOG_RETENTION_DAYS == 30
+    for name in ("file", "errors_file"):
+        h = handlers[name]
+        assert h["class"] == "logging.handlers.TimedRotatingFileHandler"
+        assert h["when"] == "midnight"
+        assert h["utc"] is True
+        assert h["backupCount"] == 30
+        assert "maxBytes" not in h

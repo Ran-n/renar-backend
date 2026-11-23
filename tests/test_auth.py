@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.984505
-Revised: 2026/09/02 10:57:36.960211
+Revised: 2026/11/22 01:52:27.211060
 
 Auth endpoints: register, login, me, profile, password change, account delete.
 """
@@ -52,7 +52,7 @@ def test_register_duplicate_username_conflicts(client):
     register(client, "alice")
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "other@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice", "email": "other@example.com", "password": PASSWORD},
     )
     assert r.status_code == 409
 
@@ -61,7 +61,7 @@ def test_register_duplicate_email_conflicts(client):
     register(client, "alice")
     r = client.post(
         "/auth/register",
-        json={"username": "alice2", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice2", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 409
 
@@ -69,7 +69,7 @@ def test_register_duplicate_email_conflicts(client):
 def test_register_short_password_rejected(client):
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": "short"},
+        json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": "short"},
     )
     assert r.status_code == 422
 
@@ -78,7 +78,7 @@ def test_register_password_over_72_bytes_rejected(client):
     # bcrypt 5.x raises on >72-byte input; must be a 422, never a 500
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": "x" * 73},
+        json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": "x" * 73},
     )
     assert r.status_code == 422
 
@@ -86,7 +86,7 @@ def test_register_password_over_72_bytes_rejected(client):
 def test_register_bad_email_rejected(client):
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "not-an-email", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice", "email": "not-an-email", "password": PASSWORD},
     )
     assert r.status_code == 422
 
@@ -156,7 +156,7 @@ def test_registration_closed_returns_403(client):
     _set_site_settings(registration_open=False)
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 403
 
@@ -165,7 +165,7 @@ def test_invite_only_missing_code_returns_400(client):
     _set_site_settings(invite_only=True, registration_open=True)
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 400
     assert "invite code" in r.json()["detail"].lower()
@@ -175,7 +175,13 @@ def test_invite_only_invalid_code_returns_400(client):
     _set_site_settings(invite_only=True, registration_open=True)
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": "bogus"},
+        json={
+            "accepts_terms": True,
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": PASSWORD,
+            "invite_code": "bogus",
+        },
     )
     assert r.status_code == 400
     assert "invalid" in r.json()["detail"].lower()
@@ -186,7 +192,13 @@ def test_invite_only_revoked_code_returns_400(client):
     _set_site_settings(invite_only=True, registration_open=True)
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+        json={
+            "accepts_terms": True,
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": PASSWORD,
+            "invite_code": code,
+        },
     )
     assert r.status_code == 400
     assert "invalid" in r.json()["detail"].lower()
@@ -198,7 +210,13 @@ def test_invite_only_expired_code_returns_400(client):
     _set_site_settings(invite_only=True, registration_open=True)
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+        json={
+            "accepts_terms": True,
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": PASSWORD,
+            "invite_code": code,
+        },
     )
     assert r.status_code == 400
     assert "expired" in r.json()["detail"].lower()
@@ -209,7 +227,13 @@ def test_invite_only_exhausted_code_returns_400(client):
     _set_site_settings(invite_only=True, registration_open=True)
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+        json={
+            "accepts_terms": True,
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": PASSWORD,
+            "invite_code": code,
+        },
     )
     assert r.status_code == 400
     assert "used" in r.json()["detail"].lower()
@@ -220,7 +244,13 @@ def test_invite_only_valid_code_registers_and_increments_uses(client):
     _set_site_settings(invite_only=True, registration_open=True)
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+        json={
+            "accepts_terms": True,
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": PASSWORD,
+            "invite_code": code,
+        },
     )
     assert r.status_code == 201
 
@@ -237,13 +267,25 @@ def test_invite_only_single_use_code_exhausted_after_one_registration(client):
     _set_site_settings(invite_only=True, registration_open=True)
     r1 = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD, "invite_code": code},
+        json={
+            "accepts_terms": True,
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": PASSWORD,
+            "invite_code": code,
+        },
     )
     assert r1.status_code == 201
 
     r2 = client.post(
         "/auth/register",
-        json={"username": "bob", "email": "bob@example.com", "password": PASSWORD, "invite_code": code},
+        json={
+            "accepts_terms": True,
+            "username": "bob",
+            "email": "bob@example.com",
+            "password": PASSWORD,
+            "invite_code": code,
+        },
     )
     assert r2.status_code == 400
 
@@ -255,6 +297,7 @@ def test_invite_only_unlimited_code_never_exhausts(client):
         r = client.post(
             "/auth/register",
             json={
+                "accepts_terms": True,
                 "username": username,
                 "email": f"{username}@example.com",
                 "password": PASSWORD,
@@ -319,7 +362,7 @@ def test_login_username_with_nul_byte_unauthorized_not_500(client):
 def test_register_username_with_nul_byte_rejected_not_500(client):
     r = client.post(
         "/auth/register",
-        json={"username": "alice\x00", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice\x00", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 422
 
@@ -718,7 +761,7 @@ def test_confirm_email_banned_user_returns_403(client):
         # Register without auto-confirm so the account needs confirmation.
         r = client.post(
             "/auth/register",
-            json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+            json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
         )
         assert r.status_code == 201
         user_id = r.json()["id"]
@@ -758,7 +801,7 @@ def test_register_race_condition_returns_409(client, monkeypatch):
 
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 409
 
@@ -774,7 +817,7 @@ def test_confirm_email_unknown_purpose_returns_400(client):
     # Register without auto-confirm.
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 201
     user_id = r.json()["id"]
@@ -855,7 +898,7 @@ def test_resend_confirmation_with_pending_email_change_authorize(client):
     # Register (creates a "register" code automatically).
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 201
     user_id = r.json()["id"]
@@ -1072,3 +1115,35 @@ def test_profile_update_invalid_episode_label_style_rejected(client, alice):
     _, headers = alice
     r = client.patch("/auth/profile", json={"episode_label_style": "not_a_style"}, headers=headers)
     assert r.status_code == 422
+
+
+def test_register_without_accepting_terms_is_refused_and_creates_no_user(client):
+    """No ticked Terms/age box, no account (older app builds that can't show
+    the Terms are refused too)."""
+    r = client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"] == "You must accept the Terms of Service"
+    r = client.post(
+        "/auth/register",
+        json={"accepts_terms": False, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
+    )
+    assert r.status_code == 422
+    db = SessionLocal()
+    try:
+        assert db.query(User).filter(User.username == "alice").first() is None
+    finally:
+        db.close()
+
+
+def test_register_records_when_the_terms_were_accepted(client):
+    before = utcnow()
+    user = register(client, "alice")
+    db = SessionLocal()
+    try:
+        accepted = db.get(User, user["id"]).terms_accepted_at
+    finally:
+        db.close()
+    assert accepted is not None and accepted >= before

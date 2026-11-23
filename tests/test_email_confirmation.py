@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/20 13:10:00.000000
-Revised: 2026/11/09 23:36:42.295360
+Revised: 2026/11/22 01:52:27.310369
 
 Registration/email-change confirmation codes (users/email_confirmation.py,
 routers/auth.py's /auth/confirm-email + /auth/resend-confirmation) and the
@@ -63,7 +63,12 @@ def fixed_code(monkeypatch):
 def _raw_register(client, username: str = "alice", email: str | None = None) -> dict:
     r = client.post(
         "/auth/register",
-        json={"username": username, "email": email or f"{username}@example.com", "password": PASSWORD},
+        json={
+            "accepts_terms": True,
+            "username": username,
+            "email": email or f"{username}@example.com",
+            "password": PASSWORD,
+        },
     )
     assert r.status_code == 201, r.text
     return r.json()
@@ -493,7 +498,7 @@ def test_email_normalization_case_insensitive_duplicate(client):
     _raw_register(client, "alice", email="Alice@Example.com")
     r = client.post(
         "/auth/register",
-        json={"username": "alice2", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice2", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 409
 

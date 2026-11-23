@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.707791
-Revised: 2026/11/15 11:56:19.298251
+Revised: 2026/11/23 15:09:10.465073
 
 Shared fixtures: isolated Postgres schema, media dir, and API test client.
 
@@ -16,11 +16,13 @@ and dev data never collide; the schema is dropped at process exit.
 
 import atexit
 import os
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="renar-tests-"))
+atexit.register(shutil.rmtree, _TMP)  # first registered, so last to run
 _PG_BASE_URL = "postgresql+psycopg://reska:reska@127.0.0.1:5432/reska"
 _SCHEMA = f"renar_test_{uuid.uuid4().hex[:8]}"
 os.environ["DATABASE_URL"] = f"{_PG_BASE_URL}?options=-csearch_path%3D{_SCHEMA}"
@@ -177,7 +179,7 @@ def _confirm_email(user_id: int) -> None:
 def register(client: TestClient, username: str = "alice", password: str = PASSWORD) -> dict:
     r = client.post(
         "/auth/register",
-        json={"username": username, "email": f"{username}@example.com", "password": password},
+        json={"accepts_terms": True, "username": username, "email": f"{username}@example.com", "password": password},
     )
     assert r.status_code == 201, r.text
     user = r.json()

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/11/09 23:36:40.806003
+Revised: 2026/11/22 01:52:22.677441
 
 Admin user-management: list, detail, library drill-down, and all user
 action endpoints (ban/unban, premium, verify, edit, password, delete).
@@ -12,10 +12,9 @@ import html
 import logging
 from datetime import UTC, date, datetime, time, timedelta
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...database import get_db
@@ -26,6 +25,7 @@ from ...models import (
     LibraryEntry,
     LoginEvent,
     MediaType,
+    ModerationAction,
     RequestDay,
     ReviewWhitelist,
     Title,
@@ -34,6 +34,7 @@ from ...models import (
     WatchStatus,
     utcnow,
 )
+from ...moderation.decisions import Measure, record_and_notify
 from ...schemas import BCRYPT_MAX_PASSWORD_BYTES
 from ...users import accounts
 from ...users import security as _security
@@ -60,6 +61,7 @@ from ._html import (
     _stat_tile,
     _usage_page,
 )
+from ._moderation_form import NOT_MODERATION, measure_fields, optional_measure_fields, optional_reason
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -210,7 +212,8 @@ def _render_account_actions(user: User, is_reviewer: bool = False) -> str:
     if is_reviewer:
         review_whitelist_action = (
             f'<form method="post" action="{_P}/users/{uid}/unwhitelist-review" style="display:contents">'
-            f'<button class="btn-sm" type="submit">Remove from reviewer whitelist</button></form>'
+            f'{optional_measure_fields()}<button class="btn-sm" type="submit">Remove from reviewer whitelist</button>'
+            "</form>"
         )
     else:
         review_whitelist_action = (
@@ -225,8 +228,9 @@ def _render_account_actions(user: User, is_reviewer: bool = False) -> str:
     else:
         ban_action = (
             f'<form method="post" action="{_P}/users/{uid}/ban" style="display:contents"'
-            f" onsubmit=\"return confirm('Ban [{name_esc}]? They will be signed out and unable to log back in.')\">"
-            f'<button class="btn-sm" type="submit">Ban</button></form>'
+            f" onsubmit=\"return confirm('Ban [{name_esc}]? They will be signed out, unable to log back in,"
+            f" and e-mailed the reason.')\">"
+            f'{measure_fields()}<button class="btn-sm" type="submit">Ban</button></form>'
         )
     cancel_deletion_action = (
         f'<form method="post" action="{_P}/users/{uid}/cancel-deletion" style="display:contents">'
@@ -241,6 +245,7 @@ def _render_account_actions(user: User, is_reviewer: bool = False) -> str:
         <label>Username</label>
         <input class="action-input" type="text" name="username" value="{html.escape(user.username, quote=True)}"
                maxlength="50" required>
+        {optional_measure_fields()}
         <button class="btn-save" type="submit">Save</button>
       </form>
       <form class="action-row" method="post" action="{_P}/users/{uid}/edit">
@@ -269,6 +274,7 @@ def _render_account_actions(user: User, is_reviewer: bool = False) -> str:
         {review_whitelist_action}
         <form method="post" action="{_P}/users/{uid}/delete" style="display:contents"
               onsubmit="return confirm('Permanently delete [{name_esc}] and all their data?')">
+          {optional_measure_fields()}
           <button class="btn-sm btn-purge" type="submit">Delete account</button>
         </form>
       </div>
@@ -912,38 +918,6 @@ def user_library(
     return _render_user_library(user, entries, label)
 
 
-@router.post("/users/{user_id}/ban", include_in_schema=False)
-def ban_user(
-    user_id: int,
-    admin_user: str = Depends(_require_admin),
-    db: Session = Depends(get_db),
-):
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    user.banned = True
-    user.ban_reason = f"banned by admin={admin_user}"
-    db.commit()
-    _log.info("admin=%s banned user id=%s username=%s", admin_user, user_id, user.username)
-    return RedirectResponse(f"{_P}/users", status_code=303)
-
-
-@router.post("/users/{user_id}/unban", include_in_schema=False)
-def unban_user(
-    user_id: int,
-    admin_user: str = Depends(_require_admin),
-    db: Session = Depends(get_db),
-):
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    user.banned = False
-    user.ban_reason = None
-    db.commit()
-    _log.info("admin=%s unbanned user id=%s username=%s", admin_user, user_id, user.username)
-    return RedirectResponse(f"{_P}/users", status_code=303)
-
-
 @router.post("/users/{user_id}/premium", include_in_schema=False)
 def grant_premium(
     user_id: int,
@@ -1024,44 +998,8 @@ def admin_cancel_deletion(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    from ...users import accounts
-
     accounts.cancel_deletion(user, db)
     _log.info("admin=%s cancelled pending deletion for user id=%s username=%s", admin_user, user_id, user.username)
-    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
-
-
-@router.post("/users/{user_id}/whitelist-review", include_in_schema=False)
-def whitelist_review(
-    user_id: int,
-    admin_user: str = Depends(_require_admin),
-    db: Session = Depends(get_db),
-):
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if not db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user_id).first():
-        db.add(ReviewWhitelist(user_id=user_id))
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()  # double-submit race — already whitelisted
-    _log.info("admin=%s added user id=%s username=%s to reviewer whitelist", admin_user, user_id, user.username)
-    return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
-
-
-@router.post("/users/{user_id}/unwhitelist-review", include_in_schema=False)
-def unwhitelist_review(
-    user_id: int,
-    admin_user: str = Depends(_require_admin),
-    db: Session = Depends(get_db),
-):
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    db.query(ReviewWhitelist).filter(ReviewWhitelist.user_id == user_id).delete(synchronize_session=False)
-    db.commit()
-    _log.info("admin=%s removed user id=%s username=%s from reviewer whitelist", admin_user, user_id, user.username)
     return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
 
 
@@ -1112,11 +1050,34 @@ def deny_verification(
     return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
 
 
+def _record_username_reset(db: Session, user: User, new_username: str, form: tuple[str, str, str], tasks) -> None:
+    """A username changed as a moderation measure gets a decision and a
+    statement; "Not a moderation measure" (a typo fix) gets neither."""
+    reason, details, admin_user = form
+    action = ModerationAction.username_reset
+    picked = optional_reason(action, reason)
+    if picked is None:
+        return
+    measure = Measure(
+        action=action,
+        reason=picked,
+        moderator=admin_user,
+        user=user,
+        details=details,
+        content=user.username,
+        new_username=new_username,
+    )
+    record_and_notify(db, measure, tasks)
+
+
 @router.post("/users/{user_id}/edit", include_in_schema=False)
 def edit_user(
     user_id: int,
+    background_tasks: BackgroundTasks,
     username: str | None = Form(default=None),
     email: str | None = Form(default=None),
+    reason: str = Form(default=NOT_MODERATION),
+    details: str = Form(default=""),
     admin_user: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
@@ -1134,6 +1095,7 @@ def edit_user(
     if username and username != user.username:
         if db.query(User).filter(User.username == username, User.id != user_id).first():
             raise HTTPException(status_code=409, detail="Username already taken")
+        _record_username_reset(db, user, username, (reason, details, admin_user), background_tasks)
         user.username = username
     if email and email != user.email:
         if not _EMAIL_RE.match(email):
@@ -1193,18 +1155,3 @@ def reset_user_onboarding(
     db.commit()
     _log.info("admin=%s reset onboarding for user id=%s username=%s", admin_user, user_id, user.username)
     return RedirectResponse(f"{_P}/users/{user_id}", status_code=303)
-
-
-@router.post("/users/{user_id}/delete", include_in_schema=False)
-def delete_user(
-    user_id: int,
-    admin_user: str = Depends(_require_admin),
-    db: Session = Depends(get_db),
-):
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    username = user.username
-    accounts.delete_account(user, db)
-    _log.info("admin=%s deleted user id=%s username=%s", admin_user, user_id, username)
-    return RedirectResponse(f"{_P}/users", status_code=303)

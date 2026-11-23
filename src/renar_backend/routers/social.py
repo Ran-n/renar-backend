@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:15.566899
-Revised: 2026/11/15 02:45:09.958614
+Revised: 2026/11/22 01:52:25.399099
 
 Social graph: user search, profiles, follow/unfollow, activity feed.
 """
@@ -18,7 +18,7 @@ from ..catalog.titles import WITH_TITLE_GENRES, escape_like
 from ..constants import DEFAULT_EPISODE_RUNTIME, DEFAULT_FILM_RUNTIME
 from ..database import get_db
 from ..models import Follow, LibraryEntry, MediaType, Title, User, UserReport, WatchStatus
-from ..schemas import FeedEntryOut, LibraryEntryOut, PublicUserOut, ReportCreate
+from ..schemas import FeedEntryOut, LibraryEntryOut, PublicUserOut, ReportCreate, redact_for
 from ..social.blocks import blocked_pair_ids
 from ..social.reports import add_report, remove_report
 from ..users.auth import get_current_user
@@ -297,7 +297,7 @@ def user_media(
     me: User = Depends(get_current_user),
 ):
     visible_user_or_404(user_id, me, db)
-    return (
+    entries = (
         db.query(LibraryEntry)
         .options(*WITH_TITLE_GENRES)
         .filter(LibraryEntry.user_id == user_id)
@@ -305,6 +305,7 @@ def user_media(
         .limit(100)
         .all()
     )
+    return [redact_for(me.id, e) for e in entries]
 
 
 @router.get("/feed", response_model=list[FeedEntryOut])

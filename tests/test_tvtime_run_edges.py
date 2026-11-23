@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/13 15:35:12.279088
-Revised: 2026/11/13 15:35:12.279088
+Revised: 2026/11/23 08:13:12.729477
 
 TV Time import runs that hit the leftover summary/edge branches: a movie row
 that lost a same-run insert race or resolved to nothing, two unmatched
@@ -134,5 +134,21 @@ def test_a_reply_without_its_own_id_is_still_imported(client, alice, monkeypatch
     try:
         reply = db.query(Comment).filter(Comment.text == "Same").one()
         assert reply.parent_id is not None
+    finally:
+        db.close()
+
+
+def test_import_stamps_last_watched_from_the_imported_history(client, alice, monkeypatch):
+    """Home orders by last_watched_at; the import must set it to the real
+    date of the latest imported watch, not leave it empty."""
+    user, _ = alice
+    _patch_tmdb(monkeypatch, show_matches={"100": ({"id": 555, "name": "Dark"}, {})})
+
+    _run(user["id"], _build_zip(shows=[_DARK], followed=[_FOLLOWED], rewatches=[_rewatch("1")]))
+
+    db = SessionLocal()
+    try:
+        entry = db.query(LibraryEntry).filter_by(user_id=user["id"]).one()
+        assert (entry.status.value, entry.last_watched_at.date().isoformat()) == ("watching", "2026-01-02")
     finally:
         db.close()

@@ -2,6 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/27 11:17:50.226741
+Revised: 2026/11/23 16:26:09.293360
 
 Covers social/notifier.py's eight periodic-task loops (`_episode_check_loop`,
 `_episode_history_sync_loop`, ...) — previously untested, per TODO.md's
@@ -227,3 +228,33 @@ def test_sync_episode_history_catches_exception_and_returns_count(client, alice,
 
     # exception must be caught; len(titles) still returned
     assert n == 1
+
+
+def test_sync_episode_history_failed_title_does_not_break_the_next(client, alice, monkeypatch):
+    """A failed database write leaves the session unusable until rolled back;
+    the title after it must still sync."""
+    _, headers = alice
+    for tmdb_id in (70523, 70524):
+        body = {"media_type": "tv_show", "title": f"Show {tmdb_id}", "tmdb_id": tmdb_id, "status": "watching"}
+        client.post("/media", json=body, headers=headers)
+
+    from renar_backend.database import SessionLocal
+    from renar_backend.models import Episode
+
+    done = []
+
+    def first_fails(db, title):
+        if not done:
+            done.append("failed")
+            db.add(Episode(title_id=-1, season=1, episode_number=1))
+            db.flush()
+        db.query(Episode).count()
+        done.append("synced")
+
+    monkeypatch.setattr(notifier, "sync_show_episodes", first_fails)
+    db = SessionLocal()
+    try:
+        assert notifier.sync_episode_history(db) == 2
+    finally:
+        db.close()
+    assert done == ["failed", "synced"]

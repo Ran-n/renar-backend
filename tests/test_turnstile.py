@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/19 00:00:00.000000
-Revised: 2026/09/02 10:58:27.603431
+Revised: 2026/11/22 01:52:28.110411
 
 Cloudflare Turnstile gate on /auth/register. Mocks the siteverify HTTP call
 (no real network dependency in the suite) — verify_turnstile() itself is a
@@ -62,7 +62,7 @@ def test_register_rejects_missing_token_when_configured(client, monkeypatch):
     try:
         r = client.post(
             "/auth/register",
-            json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+            json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
         )
         assert r.status_code == 400
         assert "verification" in r.json()["detail"].lower()
@@ -76,6 +76,7 @@ def test_register_rejects_failed_verification(client, monkeypatch):
         r = client.post(
             "/auth/register",
             json={
+                "accepts_terms": True,
                 "username": "alice",
                 "email": "alice@example.com",
                 "password": PASSWORD,
@@ -93,6 +94,7 @@ def test_register_succeeds_with_valid_token(client, monkeypatch):
         r = client.post(
             "/auth/register",
             json={
+                "accepts_terms": True,
                 "username": "alice",
                 "email": "alice@example.com",
                 "password": PASSWORD,
@@ -109,7 +111,7 @@ def test_register_unaffected_when_turnstile_unconfigured(client):
     # register test: the check is a no-op when TURNSTILE_SECRET_KEY is empty.
     r = client.post(
         "/auth/register",
-        json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+        json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
     )
     assert r.status_code == 201, r.text
 
@@ -197,7 +199,7 @@ def test_turnstile_enabled_flag_off_disables_check_even_with_keys_set(client, mo
 
         r = client.post(
             "/auth/register",
-            json={"username": "alice", "email": "alice@example.com", "password": PASSWORD},
+            json={"accepts_terms": True, "username": "alice", "email": "alice@example.com", "password": PASSWORD},
         )
         assert r.status_code == 201, r.text
     finally:

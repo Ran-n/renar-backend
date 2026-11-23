@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/09 23:36:19.074462
-Revised: 2026/11/11 11:11:07.267149
+Revised: 2026/11/22 03:03:52.878586
 
 update_check in tarball mode (a project without .git): every state the
 Server Update page can show against a fake release feed, prepare()'s
@@ -340,6 +340,37 @@ def test_launch_starts_isolated_detached_helper(project, monkeypatch, dev_deps):
     else:
         assert kwargs["start_new_session"] is True
     assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_prune_self_update_logs_deletes_only_logs_older_than_30_days(tmp_path):
+    """Self-update logs follow the 30-day log retention; newer logs and
+    other files stay."""
+    now = time.time()
+    old = tmp_path / "self-update-20260101-000000.log"
+    new = tmp_path / "self-update-20261120-000000.log"
+    other = tmp_path / "renar-backend.log"
+    for f in (old, new, other):
+        f.write_text("x", encoding="utf-8")
+    os.utime(old, (now - 31 * 86400, now - 31 * 86400))
+    os.utime(other, (now - 99 * 86400, now - 99 * 86400))
+    assert update_check.prune_self_update_logs(tmp_path, now) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([new.name, other.name])
+    assert update_check.prune_self_update_logs(tmp_path) == 0
+
+
+def test_launch_prunes_old_self_update_logs(project, monkeypatch):
+    write_be_pid(project, port=8123, scheme="https")
+    st = update_check.check("0.1.0")
+    stage = update_check.prepare(st)
+    logs = update_check.logs_dir()
+    logs.mkdir(parents=True, exist_ok=True)
+    stale = logs / "self-update-20200101-000000.log"
+    stale.write_text("old", encoding="utf-8")
+    os.utime(stale, (time.time() - 40 * 86400,) * 2)
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: None)
+    monkeypatch.setenv("UV", "/opt/uv")
+    update_check.launch(st, stage)
+    assert not stale.exists()
 
 
 def test_launch_without_uv_raises(project, monkeypatch):

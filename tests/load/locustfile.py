@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 17:29:43.281408
-Revised: 2026/11/10 11:04:48.287418
+Revised: 2026/11/23 12:52:18.112592
 
 Locust load profile: a rough mirror of a logged-in user's traffic mix once
 the app is open (health/status checks, own-profile lookups, stats), weighted
@@ -28,7 +28,8 @@ Total weight breakdown: reads 11 (4+3+2+1+1), writes 4 (2+1+1) → writes are
 import random
 import uuid
 
-from locust import HttpUser, between, task
+import gevent
+from locust import HttpUser, between, events, task
 
 LOAD_TEST_PASSWORD = "LoadTest123!"
 
@@ -40,6 +41,14 @@ _SEED_TITLE = "Inception"
 _SEED_MEDIA_TYPE = "film"  # models.MediaType: film | tv_show
 
 
+@events.init.add_listener
+def _refresh_clock(environment, **_kwargs) -> None:
+    """gevent times locust's run limit from a clock it cached when its loop
+    started. On a cold machine the imports alone can outlast the 15 s limit,
+    so it fired at once and the run sent no requests."""
+    gevent.get_hub().loop.update_now()
+
+
 class RenarUser(HttpUser):
     wait_time = between(0.1, 0.5)
 
@@ -47,7 +56,12 @@ class RenarUser(HttpUser):
         username = f"loadtest_{uuid.uuid4().hex[:12]}"
         self.client.post(
             "/auth/register",
-            json={"username": username, "email": f"{username}@example.com", "password": LOAD_TEST_PASSWORD},
+            json={
+                "accepts_terms": True,
+                "username": username,
+                "email": f"{username}@example.com",
+                "password": LOAD_TEST_PASSWORD,
+            },
             name="/auth/register",
         )
         # Test-server-only endpoint (see renar_backend._test_server): bypasses

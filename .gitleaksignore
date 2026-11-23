@@ -1,0 +1,4 @@
+# False positives, checked by hand. One fingerprint per line, each with a comment saying what it is.
+
+# .env.example: PROD_TURNSTILE_SITE_KEY= is an empty placeholder; gitleaks matches across the newline.
+.env.example:generic-api-key:22

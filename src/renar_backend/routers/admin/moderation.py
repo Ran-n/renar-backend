@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/17 00:00:00.000000
-Revised: 2026/11/09 23:36:40.123777
+Revised: 2026/11/22 01:52:22.464577
 
 Admin moderation: comment review/deletion and banned-IP management.
 """
@@ -10,13 +10,14 @@ Admin moderation: comment review/deletion and banned-IP management.
 import html
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from ...database import get_db
-from ...models import BannedIP, Comment, CommentLike, CommentReport, Title, User
+from ...models import BannedIP, Comment, CommentLike, CommentReport, ModerationAction, Title, User
+from ...moderation.decisions import Measure, comment_reporters, record_and_notify
 from ...social.comment_threads import resolve_root_scope
 from ...users import security as _security
 from ...users.auth import require_admin as _require_admin
@@ -29,6 +30,7 @@ from ._html import (
     _fmt_ts,
     _logout_button,
 )
+from ._moderation_form import dismissal_fields, measure_fields, parse_reason
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -49,6 +51,13 @@ def _comment_target(db: Session, c: Comment) -> str:
         label += ' <span class="td-count">&#x21B3; reply</span>'
     type_label = html.escape(title.media_type.value.replace("_", " ")) if title else ""
     return f'<span class="type-pill">{type_label}</span> {label}'
+
+
+def _dismiss_form(comment_id: int, q: str) -> str:
+    return (
+        f'<form method="post" action="{_P}/comments/{comment_id}/dismiss-reports{q}" style="display:contents">'
+        f'{dismissal_fields()}<button class="btn-sm" type="submit">Dismiss reports</button></form>'
+    )
 
 
 def _render_comments(
@@ -81,10 +90,12 @@ def _render_comments(
           <td class="td-ts">{_fmt_ts(c.created_at)}</td>
           <td><div class="td-actions">
             <form method="post" action="{_P}/comments/{c.id}/delete{q}"
-                  onsubmit="return confirm('Delete this comment by [{name_esc}]?')"
+                  onsubmit="return confirm('Delete this comment by [{name_esc}]? They get an e-mail with the reason.')"
                   style="display:contents">
+              {measure_fields()}
               <button class="btn-sm btn-purge" type="submit">Delete</button>
             </form>
+            {_dismiss_form(c.id, q) if n_reports else ""}
           </div></td>
         </tr>"""
 
@@ -270,22 +281,78 @@ def list_comments(
     return _render_comments(db, comments, like_counts, report_counts, total, filter_user)
 
 
+def _comment_or_404(db: Session, comment_id: int) -> Comment:
+    comment = db.get(Comment, comment_id)
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return comment
+
+
+def _back_to_comments(user_id: int | None) -> RedirectResponse:
+    return RedirectResponse(f"{_P}/comments" + (f"?user_id={user_id}" if user_id else ""), status_code=303)
+
+
 @router.post("/comments/{comment_id}/delete", include_in_schema=False)
 def delete_comment(
     comment_id: int,
+    background_tasks: BackgroundTasks,
+    reason: str = Form(default=""),
+    details: str = Form(default=""),
     user_id: int | None = Query(default=None, ge=1),
     admin_user: str = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
-    comment = db.get(Comment, comment_id)
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    author = comment.author.username if comment.author else "?"
+    comment = _comment_or_404(db, comment_id)
+    action = ModerationAction.comment_removed
+    measure = Measure(
+        action=action,
+        reason=parse_reason(action, reason),
+        moderator=admin_user,
+        user=comment.author,
+        details=details,
+        target_id=comment.id,
+        content=comment.text,
+        reporters=comment_reporters(db, comment.id),
+    )
+    record_and_notify(db, measure, background_tasks)
     db.delete(comment)  # ORM delete cascades the comment's likes, reports and reply subtree
     db.commit()
-    _log.info("admin=%s deleted comment id=%s author=%s", admin_user, comment_id, author)
-    dest = f"{_P}/comments" + (f"?user_id={user_id}" if user_id else "")
-    return RedirectResponse(dest, status_code=303)
+    _log.info("admin=%s deleted comment id=%s author=%s", admin_user, comment_id, measure.user.username)
+    return _back_to_comments(user_id)
+
+
+@router.post("/comments/{comment_id}/dismiss-reports", include_in_schema=False)
+def dismiss_comment_reports(
+    comment_id: int,
+    background_tasks: BackgroundTasks,
+    reason: str = Form(default=""),
+    details: str = Form(default=""),
+    user_id: int | None = Query(default=None, ge=1),
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    """Keep the comment, clear its reports, and tell each reporter no rule
+    was broken (DSA art. 16(5))."""
+    comment = _comment_or_404(db, comment_id)
+    reporters = comment_reporters(db, comment.id)
+    if not reporters:
+        raise HTTPException(status_code=404, detail="This comment has no reports")
+    action = ModerationAction.comment_report_dismissed
+    measure = Measure(
+        action=action,
+        reason=parse_reason(action, reason),
+        moderator=admin_user,
+        user=comment.author,
+        details=details,
+        target_id=comment.id,
+        content=comment.text,
+        reporters=reporters,
+    )
+    record_and_notify(db, measure, background_tasks)
+    db.query(CommentReport).filter(CommentReport.comment_id == comment.id).delete(synchronize_session=False)
+    db.commit()
+    _log.info("admin=%s dismissed %d report(s) on comment id=%s", admin_user, len(reporters), comment_id)
+    return _back_to_comments(user_id)
 
 
 @router.get("/bans", response_class=HTMLResponse, include_in_schema=False)

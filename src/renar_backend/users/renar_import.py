@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/27 00:00:00.000000
-Revised: 2026/11/15 02:45:13.667037
+Revised: 2026/11/23 08:13:12.429423
 
 Import a Renar-native export (users/export.py's .7z of profile/library/
 comments/social JSON) back into an account — the write side of GDPR Art.
@@ -48,6 +48,7 @@ from sqlalchemy.orm import Session
 
 from ..catalog.progress import caught_up_status, show_is_airing
 from ..catalog.titles import find_or_create_title, normalize_title_key
+from ..catalog.watch_next import restamp_last_watched
 from ..database import SessionLocal
 from ..models import (
     Comment,
@@ -527,6 +528,9 @@ def run(user_id: int, archive_bytes: bytes) -> None:
         db.commit()
 
         _import_library(db, user_id, library, summary)
+        # Home orders by last_watched_at, which the library rows don't carry
+        restamp_last_watched(db, user_id)
+        db.commit()
         _import_comments(db, user_id, comments, summary)
         _import_social(db, user_id, social, summary)
 

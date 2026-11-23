@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/11/15 00:19:55.818208
-Revised: 2026/11/15 02:45:11.442573
+Revised: 2026/11/22 01:52:22.579162
 
 Admin moderation of user reports: reported reviews (with delete) and
 reported users (with a link to the user's admin page, where ban and edit
@@ -12,15 +12,17 @@ live). Comment reports are shown on the Comment Manager (moderation.py).
 import html
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from ...database import get_db
-from ...models import Review, ReviewReport, User, UserReport
+from ...models import ModerationAction, Review, ReviewReport, User, UserReport
+from ...moderation.decisions import Measure, record_and_notify, review_reporters
 from ...users.auth import require_admin as _require_admin
 from ._html import _P, _fmt_ts, _usage_page
+from ._moderation_form import dismissal_fields, measure_fields, parse_reason
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -98,9 +100,14 @@ def _render_reported_reviews(reviews: list[tuple[Review, int]], reasons: dict[in
           <td class="td-ts">{_fmt_ts(review.created_at)}</td>
           <td><div class="td-actions">
             <form method="post" action="{_P}/reported-reviews/{review.id}/delete"
-                  onsubmit="return confirm('Delete this review by [{name_esc}]?')"
+                  onsubmit="return confirm('Delete this review by [{name_esc}]? They get an e-mail with the reason.')"
                   style="display:contents">
+              {measure_fields()}
               <button class="btn-sm btn-purge" type="submit">Delete</button>
+            </form>
+            <form method="post" action="{_P}/reported-reviews/{review.id}/dismiss" style="display:contents">
+              {dismissal_fields()}
+              <button class="btn-sm" type="submit">Dismiss reports</button>
             </form>
           </div></td>
         </tr>"""
@@ -150,19 +157,64 @@ def list_reported_reviews(
     return _render_reported_reviews(reviews, _latest_reasons(db, ReviewReport, ReviewReport.review_id, ids))
 
 
-@router.post("/reported-reviews/{review_id}/delete", include_in_schema=False)
-def delete_reported_review(
-    review_id: int,
-    admin_user: str = Depends(_require_admin),
-    db: Session = Depends(get_db),
-):
+def _review_or_404(db: Session, review_id: int) -> Review:
     review = db.get(Review, review_id)
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
-    author = review.author.username if review.author else "?"
+    return review
+
+
+def _review_measure(db: Session, review: Review, action: ModerationAction, form: tuple[str, str, str]) -> Measure:
+    reason, details, admin_user = form
+    return Measure(
+        action=action,
+        reason=parse_reason(action, reason),
+        moderator=admin_user,
+        user=review.author,
+        details=details,
+        target_id=review.id,
+        content=review.text,
+        reporters=review_reporters(db, review.id),
+    )
+
+
+@router.post("/reported-reviews/{review_id}/delete", include_in_schema=False)
+def delete_reported_review(
+    review_id: int,
+    background_tasks: BackgroundTasks,
+    reason: str = Form(default=""),
+    details: str = Form(default=""),
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    review = _review_or_404(db, review_id)
+    measure = _review_measure(db, review, ModerationAction.review_removed, (reason, details, admin_user))
+    record_and_notify(db, measure, background_tasks)
     db.delete(review)  # ORM delete cascades the review's reactions and reports
     db.commit()
-    _log.info("admin=%s deleted review id=%s author=%s", admin_user, review_id, author)
+    _log.info("admin=%s deleted review id=%s author=%s", admin_user, review_id, measure.user.username)
+    return RedirectResponse(f"{_P}/reported-reviews", status_code=303)
+
+
+@router.post("/reported-reviews/{review_id}/dismiss", include_in_schema=False)
+def dismiss_review_reports(
+    review_id: int,
+    background_tasks: BackgroundTasks,
+    reason: str = Form(default=""),
+    details: str = Form(default=""),
+    admin_user: str = Depends(_require_admin),
+    db: Session = Depends(get_db),
+):
+    """Keep the review, clear its reports, and tell each reporter no rule
+    was broken (DSA art. 16(5))."""
+    review = _review_or_404(db, review_id)
+    measure = _review_measure(db, review, ModerationAction.review_report_dismissed, (reason, details, admin_user))
+    if not measure.reporters:
+        raise HTTPException(status_code=404, detail="This review has no reports")
+    record_and_notify(db, measure, background_tasks)
+    db.query(ReviewReport).filter(ReviewReport.review_id == review.id).delete(synchronize_session=False)
+    db.commit()
+    _log.info("admin=%s dismissed %d report(s) on review id=%s", admin_user, len(measure.reporters), review_id)
     return RedirectResponse(f"{_P}/reported-reviews", status_code=303)
 
 

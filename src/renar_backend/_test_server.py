@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 14:33:20.294880
-Revised: 2026/11/15 11:56:17.023801
+Revised: 2026/11/23 15:09:10.729986
 
 Opt-in server for integration tests that need the real app reachable over
 real HTTP, not the in-process ASGI transport TestClient uses: this repo's
@@ -29,6 +29,7 @@ import argparse
 import atexit
 import datetime
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -57,6 +58,7 @@ def main() -> None:
 
     schema = f"renar_itest_{uuid.uuid4().hex[:8]}"
     tmp_dir = Path(tempfile.mkdtemp(prefix="renar-itest-"))
+    atexit.register(shutil.rmtree, tmp_dir)
 
     os.environ["DATABASE_URL"] = f"{_PG_BASE_URL}?options=-csearch_path%3D{schema}"
     os.environ["MEDIA_DIR"] = str(tmp_dir / "media")

@@ -1,0 +1,18 @@
+# ------------------------------------------------------------------------------
+#+ Authors: 	Ran# <ran.hash@proton.me>
+#+ Created: 	2026/11/21 18:57:56.514326
+#+ Revised: 	2026/11/21 18:57:56.514326
+# ------------------------------------------------------------------------------
+
+# Installed at /etc/systemd/system/renar-backup.service on the prod VPS.
+# Started nightly by renar-backup.timer; see README "Backups".
+[Unit]
+Description=Nightly renar database dump
+Requires=postgresql.service
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/renar-backup
+Nice=10
+IOSchedulingClass=idle

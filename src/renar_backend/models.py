@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:14.419974
-Revised: 2026/11/15 11:01:42.654261
+Revised: 2026/11/22 03:03:52.171398
 """
 
 import enum
@@ -161,6 +161,10 @@ class User(Base):
     # ACCESS_TOKEN_EXPIRE_MINUTES lifetime. NULL means "never changed since
     # this column existed" — no cutoff to enforce.
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the user ticked the sign-up box accepting the Terms of Service and
+    # the Privacy Policy and confirming they're 14 or older (the record of
+    # consent). NULL for accounts created before the box existed.
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # True once the user has completed a code-confirmation round trip proving
     # ownership of `email` (see users/email_confirmation.py). Indexed: it's
     # filtered on every /stats/ranking request (routers/stats.py._compute_ranking)
@@ -544,6 +548,84 @@ class ReleasedUsername(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(50), index=True)
     released_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ModerationAction(enum.StrEnum):
+    """What a moderator did. The action also says what the target is (a
+    comment, a review, or the account itself), so no separate target type
+    is stored."""
+
+    comment_removed = "comment_removed"
+    review_removed = "review_removed"
+    account_suspended = "account_suspended"
+    account_closed = "account_closed"
+    username_reset = "username_reset"
+    review_rights_withdrawn = "review_rights_withdrawn"
+    comment_report_dismissed = "comment_report_dismissed"
+    review_report_dismissed = "review_report_dismissed"
+
+
+class ModerationReason(enum.StrEnum):
+    """Why: the rules of the Terms of Service's "Acceptable use" section,
+    plus illegal content and, for a dismissed report, no breach found."""
+
+    illegal_content = "illegal_content"
+    no_rights = "no_rights"
+    harassment = "harassment"
+    hate_or_violence = "hate_or_violence"
+    child_sexual_content = "child_sexual_content"
+    spam = "spam"
+    circumvention = "circumvention"
+    scraping = "scraping"
+    disruption = "disruption"
+    no_breach = "no_breach"
+
+
+class MailStatus(enum.StrEnum):
+    """Outcome of sending one e-mail (users/mailer.py). ``not_configured``
+    means BREVO_API_KEY is unset, so the message was only logged;
+    ``not_needed`` marks a decision with no statement to the user (a
+    dismissed report leaves the content up)."""
+
+    pending = "pending"
+    sent = "sent"
+    failed = "failed"
+    not_configured = "not_configured"
+    not_needed = "not_needed"
+
+
+class ModerationDecision(Base):
+    """One moderation decision and its statement of reasons (DSA art. 17):
+    written by moderation/decisions.py for every moderation action in the
+    admin panel, listed on the admin Decisions page, and deleted 6 months
+    after the measure ends (privacy policy, Retention) by the account_purge
+    task.
+
+    ``user_id`` is the affected user and goes NULL when the account is
+    deleted; ``username`` keeps who it was, as it was then, so the decision
+    can still be checked if it is contested. ``content_excerpt`` is the only
+    copy of user content kept: the removed text, cut to 300 characters, which
+    the statement quotes. ``measure_ended_at`` is set at once for one-off
+    measures (a removal, a closed account, a dismissed report) and when the
+    measure is lifted for lasting ones (a suspension, withdrawn review
+    rights)."""
+
+    __tablename__ = "moderation_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    action: Mapped[ModerationAction] = mapped_column(Enum(ModerationAction))
+    reason: Mapped[ModerationReason] = mapped_column(Enum(ModerationReason))
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    moderator: Mapped[str] = mapped_column(String(255))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    username: Mapped[str] = mapped_column(String(50))
+    target_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    from_report: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    measure_ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    email_status: Mapped[MailStatus] = mapped_column(Enum(MailStatus), default=MailStatus.pending)
+    reporters_notified: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class EndpointStat(Base):

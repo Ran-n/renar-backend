@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# ------------------------------------------------------------------------------
+#+ Authors: 	Ran# <ran.hash@proton.me>
+#+ Created: 	2026/11/21 18:57:56.370303
+#+ Revised: 	2026/11/21 18:57:56.370303
+# ------------------------------------------------------------------------------
+
+# Nightly dump of the renar database on the prod VPS, run as root by
+# renar-backup.service (timer: renar-backup.timer, 03:30 UTC).
+#
+# Writes /var/backups/renar/renar-<UTC date>.dump (pg_dump custom format) and
+# a .b3 (BLAKE3) next to it, then deletes dumps older than KEEP_DAYS. The off-host
+# copy (dumps + uploaded images) is pulled from the build PC by
+# `uv run backup-pull`; see README "Backups". A failure exits non-zero, so the
+# unit shows in `systemctl --failed`.
+set -euo pipefail
+umask 077  # dumps hold every account: readable by postgres and root only
+
+DIR=/var/backups/renar
+DB=renar
+KEEP_DAYS=14
+
+install -d -o postgres -g postgres -m 0700 "$DIR"
+name="renar-$(date -u +%F).dump"
+runuser -u postgres -- pg_dump -F c -f "$DIR/$name.part" "$DB"
+mv -f "$DIR/$name.part" "$DIR/$name"
+(cd "$DIR" && b3sum "$name" > "$name.b3")
+chown postgres:postgres "$DIR/$name.b3"
+# -mtime +N matches files older than N+1 whole days: keeps KEEP_DAYS dumps.
+find "$DIR" -maxdepth 1 -name 'renar-*.dump*' -mtime +$((KEEP_DAYS - 1)) -delete
+echo "renar-backup: wrote $DIR/$name ($(stat -c %s "$DIR/$name") bytes)"

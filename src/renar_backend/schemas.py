@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/07/07 13:25:16.263995
-Revised: 2026/11/15 02:45:08.297585
+Revised: 2026/11/22 01:52:25.504086
 """
 
 import re
@@ -63,6 +63,11 @@ class UserCreate(BaseModel):
     # Empty when Turnstile isn't configured server-side (see
     # users/turnstile.py::verify_turnstile) — not required in that case.
     turnstile_token: str = ""
+    # The sign-up checkbox "I'm 14 or older and I accept the Terms of Service
+    # and the Privacy Policy". register() refuses the account unless it's
+    # true; older app builds don't send it and are refused on purpose, since
+    # they can't show the Terms.
+    accepts_terms: bool = False
 
     _password_len = field_validator("password")(_password_fits_bcrypt)
 
@@ -479,6 +484,21 @@ class LibraryEntryOut(BaseModel):
     is_favorite: bool
     created_at: datetime
     updated_at: datetime
+
+
+# Fields of a library entry that only its owner may read: the private notes
+# and the personal link. Other users see the rest (title, status, rating,
+# progress). GDPR art. 25 — private by default.
+OWNER_ONLY_ENTRY_FIELDS = ("notes", "url")
+
+
+def redact_for(viewer_id: int, entry) -> LibraryEntryOut:
+    """Return ``entry`` as a LibraryEntryOut, with the owner-only fields
+    blanked unless ``viewer_id`` is the entry's owner."""
+    out = LibraryEntryOut.model_validate(entry)
+    if entry.user_id == viewer_id:
+        return out
+    return out.model_copy(update=dict.fromkeys(OWNER_ONLY_ENTRY_FIELDS))
 
 
 class MediaKeyOut(BaseModel):

@@ -2,7 +2,7 @@
 """
 Authors: Ran# <ran.hash@proton.me>
 Created: 2026/08/18 16:49:30.615616
-Revised: 2026/11/09 23:36:41.457232
+Revised: 2026/11/23 15:09:10.623526
 
 Fixtures for tests that need the real app reachable over real HTTP, not
 TestClient's in-process ASGI transport — the main motivating case is
@@ -54,7 +54,9 @@ def _spawn_logged(args: list[str], env: dict | None = None) -> tuple[subprocess.
     was observed elsewhere to cause hard-to-diagnose failures in whatever
     else the parent process spawns later — see
     renar-frontend/tests/integration/conftest.py's `_spawn_logged`."""
-    log_path = Path(tempfile.mkstemp(prefix="renar-itest-", suffix=".log")[1])
+    handle, path = tempfile.mkstemp(prefix="renar-itest-", suffix=".log")
+    os.close(handle)  # Windows refuses to delete a file it still holds
+    log_path = Path(path)
     log_file = log_path.open("w", encoding="utf-8")
     proc = subprocess.Popen(
         args,
@@ -67,7 +69,12 @@ def _spawn_logged(args: list[str], env: dict | None = None) -> tuple[subprocess.
     return proc, log_path, log_file
 
 
-def _wait_ready(proc: subprocess.Popen, url: str, log_path: Path, timeout: float = 30.0) -> None:
+# A server that dies fails at once; this only bounds a slow one. A cold start
+# on a busy disk took over 30 s here (3 s warm).
+_START_TIMEOUT_S = 120.0
+
+
+def _wait_ready(proc: subprocess.Popen, url: str, log_path: Path, timeout: float = _START_TIMEOUT_S) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
@@ -134,7 +141,12 @@ def register_and_login(client: httpx.Client, live_server: str, username: str | N
     username = username or f"itest_{uuid.uuid4().hex[:10]}"
     r = client.post(
         "/auth/register",
-        json={"username": username, "email": f"{username}@example.com", "password": TEST_PASSWORD},
+        json={
+            "accepts_terms": True,
+            "username": username,
+            "email": f"{username}@example.com",
+            "password": TEST_PASSWORD,
+        },
     )
     r.raise_for_status()
     r = client.post(f"{live_server}/_itest/confirm_email/{username}")
