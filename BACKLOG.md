@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/11/14 16:40:50.586421 )
-[//]: # (+ Revised: 	2026/11/22 03:03:53.200781 )
+[//]: # (+ Revised: 	2026/11/24 10:57:01.417644 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Backlog
@@ -14,9 +14,9 @@ parked from `TODO.md` on 2026-11-14 keep their original text under Notes.
 
 | To do | Backlog |
 |:-----:|:-------:|
-| **6** | **32** |
+| **17** | **32** |
 
-Next backlog number: 35
+Next backlog number: 36
 
 ## Index
 
@@ -32,7 +32,6 @@ Next backlog number: 35
 - [B10. Recommendation feed: infinite-scroll "what to watch next"](#b10-recommendation-feed-infinite-scroll-what-to-watch-next)
 - [B11. Push notifications (system notifications while the app is closed)](#b11-push-notifications-system-notifications-while-the-app-is-closed)
 - [B12. No human-facing mailbox on `breren.com` yet (e.g. `support@`/`hello@`)](#b12-no-human-facing-mailbox-on-brerencom-yet-eg-supporthello)
-- [B13. Admin/mod accounts still lack per-account roles](#b13-adminmod-accounts-still-lack-per-account-roles)
 - [B14. No payment integration wired to the app stores — and mobile can't just reuse a web payment flow](#b14-no-payment-integration-wired-to-the-app-stores--and-mobile-cant-just-reuse-a-web-payment-flow)
 - [B15. Diary: list every rewatch as its own entry](#b15-diary-list-every-rewatch-as-its-own-entry)
 - [B16. Community average for season grades](#b16-community-average-for-season-grades)
@@ -52,6 +51,7 @@ Next backlog number: 35
 - [B31. Add the file header to the 48 files that lack it](#b31-add-the-file-header-to-the-48-files-that-lack-it)
 - [B32. Rename the default branch from `master` to `main` on every forge](#b32-rename-the-default-branch-from-master-to-main-on-every-forge)
 - [B33. Rewrite the README as a landing page](#b33-rewrite-the-readme-as-a-landing-page)
+- [B35. Warn when the server's own address is listed as a Turnstile dev hostname](#b35-warn-when-the-servers-own-address-is-listed-as-a-turnstile-dev-hostname)
 
 ## Using the backlog
 
@@ -530,63 +530,6 @@ more than just Renar. Needs, once the subdomain/DNS work above lands:
 domain verification TXT, MX records (`mx.zoho.com`/`mx2`/`mx3`), SPF/DKIM
 TXT records, optionally DMARC. Not started — same Cloudflare DNS zone as
 the Turnstile item above, so batch with that when DNS is next touched.
-
-## B13. Admin/mod accounts still lack per-account roles
-
-**Added:** 2026-11-14 · Area: Infrastructure
-**Why:** the admin panel has one shared login: `ADMIN_USERNAME`,
-`ADMIN_PASSWORD_HASH` (after `TODO.md` item 29) and `ADMIN_TOTP_SECRET` in `.env`,
-checked in `users/admin_session.py`. That works for one operator but can't
-give a second person access, take it away from one person, or tell from the
-logs who did what. `models.User` has no role field (only `banned`,
-`verified`, `is_premium`), so a moderator can't be an ordinary renar account
-with extra rights. clavren keeps admins in their own table because it has no
-user accounts; renar already has `users` with bcrypt password hashes, so
-admin should be a role on those accounts instead of a second account system.
-**Goal:** an admin or moderator signs in to the panel with their own renar
-account plus their own authenticator code; the operator grants and removes
-the role per account; `.env` holds no admin login at all.
-
-### Notes
-
-**Behaviour**
-
-- Roles: `admin` (everything the panel does today) and `moderator`
-  (Moderation and Users pages only, no Settings, Update, Invites, Premium,
-  App Releases). An account has at most one role; no role = ordinary user.
-- An account with a role can't use the panel until it has enrolled TOTP;
-  enrolment shows the QR once and ten single-use recovery codes.
-- TOTP secrets are stored encrypted (AES-256-GCM) with a key file outside
-  the database (`ADMIN_KEY_FILE`, default `<data dir>/admin.key`, mode
-  `0600`, created on first boot), so a database dump alone can't produce
-  codes. Recovery codes are stored hashed.
-- Sign-in uses the account's existing password (bcrypt, `users/auth.py`)
-  plus the code; strikes, backoff and Exempt IPs behave as today.
-- `uv run admin-grant <username> admin|moderator` and
-  `uv run admin-revoke <username>` from the server shell; revoking ends that
-  account's admin sessions at once. The panel can't remove the last `admin`.
-- Session cookies carry the account id; the fingerprint includes the role
-  and TOTP secret version, so a revoke or re-enrolment signs that account out.
-- The admin audit log (where one exists) records the account, not "admin".
-- `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` and `ADMIN_TOTP_SECRET` are
-  removed; a migration-time CLI step grants `admin` to the operator's
-  account first, and boot refuses those three variables if still set.
-  `ADMIN_API_TOKEN` stays for scripts.
-
-**Out of scope**
-
-- A UI for granting roles (CLI only at first).
-- Finer permissions than the two roles.
-- Changing how app users sign in.
-
-**Implementation**
-
-Split into items before building (it's more than one sitting): (a) schema
-and key file, (b) sign-in and sessions on accounts, (c) TOTP enrolment and
-recovery codes, (d) moderator restrictions per page, (e) removing the `.env`
-login. Each needs its own Implementation, Tests and Docs per the template;
-`role` lives in its own table keyed by `user_id` if that keeps the schema
-BCNF (run `tests/test_normalization.py`).
 
 ## B14. No payment integration wired to the app stores — and mobile can't just reuse a web payment flow
 
@@ -1164,3 +1107,18 @@ below and in `docs/`.
   `ENABLE_DOCS=true`).
 - Copy `breren-logo.svg` unchanged from the `breren` repo's
   `public/icons/` into the repo's own assets.
+
+## B35. Warn when the server's own address is listed as a Turnstile dev hostname
+
+**Added:** 2026-11-24 · Area: Admin, registration
+**Why:** nobody could register on prod: the admin setting "Turnstile dev hostnames" listed `api.renar.app`, so the
+register screen got the dev widget's key, which Cloudflare refuses on that domain (error 110200, "Unable to connect
+to website"). It was found by chance on 2026-11-24 and the entry was removed. Nothing in the panel or the logs
+showed it.
+**Goal:** the panel says so when an entry would give the address the panel itself is opened on the dev key.
+
+### Notes
+- `routers/admin/settings.py` (`turnstile_dev_hostnames`, about line 661), `config.py` `turnstile_site_key_for`.
+- A warning, not a refusal: the dev server lists its own address on purpose. Compare with the request's host, and
+  warn only when both key pairs are set.
+- An uptime check on `/auth/registration-status` can't see it; only the widget in a browser can.

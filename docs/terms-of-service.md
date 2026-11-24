@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/08/20 00:00:00.000000 )
-[//]: # (+ Revised: 	2026/11/23 21:05:51.483507 )
+[//]: # (+ Revised: 	2026/11/24 08:23:37.844830 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Terms of Service — Renar
@@ -11,7 +11,7 @@ page is `renar-frontend/landing/terms/index.html` and must be updated in
 the same change. Reviewed on 21–22 November 2026 in a lawyer-role review,
 which the owner accepted as the legal review.
 
-_Last updated: 22 November 2026_
+_Last updated: 23 November 2026_
 
 This document is also available in Spanish. Both versions have the same value; if they differ, the one more favourable to you applies.
 

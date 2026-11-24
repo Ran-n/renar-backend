@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/11/22 01:35:03.615756 )
-[//]: # (+ Revised: 	2026/11/23 21:05:51.580042 )
+[//]: # (+ Revised: 	2026/11/24 08:23:37.928428 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Política de privacidad — Renar
@@ -11,7 +11,7 @@ página es `renar-frontend/landing/es/privacy/index.html` y debe actualizarse en
 el mismo cambio. Revisado los días 21 y 22 de noviembre de 2026 en una revisión
 con perfil de abogado, que el titular aceptó como revisión jurídica.
 
-_Última actualización: 22 de noviembre de 2026_
+_Última actualización: 23 de noviembre de 2026_
 
 Ambas versiones lingüísticas de este documento tienen el mismo valor; si difieren, se aplica la más favorable para ti.
 

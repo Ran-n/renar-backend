@@ -1,7 +1,7 @@
 [//]: # ( ---------------------------------------------------------------------- )
 [//]: # (+ Authors: 	Ran# <ran.hash@proton.me> )
 [//]: # (+ Created: 	2026/11/22 01:35:03.008587 )
-[//]: # (+ Revised: 	2026/11/23 21:05:51.669860 )
+[//]: # (+ Revised: 	2026/11/24 08:23:38.019411 )
 [//]: # ( ---------------------------------------------------------------------- )
 
 # Términos del servicio — Renar
@@ -11,7 +11,7 @@ página es `renar-frontend/landing/es/terms/index.html` y debe actualizarse en
 el mismo cambio. Revisado los días 21 y 22 de noviembre de 2026 en una revisión
 con perfil de abogado, que el titular aceptó como revisión jurídica.
 
-_Última actualización: 22 de noviembre de 2026_
+_Última actualización: 23 de noviembre de 2026_
 
 Ambas versiones lingüísticas de este documento tienen el mismo valor; si difieren, se aplica la más favorable para ti.
 
